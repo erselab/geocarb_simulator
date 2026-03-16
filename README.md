@@ -15,7 +15,9 @@ transfer or atmospheric inversion model.
 | **Slit geometry** | All 500 pixels along a 3000 km slit in < 0.5 ms |
 | **ScanBlock** | Pre-computed 2-D (N-S × E-W) geometry arrays ready for model ingestion |
 | **Per-column solar angles** | Sun position advanced by integration time at each E-W step |
+| **Day scheduling** | Chain multiple scan targets into a full-day observing schedule |
 | **Ray tracing** | Satellite→ground ray intersections with spherical atmospheric shells |
+| **Land/water fraction** | Compute per-pixel land fraction using Natural Earth coastlines |
 | **Coarsening** | Bin fine (6 km) pixels onto any regular lat/lon grid (e.g. 0.5°×0.5°) |
 | **Plotting** | Built-in map visualization with optional Cartopy basemap |
 | **Save / Load** | Round-trip persistence via compressed `.npz` |
@@ -77,18 +79,31 @@ block['corner_lats']    # (500, 401, 4)  footprint polygon corners
 # 4 — Coarsen to 0.5° × 0.5° for a CTM
 coarse = block.coarsen(dlat_deg=0.5, dlon_deg=0.5)
 
-# 5 — Plot
+# 5 — Build a full-day observing schedule
+from geosat_geometry import ScanTarget, build_day_schedule
+targets = [
+    ScanTarget(30.0, -120.0, -95.0, label='West'),
+    ScanTarget(30.0, -95.0, -75.0, label='Central'),
+    ScanTarget(30.0, -75.0, -60.0, label='East'),
+]
+day_blocks = build_day_schedule(sat, datetime(2020, 7, 1, 12, 0), targets)
+
+# 6 — Add land/water fraction to a ScanBlock
+from geosat_geometry import add_land_fraction
+block_with_land = add_land_fraction(block)
+
+# 7 — Plot
 from geosat_geometry import plot_scan_blocks
 fig, ax = plot_scan_blocks(block, field='vzas')
 
-# 6 — Ray paths through atmosphere
+# 8 — Ray paths through atmosphere
 alts = np.arange(0, 80, 1.0)   # 0–79 km shells
 rays = sat.compute_ray_paths_vectorized(
     block['lats'].ravel(), block['lons'].ravel(), alts)
 # rays['intercept_pts']  shape (N_pixels, 80, 3)  ECEF [km]
 # rays['slant_lengths']  shape (N_pixels, 79)      km per layer
 
-# 7 — Save / load
+# 9 — Save / load
 block.save('west_block.npz')
 block2 = ScanBlock.load('west_block.npz')
 ```
@@ -113,6 +128,14 @@ LongSlitGeoSatellite(
 )
 ```
 
+#### Dataclasses
+
+| Name | Description |
+|---|---|
+| `ObservationGeometry` | Per-pixel geometry for a single integration (lat/lon, angles, vectors) |
+| `RayPath` | Atmospheric ray intercept points for a single ground pixel |
+| `ScanTarget` | Scan region definition for `build_day_schedule()` |
+
 Key attributes:
 
 | Attribute | Description |
@@ -130,6 +153,9 @@ Key methods:
 | `compute_ray_paths_vectorized(lats, lons, alts)` | `dict` | Batch ray tracing |
 | `ray_path(lat, lon, alts)` | `RayPath` | Single pixel ray path |
 | `simulate_scan(lat, lon0, lon1, t0_utc)` | `list[ObservationGeometry]` | Legacy per-pixel list |
+| `build_day_schedule(sat, t_start, targets)` | `list[ScanBlock]` | Sequence of blocks for a full day |
+| `add_land_fraction(block)` | `ScanBlock` | Adds per-pixel land fraction field |
+| `geocarb_demo()` | `dict` | Demo creating blocks, coarsening, and plotting |
 
 ---
 
@@ -201,6 +227,19 @@ Aggregation rules:
 
 Grid edges are aligned to global multiples of `dlat/dlon` so adjacent
 blocks at the same resolution share a consistent grid.
+
+---
+
+#### `build_day_schedule(satellite, t_start, targets, t_end=None, repeat=True)`
+
+Build a chronological sequence of `ScanBlock` objects for a full day of scans.
+Each scan block advances the UTC time by `integration_time_s` per column and
+can be labelled via `ScanTarget.label`.
+
+#### `add_land_fraction(block, mask_resolution_deg=0.1, natural_earth_scale='110m')`
+
+Compute per-pixel land fraction using Natural Earth coastline polygons. Adds a
+`land_fraction` field to the returned `ScanBlock` (0.0 = water, 1.0 = land).
 
 ---
 

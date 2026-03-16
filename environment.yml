@@ -1,0 +1,11 @@
+name: geosat_geometry
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy>=1.21
+  - matplotlib>=3.5
+  - cartopy>=0.21  # optional (required for map projections / land fraction)
+  - pip
+  - pip:
+      - "# Add any pure-Python extras here (none currently)"
