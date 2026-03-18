@@ -5,7 +5,8 @@ dependencies:
   - python=3.11
   - numpy>=1.21
   - matplotlib>=3.5
-  - cartopy>=0.21  # optional (required for map projections / land fraction)
+  - scipy>=1.7       # optional (required for curvilinear/2-D grid support in model_sampler)
+  - cartopy>=0.21    # optional (required for map projections / land fraction)
+  - jupyterlab       # required to run simulate_scan.ipynb
+  - netCDF4>=1.6    # required for scan_sampler.py (reading model files, writing output)
   - pip
-  - pip:
-      - "# Add any pure-Python extras here (none currently)"

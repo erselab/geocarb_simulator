@@ -1363,10 +1363,10 @@ def plot_scan_blocks(
     all_lons = np.concatenate(all_lons_list)
     all_lats = np.concatenate(all_lats_list)
     pad_lon, pad_lat = 4.0, 3.0
-    x0 = all_lons.min() - pad_lon
-    x1 = all_lons.max() + pad_lon
-    y0 = all_lats.min() - pad_lat
-    y1 = all_lats.max() + pad_lat
+    x0 = np.nanmin(all_lons) - pad_lon
+    x1 = np.nanmax(all_lons) + pad_lon
+    y0 = np.nanmin(all_lats) - pad_lat
+    y1 = np.nanmax(all_lats) + pad_lat
 
     if _is_geoaxes:
         # GeoAxes (cartopy) — use geographic extent / gridlines
@@ -1589,13 +1589,13 @@ def coarsen_scan_block(block:     ScanBlock,
     corner_lats_c[mask] = np.nan
     corner_lons_c[mask] = np.nan
 
-    # lats/lons — regular grid centers; NaN for empty cells
-    lats_2d = np.where(mask, np.nan,
-                        np.broadcast_to(lat_centers[:, np.newaxis],
-                                        (n_rows_c, n_cols_c)).copy())
-    lons_2d = np.where(mask, np.nan,
-                        np.broadcast_to(lon_centers[np.newaxis, :],
-                                        (n_rows_c, n_cols_c)).copy())
+    # lats/lons — regular grid centres for every cell, including empty ones.
+    # Empty cells are identified by pixel_counts == 0, not by NaN coordinates.
+    # Keeping coordinates defined lets pcolormesh and other tools work correctly.
+    lats_2d = np.broadcast_to(lat_centers[:, np.newaxis],
+                               (n_rows_c, n_cols_c)).copy()
+    lons_2d = np.broadcast_to(lon_centers[np.newaxis, :],
+                               (n_rows_c, n_cols_c)).copy()
 
     # ---- assemble output ----------------------------------------------------
     data = {
