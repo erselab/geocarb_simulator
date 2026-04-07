@@ -73,7 +73,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -95,6 +95,7 @@ __all__ = [
     "plot_scan_blocks",
     "coarsen_scan_block",
     "add_land_fraction",
+    "chain_scan_blocks",
     "build_day_schedule",
     "geodetic_to_ecef",
     "ecef_to_geodetic",
@@ -228,7 +229,8 @@ class ScanBlock:
         'airmass_geometric', 'relative_azimuth',
     )
     # 3D vector/corner fields
-    _FIELDS_3D = ('sat_look_vecs', 'gnd_ecef', 'corner_lats', 'corner_lons')
+    _FIELDS_3D = ('sat_look_vecs', 'gnd_ecef', 'corner_lats', 'corner_lons',
+                  'up_vecs', 'east_vecs', 'north_vecs')
 
     def __init__(self, data: dict, meta: dict) -> None:
         object.__setattr__(self, '_data', data)
@@ -339,6 +341,195 @@ class ScanBlock:
                 meta[name] = arr
         return cls(data, meta)
 
+    # ---- time stamping -------------------------------------------------------
+
+    def stamp(self, t0_utc: datetime) -> 'ScanBlock':
+        """
+        Apply a UTC start time to a (possibly time-less) template, computing
+        solar angles per scan column.  Only szas, saas, airmass_geometric, and
+        relative_azimuth are recomputed; all spatial geometry is reused.
+
+        The scan direction stored in the template's metadata controls which
+        column receives t0_utc: for 'W2E' it is the westernmost column (col 0);
+        for 'E2W' it is the easternmost column (col n_cols-1).  Each
+        subsequent slit in the sequence advances by integration_time_s.
+
+        Parameters
+        ----------
+        t0_utc : datetime
+            UTC time of the *first slit in the scan sequence* (not necessarily
+            the westernmost column — depends on scan_direction).
+
+        Returns
+        -------
+        ScanBlock
+            New ScanBlock with the same spatial geometry but updated solar
+            fields and timing metadata.  The original template is unchanged.
+        """
+        n_rows, n_cols = self.shape
+        N = n_rows * n_cols
+
+        # Per-column times: col_times[j] = UTC when geographic column j is observed.
+        dt_s           = self._meta['integration_time_s']
+        scan_direction = self._meta.get('scan_direction', 'W2E')
+        if scan_direction == 'W2E':
+            col_times = [t0_utc + timedelta(seconds=j * dt_s)
+                         for j in range(n_cols)]
+        else:  # E2W
+            col_times = [t0_utc + timedelta(seconds=(n_cols - 1 - j) * dt_s)
+                         for j in range(n_cols)]
+        sun_vecs  = np.array([solar_position_ecef(dt) for dt in col_times])  # (n_cols, 3)
+
+        # Broadcast: pixel k lives in column k % n_cols (C / row-major order)
+        col_idx       = np.tile(np.arange(n_cols), n_rows)   # (N,)
+        sun_per_pixel = sun_vecs[col_idx]                     # (N, 3)
+
+        # ENU basis — use cached vectors if available, else recompute
+        if 'up_vecs' in self._data:
+            up_vecs    = self._data['up_vecs'].reshape(N, 3)
+            east_vecs  = self._data['east_vecs'].reshape(N, 3)
+            north_vecs = self._data['north_vecs'].reshape(N, 3)
+        else:
+            lats_f = self._data['lats'].ravel()
+            lons_f = self._data['lons'].ravel()
+            lat_r  = np.deg2rad(lats_f)
+            lon_r  = np.deg2rad(lons_f)
+            clat, slat = np.cos(lat_r), np.sin(lat_r)
+            clon, slon = np.cos(lon_r), np.sin(lon_r)
+            up_vecs    = np.stack([ clat * clon,  clat * slon,  slat               ], axis=1)
+            north_vecs = np.stack([-slat * clon, -slat * slon,  clat               ], axis=1)
+            east_vecs  = np.stack([-slon,          clon,         np.zeros_like(slon)], axis=1)
+
+        # Solar zenith and azimuth
+        cos_sza = np.einsum('ij,ij->i', up_vecs, sun_per_pixel)
+        szas_f  = np.degrees(np.arccos(np.clip(cos_sza, -1.0, 1.0)))
+        sun_h   = sun_per_pixel - cos_sza[:, np.newaxis] * up_vecs
+        saas_f  = (np.degrees(np.arctan2(
+                      np.einsum('ij,ij->i', sun_h, east_vecs),
+                      np.einsum('ij,ij->i', sun_h, north_vecs))) % 360.0)
+
+        # Recompute airmass and relative azimuth
+        vzas_f = self._data['vzas'].ravel()
+        vaas_f = self._data['vaas'].ravel()
+        with np.errstate(divide='ignore', invalid='ignore'):
+            am = (np.where(vzas_f < 89.9, 1.0 / np.cos(np.deg2rad(vzas_f)), np.inf)
+                  + np.where(szas_f < 89.9, 1.0 / np.cos(np.deg2rad(szas_f)), np.inf))
+        rel_az = np.abs(vaas_f - saas_f)
+        rel_az = np.where(rel_az > 180.0, 360.0 - rel_az, rel_az)
+
+        def r2(a): return a.reshape(n_rows, n_cols)
+
+        new_data = dict(self._data)
+        new_data.update({
+            'szas':              r2(szas_f),
+            'saas':              r2(saas_f),
+            'airmass_geometric': r2(am),
+            'relative_azimuth':  r2(rel_az),
+        })
+        new_meta = dict(self._meta)
+        new_meta.update({
+            't_start_utc':    t0_utc,
+            't_end_utc':      t0_utc + timedelta(seconds=(n_cols - 1) * dt_s),
+            'col_times':      col_times,
+            'scan_direction': scan_direction,
+            'scan_duration_s': float((n_cols - 1) * dt_s),
+        })
+        return ScanBlock(new_data, new_meta)
+
+    # ---- time-ordered sequence -----------------------------------------------
+
+    def to_observation_sequence(self) -> dict:
+        """
+        Collapse all per-pixel data into 1D (or 2D) arrays ordered by
+        observation time, forming a flat observation timeline.
+
+        Columns are visited in the order the mirror actually scanned them
+        (controlled by scan_direction).  Within each column all slit rows
+        are output south-to-north (row 0 first), since all pixels in one
+        slit integration are simultaneous.
+
+        Returns
+        -------
+        dict with the following keys (N = n_rows × n_cols):
+
+        Indexing
+          scan_step   (N,) int   — position in the scan sequence (0 = first
+                                   column observed); all rows of that column
+                                   share the same scan_step value.
+          scan_col    (N,) int   — geographic column index (0 = westernmost).
+          slit_row    (N,) int   — slit-row index (0 = southernmost).
+          utc_times   (N,) list  — UTC datetime per pixel, or None if the
+                                   block was built without a start time.
+
+        Scalar geometry  (N,) float
+          lats, lons, vzas, vaas, szas, saas,
+          airmass_geometric, relative_azimuth, valid_mask
+
+        Vector geometry  (N, 3) or (N, 4) float
+          sat_look_vecs  (N, 3)
+          gnd_ecef       (N, 3)
+          corner_lats    (N, 4)
+          corner_lons    (N, 4)
+
+        Optional (present only in coarsened blocks)
+          pixel_counts  (N,) int
+        """
+        n_rows, n_cols = self.shape
+        N = n_rows * n_cols
+        scan_direction = self._meta.get('scan_direction', 'W2E')
+
+        # Column indices in observation order
+        if scan_direction == 'W2E':
+            col_order = np.arange(n_cols)
+        else:
+            col_order = np.arange(n_cols - 1, -1, -1)
+
+        # Flat indices into (n_rows, n_cols) arrays in time order.
+        # For scan_step s, geographic column = col_order[s], rows 0..n_rows-1.
+        rows      = np.arange(n_rows)
+        # shape (n_cols, n_rows) → ravel → (N,)
+        flat_idx  = (rows[np.newaxis, :] * n_cols
+                     + col_order[:, np.newaxis]).ravel()
+
+        # Indexing arrays for output metadata
+        # scan_step repeats each step n_rows times; slit_row tiles 0..n_rows-1
+        scan_step = np.repeat(np.arange(n_cols), n_rows)   # (N,)
+        scan_col  = col_order[scan_step]                    # geographic col index
+        slit_row  = np.tile(rows, n_cols)                   # (N,)
+
+        # UTC times: col_times[j] is the time for geographic column j
+        col_times = self._meta.get('col_times')
+        if col_times is not None:
+            utc_times = [col_times[j] for j in scan_col]
+        else:
+            utc_times = None
+
+        out: dict = {
+            'scan_step':  scan_step,
+            'scan_col':   scan_col,
+            'slit_row':   slit_row,
+            'utc_times':  utc_times,
+        }
+
+        # Scalar fields — (n_rows, n_cols) → ravel then reindex
+        _scalar = list(self._FIELDS_2D) + ['valid_mask']
+        if 'pixel_counts' in self._data:
+            _scalar.append('pixel_counts')
+        for key in _scalar:
+            out[key] = self._data[key].ravel()[flat_idx]
+
+        # Vector/corner fields — (n_rows, n_cols, K) → reshape then reindex
+        # Exclude ENU basis vectors; they are internal to stamp().
+        _exclude = {'up_vecs', 'east_vecs', 'north_vecs'}
+        for key in self._FIELDS_3D:
+            if key in _exclude or key not in self._data:
+                continue
+            arr = self._data[key]          # (n_rows, n_cols, K)
+            K   = arr.shape[2]
+            out[key] = arr.reshape(N, K)[flat_idx]
+
+        return out
+
     # ---- coarsen -------------------------------------------------------------
 
     def coarsen(self,
@@ -368,13 +559,14 @@ class ScanBlock:
         m    = self._meta
         t    = m.get('t_start_utc')
         tstr = f", t={t.strftime('%Y-%m-%dT%H:%MZ')}" if isinstance(t, datetime) else ""
+        dstr = f", dir={m['scan_direction']}" if 'scan_direction' in m else ""
         cstr = (f" [coarsened {m['dlat_deg']}°×{m['dlon_deg']}°]"
                 if 'dlat_deg' in m else "")
         return (
             f"ScanBlock({m['n_rows']}×{m['n_cols']} px | "
             f"lat={m['slit_center_lat']:.1f}° | "
             f"lon=[{m['scan_start_lon']:.1f}°,{m['scan_end_lon']:.1f}°] | "
-            f"dur={m['scan_duration_s']/60:.1f} min{tstr}{cstr})"
+            f"dur={m['scan_duration_s']/60:.1f} min{tstr}{dstr}{cstr})"
         )
 
 
@@ -807,6 +999,7 @@ class LongSlitGeoSatellite:
                          scan_end_lon:    float,
                          t0_utc:          Optional[datetime] = None,
                          n_cols:          Optional[int] = None,
+                         scan_direction:  str = 'W2E',
                          ) -> ScanBlock:
         """
         Build a pre-computed ScanBlock for a rectangular scan region.
@@ -815,6 +1008,10 @@ class LongSlitGeoSatellite:
         scan_start_lon to scan_end_lon.  Solar angles are computed per-column
         using the correct UTC time for each integration step.
 
+        Spatial arrays always have col 0 = westernmost regardless of
+        scan_direction.  The direction only controls which column is observed
+        first and therefore which UTC timestamp each column receives.
+
         Parameters
         ----------
         slit_center_lat : float
@@ -822,18 +1019,24 @@ class LongSlitGeoSatellite:
         scan_start_lon, scan_end_lon : float
             Longitude extent [degrees East].  Start is the west edge.
         t0_utc : datetime or None
-            UTC time at the first scan column.  Each subsequent column
-            advances by integration_time_s.  If None, solar angles are NaN.
+            UTC time of the *first slit in the scan sequence*.  Each
+            subsequent slit advances by integration_time_s.  If None, solar
+            angles are NaN.
         n_cols : int or None
             Number of E-W scan steps.  If None, derived from the ground
             distance at slit_center_lat divided by pixel_size_ew_km.
+        scan_direction : {'W2E', 'E2W'}
+            Scanning order.  'W2E' — mirror steps west-to-east, so t0 is
+            assigned to the westernmost column; 'E2W' — mirror steps
+            east-to-west, so t0 is assigned to the easternmost column.
+            Spatial array layout (col 0 = west) is unchanged by this flag.
 
         Returns
         -------
         ScanBlock
             All 2D arrays have shape (n_rows, n_cols) with:
               axis 0 = N-S slit pixels (row 0 = southernmost)
-              axis 1 = E-W scan steps  (col 0 = scan_start_lon)
+              axis 1 = E-W scan steps  (col 0 = scan_start_lon / westernmost)
         """
         # ---- column longitudes ----
         if n_cols is None:
@@ -882,11 +1085,20 @@ class LongSlitGeoSatellite:
         lons_f = lons_2d.ravel()
 
         # ---- solar angles: per-column time, broadcast across rows ----
+        # col_times[j] is the UTC time when geographic column j is observed.
+        # W2E: col 0 (west) is observed first; E2W: col n-1 (east) is first.
+        if scan_direction not in ('W2E', 'E2W'):
+            raise ValueError(f"scan_direction must be 'W2E' or 'E2W', got {scan_direction!r}")
         sun_per_pixel = None
         col_times     = None
         if t0_utc is not None:
-            col_times  = [t0_utc + timedelta(seconds=j * self.integration_time_s)
-                          for j in range(n_cols)]
+            dt_s = self.integration_time_s
+            if scan_direction == 'W2E':
+                col_times = [t0_utc + timedelta(seconds=j * dt_s)
+                             for j in range(n_cols)]
+            else:  # E2W: easternmost column (j = n_cols-1) is observed first
+                col_times = [t0_utc + timedelta(seconds=(n_cols - 1 - j) * dt_s)
+                             for j in range(n_cols)]
             sun_vecs   = np.array([solar_position_ecef(dt)
                                    for dt in col_times])                # (n_cols, 3)
             # For C-order ravel of (n_rows, n_cols): col of pixel k = k % n_cols
@@ -916,7 +1128,9 @@ class LongSlitGeoSatellite:
         def r3(a, k): return a.reshape(n_rows, n_cols, k)
 
         scan_duration_s = (n_cols - 1) * self.integration_time_s
-        t_end_utc       = col_times[-1] if col_times else None
+        # t_start/t_end are always the chronological first and last times.
+        t_end_utc = (t0_utc + timedelta(seconds=scan_duration_s)
+                     if t0_utc is not None else None)
 
         data = {
             'lats':              r2(lats_f),
@@ -932,6 +1146,11 @@ class LongSlitGeoSatellite:
             'gnd_ecef':          r3(g['gnd_ecef'],        3),
             'corner_lats':       r3(corner_lats_f,        4),
             'corner_lons':       r3(corner_lons_f,        4),
+            # ENU basis vectors — stored so stamp() can recompute solar angles
+            # without revisiting lats/lons.  Shape (n_rows, n_cols, 3).
+            'up_vecs':           r3(g['up_vecs'],         3),
+            'east_vecs':         r3(g['east_vecs'],       3),
+            'north_vecs':        r3(g['north_vecs'],      3),
         }
         meta = {
             'sat_lon_deg':        self.sat_lon_deg,
@@ -940,6 +1159,7 @@ class LongSlitGeoSatellite:
             'scan_start_lon':     float(scan_start_lon),
             'scan_end_lon':       float(scan_end_lon),
             'scan_lons':          scan_lons,
+            'scan_direction':     scan_direction,
             'integration_time_s': self.integration_time_s,
             'scan_duration_s':    float(scan_duration_s),
             't_start_utc':        t0_utc,
@@ -949,6 +1169,41 @@ class LongSlitGeoSatellite:
             'n_cols':             n_cols,
         }
         return ScanBlock(data, meta)
+
+    def build_scan_template(self,
+                             slit_center_lat: float,
+                             scan_start_lon:  float,
+                             scan_end_lon:    float,
+                             n_cols:          Optional[int] = None,
+                             scan_direction:  str = 'W2E',
+                             ) -> ScanBlock:
+        """
+        Build a time-independent scan geometry template.
+
+        Identical to build_scan_block(..., t0_utc=None) but makes the intent
+        explicit: the returned ScanBlock has no solar angles (szas/saas are NaN)
+        and carries no timing metadata.  Call template.stamp(t0_utc) later to
+        produce a fully timed ScanBlock without recomputing the spatial geometry.
+
+        Parameters
+        ----------
+        slit_center_lat : float
+            Nominal latitude of the slit centre [degrees].
+        scan_start_lon, scan_end_lon : float
+            Longitude extent [degrees East].
+        n_cols : int or None
+            Number of E-W scan steps.  If None, derived from ground distance.
+        scan_direction : {'W2E', 'E2W'}
+            Scanning order, stored in the template so stamp() applies the
+            correct time-to-column mapping without a separate argument.
+
+        Returns
+        -------
+        ScanBlock  (szas / saas = NaN; use .stamp(t0_utc) to add solar angles)
+        """
+        return self.build_scan_block(slit_center_lat, scan_start_lon,
+                                     scan_end_lon, t0_utc=None, n_cols=n_cols,
+                                     scan_direction=scan_direction)
 
     # ------------------------------------------------------------------
     # Ray-path intercept points (vectorised over pixels and shells)
@@ -1632,6 +1887,74 @@ def coarsen_scan_block(block:     ScanBlock,
         'coarsened_from_shape':  np.array(block.shape),
     }
     return ScanBlock(data, meta)
+
+
+# ---------------------------------------------------------------------------
+# Scan-template chaining utility
+# ---------------------------------------------------------------------------
+
+def chain_scan_blocks(
+        templates:  Union[list, dict],
+        t0_utc:     datetime,
+        order:      Optional[list] = None,
+) -> List[ScanBlock]:
+    """
+    Stamp a sequence of pre-built scan geometry templates with consecutive
+    UTC times to form an observation timeline.
+
+    Spatial geometry (lats, lons, vzas, vaas, look vectors, corners) is
+    reused from each template; only solar angles (szas, saas,
+    airmass_geometric, relative_azimuth) and timing metadata are computed.
+    Each block's start time immediately follows the last column of the
+    previous block (one integration step later).
+
+    Parameters
+    ----------
+    templates : list[ScanBlock] or dict[str, ScanBlock]
+        Pre-built templates (typically created with
+        ``sat.build_scan_template(...)``).  When a dict is provided, ``order``
+        selects and sequences entries by key.
+    t0_utc : datetime
+        UTC time for the first column of the first block.
+    order : list or None
+        Sequence of indices (if templates is a list) or keys (if templates is
+        a dict) defining the scan order.  If None, the natural order of
+        ``templates`` is used.
+
+    Returns
+    -------
+    list[ScanBlock]
+        Timestamped ScanBlocks in observation order.
+
+    Examples
+    --------
+    >>> templates = {
+    ...     'West':    sat.build_scan_template(30.0, -120.0,  -95.0),
+    ...     'Central': sat.build_scan_template(30.0,  -95.0,  -75.0),
+    ...     'East':    sat.build_scan_template(30.0,  -75.0,  -60.0),
+    ... }
+    >>> # Scan East → Central → West then repeat
+    >>> blocks = chain_scan_blocks(
+    ...     templates, t0_utc=datetime(2020, 7, 1, 17, 30),
+    ...     order=['East', 'Central', 'West', 'East', 'Central', 'West'],
+    ... )
+    """
+    if order is None:
+        if isinstance(templates, dict):
+            order = list(templates.keys())
+        else:
+            order = list(range(len(templates)))
+
+    result: List[ScanBlock] = []
+    current_t = t0_utc
+    for key in order:
+        tmpl = templates[key]
+        stamped = tmpl.stamp(current_t)
+        result.append(stamped)
+        # Advance by one full block width: n_cols integration steps
+        current_t += timedelta(seconds=tmpl._meta['n_cols']
+                               * tmpl._meta['integration_time_s'])
+    return result
 
 
 # ---------------------------------------------------------------------------
