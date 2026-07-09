@@ -696,3 +696,53 @@ where `q̄[k] = ½(q[k] + q[k+1])` is the layer-mean mole fraction and
 (NaN) are excluded from both numerator and denominator, so partially sampled
 columns (e.g. at the edge of a limited-area model domain) still yield a
 valid estimate.
+
+---
+
+## `geocarb_gert` — driving GERT from the scan simulator
+
+`geocarb_gert/` wires this simulator to the [GERT](../../gert) radiative-transfer
+and retrieval library, enabling **instrument-design OSSEs**: how do GSD, dwell
+time, spectral resolution and detector noise propagate into the posterior
+uncertainty on retrieved XCO₂?
+
+**Layering.**  GERT models what an instrument *is* (photon budget, detector
+noise, saturation, RT, retrieval).  This repo owns how GeoCarb *flies* — orbit,
+slit, scan schedule, per-pixel geometry, and the scene.  No RT or retrieval code
+lives here.  See `docs/STATUS_AND_ROADMAP.md` §3.7 in the gert repo.
+
+| Module | Role |
+|:--|:--|
+| `geocarb_gert.instrument` | the four GeoCarb bands (O2 A, CO2 weak, CO2 strong, CH4/CO) as a `gert.Instrument` |
+| `geocarb_gert.radiometry` | **mission-side** GSD/dwell → `gert.RadiometricNoise` |
+| `geocarb_gert.adapter`    | `ScanBlock` → per-pixel `gert.Geometry`; `gert.osse.Scene` |
+| `geocarb_gert.scene`      | standard-atmosphere `AtmosphericProfile` (model-driven scenes via `model_sampler`) |
+
+**GeoCarb stares.**  Integration time is set by the dwell schedule and is
+*independent of GSD* — unlike a LEO pushbroom, where `t_int = GSD/v_ground`.
+That is the GEO advantage, and it is why the GSD↔dwell coupling lives here and
+not in the library.
+
+### Design sweep
+
+```bash
+pip install -e /path/to/gert          # gert as a library
+PYTHONPATH=. python scripts/run_design_sweep.py --gert /path/to/gert
+```
+
+Sweeps a (GSD × dwell) grid.  Because `S_ret = (KᵀSy⁻¹K + Sa⁻¹)⁻¹` does not
+depend on the noise *realization*, varying GSD/dwell only rescales `Sy` — the
+Jacobian `K` is computed **once** for the whole grid.
+
+Two results worth knowing:
+
+- **σ(XCO₂) ∝ t_int^-0.5 in both the shot- and dark-limited regimes**, since
+  signal ∝ `t` while both noise terms ∝ `√t`.  The dwell slope is therefore a
+  clean −0.5 and is a poor discriminator of noise regime.
+- **σ(XCO₂) vs GSD runs between −1 (shot-limited) and −2 (dark/read-limited).**
+  At small GSD the dark current becomes a sizeable fraction of the shot noise,
+  steepening the slope.  So *the exponent is a property of the scene and dwell,
+  not of the instrument.*
+
+Saturated design points (well overflows within `t_int`) are reported and
+excluded from the fits — a long dwell at coarse GSD is a real design constraint.
