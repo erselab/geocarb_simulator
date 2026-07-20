@@ -25,6 +25,45 @@ _MW_RATIO = 0.018015 / 0.028964      # M_H2O / M_dry ≈ 0.622
 _WELL_MIXED = {"co2": 415e-6, "ch4": 1.90e-6, "n2o": 330e-9,
                "co": 100e-9, "o2": 0.2095}
 
+# ── Surface scenes ──────────────────────────────────────────────────────────
+# Representative Lambertian-equivalent surface albedo per GeoCarb band, keyed by
+# the ``SpectralWindow.label`` used in :mod:`geocarb_gert.instrument`.  The four
+# bands sit at roughly [0.76, 1.61, 2.06, 2.32] µm.
+#
+# These drive the band-to-band *signal* differences that a scalar SNR cannot
+# express: vegetation is bright in the NIR (just past the red edge) but darkens
+# sharply through the SWIR as leaf water absorbs; water is near-black beyond
+# 1 µm; desert is the bright, slowly-varying case.  Values are typical clear-sky
+# nadir reflectances, not a specific measured spectrum.
+_BAND_ALBEDO = {
+    #  band          desert  forest  grass   water
+    "O2_A":       {"desert": 0.30, "forest": 0.45, "grass": 0.42, "water": 0.04},
+    "CO2_weak":   {"desert": 0.45, "forest": 0.25, "grass": 0.30, "water": 0.02},
+    "CO2_strong": {"desert": 0.45, "forest": 0.12, "grass": 0.18, "water": 0.015},
+    "CH4_CO":     {"desert": 0.40, "forest": 0.08, "grass": 0.14, "water": 0.015},
+}
+
+SCENE_TYPES = ("desert", "forest", "grass", "water")
+
+
+def albedo_for(instrument, surface: str) -> np.ndarray:
+    """Per-band Lambertian albedo vector for a surface type, in window order.
+
+    Looks up each ``instrument.windows[i].label`` in :data:`_BAND_ALBEDO`, so it
+    stays correct when the instrument is built from a subset of bands (e.g. a
+    1.6 µm-only design variant).  Pass the result as ``albedo`` to
+    :func:`geocarb_gert.adapter.scene_from_profile`.
+    """
+    surface = str(surface)
+    if surface not in SCENE_TYPES:
+        raise ValueError(f"unknown surface {surface!r}; choose from {SCENE_TYPES}")
+    try:
+        return np.array([_BAND_ALBEDO[w.label][surface] for w in instrument.windows],
+                        dtype=float)
+    except KeyError as e:
+        raise KeyError(f"no albedo defined for band {e.args[0]!r}; "
+                       f"add it to geocarb_gert.scene._BAND_ALBEDO") from None
+
 
 def _std_temperature(z_km: np.ndarray) -> np.ndarray:
     """US Standard Atmosphere 1976 temperature [K] (troposphere → mesosphere)."""

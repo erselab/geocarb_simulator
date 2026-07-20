@@ -19,12 +19,12 @@ from .instrument import GEOCARB_BANDS, build_geocarb_instrument
 from .radiometry import (GEOCARB_REF, base_noise_model, model_for,
                          staring_sweep_models, etendue_factor_for_gsd)
 from .adapter import pixel_geometry, sample_geometries, gsd_km, scene_from_profile
-from .scene import reference_atmosphere
+from .scene import reference_atmosphere, albedo_for, SCENE_TYPES
 
 __all__ = [
     "GEOCARB_BANDS", "build_geocarb_instrument",
     "GEOCARB_REF", "base_noise_model", "model_for", "staring_sweep_models",
     "etendue_factor_for_gsd",
     "pixel_geometry", "sample_geometries", "gsd_km", "scene_from_profile",
-    "reference_atmosphere",
+    "reference_atmosphere", "albedo_for", "SCENE_TYPES",
 ]

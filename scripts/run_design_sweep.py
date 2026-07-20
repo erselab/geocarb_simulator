@@ -81,15 +81,21 @@ def main() -> int:
     dwells = [2.5, 10.0, 40.0]        # s
     models = staring_sweep_models(base, gsds, dwells)
 
-    spec = StateSpec(label="gas+albedo", gases=("co2", "ch4", "h2o"))
+    # CO2 (1.61/2.06 µm) + CH4 and CO (both from the 2.32 µm band).
+    spec = StateSpec(label="gas+albedo", gases=("co2", "ch4", "co", "h2o"))
     print(f"\n[sweep] {len(models)} design points, K computed once")
     pts = run_design_sweep(obs, atm, spec, models, solver_kind="ms", verbose=False)
 
     by = {p.label: p for p in pts}
-    print(f"\n  σ(XCO₂) [ppm]      " + "".join(f"{t:>10g} s" for t in dwells))
-    for g in gsds:
-        row_s = "".join(f"{by[f'{g:g} km / {t:g} s'].xco2_uncert_ppm:>12.3f}" for t in dwells)
-        print(f"    GSD {g:>5g} km   {row_s}")
+    # One σ(Xgas) table per retrieved gas (CO2 ppm; CH4/CO ppb).
+    UNIT = {"co2": "ppm", "ch4": "ppb", "co": "ppb"}
+    for gas in ("co2", "ch4", "co"):
+        print(f"\n  σ(X{gas.upper()}) [{UNIT[gas]}]" + " " * 6
+              + "".join(f"{t:>10g} s" for t in dwells))
+        for g in gsds:
+            row_s = "".join(
+                f"{by[f'{g:g} km / {t:g} s'].xgas_uncert[gas]:>12.3g}" for t in dwells)
+            print(f"    GSD {g:>5g} km   {row_s}")
     print(f"\n  DOF                " + "".join(f"{t:>10g} s" for t in dwells))
     for g in gsds:
         row_s = "".join(f"{by[f'{g:g} km / {t:g} s'].dof:>12.2f}" for t in dwells)
