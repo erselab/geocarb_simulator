@@ -161,6 +161,10 @@ compute `K` once per aerosol state where the linear diagnostic is used.
 3. **Along-slit scene builder**: `albedo(η)`, `gas_scale(η)`, `aerosol(η)` and the
    per-node hi-res radiances to blend (reuse `edge_scene`/`random_scene`).
 4. **(Later) SIF forward-model term + `sif` state element** in `gert`.
+5. **Discrete row-crossing truth generator** — per-*physical*-row dispersion/ILS
+   (not a single smooth per-band polynomial), so a nominal row's band can genuinely
+   cross into an adjacent physical row's independently-calibrated response. Motivated
+   by real-data non-convergence; see §9.
 
 ---
 
@@ -182,6 +186,10 @@ compute `K` once per aerosol state where the linear diagnostic is used.
 2. **η sampling**: dense nonlinear sweep (e.g. 32–64 η) + linear-vs-nonlinear validation
    at ~5 η; revisit after the Phase-1 comparison.
 3. **Dispersion order to carry into Phases 2–4** (from the Phase-1/order sub-study).
+4. **Row-crossing non-convergence mechanism** (§9): confirm whether real-data
+   non-convergence is a genuine forward-model discontinuity at physical row
+   boundaries, or a retrieval-software indexing issue, before building the discrete
+   row-crossing truth generator.
 
 ---
 
@@ -192,3 +200,57 @@ retrieval (order-2, loose prior)**, then for **Phase 1** run the **5-η
 linear-vs-nonlinear** comparison at two configs (smile-only, smile+keystone) **across
 dispersion order 1/2/3** — expecting order-2 to zero the uniform-scene bias, and
 confirming where the linear estimate diverges near the slit ends.
+
+---
+
+## 9. Real-data check: the row-crossing gap (2026-07-21)
+
+**Motivation.** The Phase-1 uniform-scene results (`compute_keystone_bias.ipynb`) are
+much more optimistic than retrievals against real GeoCarb upward-looking ground-test
+data, where the slit was filled with uniform light — nominally a Phase-1-like
+scenario. Two hypotheses were tested against this gap; a third remains open.
+
+**Tested — along-slit radiometric non-uniformity (small effect).** Residual slit-
+thickness brightness variation, diffuser non-uniformity, and radiometric cal
+artifacts all leave a small `albedo(η)` structure behind even a "uniform" scene.
+Unlike a spatially-constant brightness offset (degenerate with the retrieval's own
+per-band albedo state, absorbed trivially), a *gradient* is seen differently by
+different wavelengths within a band because keystone samples a true slit position
+`η_obj(f) = η / stretch(f)` that varies across the band — this is the actual
+mechanism behind the Phase-2 "irreducible keystone-heterogeneity bias" (§4), and it
+cannot be absorbed by dispersion retrieval regardless of prior looseness. Built via
+gert's native `SurfaceBasis`/`surface_basis=` mechanism (exact per-wavenumber albedo
+correction, not an approximation): `ρ(ν) = albedo[b]·(1 + amp·η_obj(ν))`. Result: even
+a generous 5% peak-to-peak residual gives only ~−0.25 ppm CO₂ bias at η=0.9, scaling
+linearly down to ~−0.005 ppm at 0.1%. **Real, correctly-scaling, but an order of
+magnitude too small to be the primary explanation** unless the real-data bias is
+itself in the sub-ppm range.
+
+**Open — row-crossing / discrete-detector-row discontinuities (leading candidate).**
+Real retrievals against ground-test data **failed to converge except in scenes where
+the dispersion trace did not cross into a new detector row.** Nothing built so far
+reproduces this, because every truth generator to date (`smile_disp_coeffs`, and the
+`SurfaceBasis` gradient above) constructs the per-row distortion as a single **smooth**
+polynomial fit (`np.polyfit`) covering the whole band for one nominal row — by
+construction it has no discontinuities, so a polynomial dispersion retrieval always
+fits it, and the bias/convergence results above are for a regime that may not be
+representative of the hardware.
+
+Using this plan's own row-crossing formula (§1, `rows crossed = η · keystone_px/2`)
+with the placeholder `keystone_px=20`: crossing exceeds 1 row by **η ≈ 0.1** and
+reaches **~9 rows by η=0.9** — i.e. nearly the entire η-sweep tested in Phase 1 so far
+is, physically, in a row-crossing regime the model doesn't represent. The mechanism:
+once the trace genuinely crosses into an adjacent *physical* detector row, part of the
+band's signal is governed by that row's own, independently-calibrated dispersion/ILS.
+If the true per-row calibration isn't a smooth function of row index (manufacturing
+variation, calibration noise), the true forward model has a **kink or discontinuity**
+partway through the band that no order of smooth dispersion polynomial can fit — a
+plausible explanation for outright non-convergence, as distinct from the smooth,
+always-converges behavior of every test run so far.
+
+**Status:** open question, not yet built. Needs (a) confirmation that the
+non-convergence is a genuine physical discontinuity (vs. a retrieval-software
+indexing/bookkeeping issue) and (b) a discrete row-crossing truth generator —
+i.e. actually building the multi-band, per-physical-row render already listed as
+unbuilt infrastructure in §5 item 1, rather than the smooth single-row approximation
+used everywhere above.
