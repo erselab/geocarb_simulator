@@ -2,8 +2,9 @@
 dispersion in the state, compare nonlinear vs linear bias for XCO2/XCH4/XCO."""
 import sys, time, numpy as np
 from pathlib import Path
-sys.path.insert(0, "/Users/scrowell/Library/CloudStorage/GoogleDrive-seanmrcrowell@gmail.com/My Drive/research/geocarb_simulator")
-GERT = Path("/Users/scrowell/Library/CloudStorage/GoogleDrive-seanmrcrowell@gmail.com/My Drive/gert")
+sys.path.insert(0, "/scratch/scrowel3_lab/geocarb_simulator")
+GERT = Path("/scratch/scrowel3_lab/gert")
+sys.path.insert(0, str(GERT))
 
 import geosat_geometry as gg
 from geocarb_gert import (build_geocarb_instrument, sample_geometries,
