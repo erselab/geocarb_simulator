@@ -351,10 +351,47 @@ pure amplitude scaling of the same curve shape, or an actual shape change across
 band (open decision §7 item 5) — would matter for how well a single per-band
 dispersion polynomial can represent it vs. needing a wavelength-dependent one.
 
+### 9g. What the residual-optimization result implies about model fidelity
+The EM27/SUN refinement (9d, §4.8.6) reduces FPA2's summed residual 4933.65 → 2128.96
+— a 57% reduction, not to zero — and this separates two different kinds of error
+rather than pointing to one:
+
+- **Under-sampling (fixable):** the initial laser-spot fit uses only 55 discrete
+  control points per FPA; between them "the fit is uncontrolled" (§4.8.5). Going to
+  an effectively ~1M-point reference (every pixel, via the EM27/SUN spectrum) closes
+  most of the gap — this part of the error is about calibration density, not the
+  model.
+- **Structural (not fixable by more data):** the residual that *survives*
+  refinement is not measurement noise — Method A's self-consistency check
+  (Table 6) shows the laser centroids themselves are precise to ~1/20 px, so the
+  input data is clean. What remains is a genuine mismatch between the 4th-degree
+  global polynomial's functional form and the true optical mapping. The degree
+  study (§4.8.5: N=3 underfits, N=5 "excursions dominate" between control points,
+  N=4 is only the best *balance*) is an explicit admission that **no single global
+  polynomial degree exactly reproduces the true distortion** — some real structure
+  is finer-grained than any reasonable global polynomial can follow without
+  overfitting elsewhere. The persistent post-refinement pattern (line-correlated
+  striping across nearly the whole slit, not just the edges) is consistent with the
+  same fine-scale, sub-polynomial structure the row-crossing/aliasing mechanism
+  (9b) already implicates — an independent line of evidence for the same
+  conclusion.
+
+**Implication for the simulator:** `gd_polynomials.py` is a strong, validated
+description of the *smooth, large-scale* component of the real distortion — good
+enough to replace the placeholders with real per-band amplitude, offset, and shape
+(9b/9c/9f). But the ground-test data's own residual says this smooth description is
+not the complete truth. A truth generator built purely on these coefficients should
+be read as a **lower bound** on real bias/residual, not an exact match — real
+hardware likely shows somewhat more than a smooth-polynomial-based truth predicts.
+FPA2's unusually large residual is a mix of both categories above: a known, fixable
+data gap (insufficient laser wavelength coverage, 9d) plus whatever baseline
+structural residual is present on all four FPAs.
+
 **Status:** row-crossing/aliasing (9b), the FPA2 calibration gap (9d), and the real
 smile amplitude (9f) are now the three best-supported, quantified corrections to the
 Phase-1 truth generator, with clocking (9c) explaining *where* row-crossing is worst
-per band. Round-trip self-consistency (9e) is ruled out. Remaining work: (a) the
+per band, and 9g setting expectations for how far a smooth-polynomial truth generator
+can go. Round-trip self-consistency (9e) is ruled out. Remaining work: (a) the
 discrete row-crossing truth generator itself (§5 item 5), now with concrete targets
 for both keystone (row-averaging via Fig. 38's real curve) and smile (real, per-band,
 wavelength-dependent amplitude via `gd_polynomials`) — no more placeholders needed
