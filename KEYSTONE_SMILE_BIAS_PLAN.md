@@ -23,7 +23,7 @@ The focal-plane model is scale-free in physical length: `slit_length_mm`,
 | ground sampling (GSD) | 3000 / 1024 ≈ **2.93 km/pixel** (set by the telescope fore-optics, *upstream* of this model) |
 | keystone | slit **image** grows **20 px** blue→red = **1.95 %** (`keystone_px=20`); modeled symmetric about slit centre → each end grows 10 px. **Magnitude confirmed by ground-test GD characterization** (up to ~10 rows crossed at the slit ends, §9) — but the real curve is **not symmetric about centre**; each FPA's zero-keystone "sweet row" is offset by clocking, worst for FPA2 (see §9) |
 | N/S PSF | **1.5 px** FWHM (`spatial_psf_fwhm_px=1.5`) ≈ 4.4 km ground blur. **Confirmed** — ground test reports the same ~1.5 px FWHM (§9) |
-| smile | "pronounced", parabolic opening toward long-wave — **per-band px still TBD** (ground-test GD report quantifies keystone in rows-crossed but not smile amplitude directly in px; would need the actual A0–A3 dispersion-polynomial coefficients, §9) |
+| smile | "pronounced", parabolic opening toward long-wave. **Confirmed from the real GD polynomials** (`geocarb_gert.gd_polynomials`, §9f): **~33–39 px** at each band's centre wavelength — a **15–20× correction** to the `SMILE_PX=2.0` placeholder. Not even constant across a band: e.g. FPA0 ~37 px at the short-wavelength edge vs. ~48 px at the long-wavelength edge |
 
 Physical translations at 2.93 km/px: keystone shifts a sounding's footprint **~29 km**
 between the blue and red band ends at the slit ends (band-to-band co-registration
@@ -182,15 +182,23 @@ compute `K` once per aerosol state where the linear diagnostic is used.
 
 ## 7. Open decisions
 
-1. **Per-band smile amplitude** (px) — still TBD; keystone magnitude (`keystone_px=20`)
-   is now confirmed by ground test (§9b), but the per-band **offset** (clocking, §9c)
-   also needs to replace the current symmetric-about-centre assumption.
+1. ~~Per-band smile amplitude~~ — **resolved**, see §9f: ~33–39 px at band centre from
+   the real GD polynomials, a 15–20× correction to `SMILE_PX=2.0`. Keystone magnitude
+   (`keystone_px=20`) confirmed by ground test (§9b). Remaining implementation work:
+   the truth generator still needs the per-band **offset** (clocking, §9c) and the
+   **wavelength-dependence of the smile amplitude itself** (§9f), not just a bigger
+   constant.
 2. **η sampling**: dense nonlinear sweep (e.g. 32–64 η) + linear-vs-nonlinear validation
    at ~5 η; revisit after the Phase-1 comparison.
 3. **Dispersion order to carry into Phases 2–4** (from the Phase-1/order sub-study).
 4. ~~Row-crossing non-convergence mechanism~~ — **resolved**, see §9b: confirmed as
    pixel-grid aliasing during spectrum extraction, not a software indexing issue
    (independently documented in `keystone_report.pdf` §4.8.2).
+5. **Smile-vs-wavelength shape** (§9f): confirmed the amplitude grows toward band
+   edges and ruled out clocking as the cause, but haven't yet checked whether it's a
+   pure amplitude scaling or an actual curve-shape change across the band — would
+   affect how faithfully a single per-band dispersion polynomial (vs. a
+   wavelength-dependent one) can represent it.
 
 ---
 
@@ -310,14 +318,48 @@ retrieval processing." Not the driver, except in FPA2's uncalibrated region (9d)
    spectrograms — this is the "before/after" comparison in the FPA2 images
    discussed earlier in this conversation.
 
-**Status:** row-crossing/aliasing (9b) and the FPA2 calibration gap (9d) are now the
-two best-supported explanations for the real-data non-convergence, with clocking (9c)
-explaining *where* row-crossing is worst per band. Round-trip self-consistency (9e)
-is ruled out. Still needed: (a) an explicit per-band smile amplitude in pixels — not
-directly given by this report, would need the actual A0–A3 coefficients; (b) the
-discrete row-crossing truth generator itself (§5 item 5), now with a concrete target:
-model spectrum extraction as averaging `N(η)` true rows, `N` following each FPA's
-real (asymmetric, clocking-offset) keystone-vs-slit-position curve from Fig. 38.
+### 9f. Confirmed — real smile amplitude (~33–39 px), and why it varies across the band
+`geocarb_gert.gd_polynomials` (added 2026-07-22) wraps the actual EM27/SUN-refined GD
+coefficients (`gcmap_em27.csv`, from `keystone_report.pdf` §4.8.1/4.8.6) for both
+directions: `xy_to_wavelength_slit` (rectification, A/B) and `wavelength_slit_to_xy`
+(projection, C/D). Coordinate conventions (x,y in pixels; wavelength in microns;
+`s` = slit angle in degrees, ~[-2, 2]) were validated by reproducing the report's own
+numbers from the C/D-derived keystone curve: sweet rows 599.7/569.8/266.2 for
+FPA0/1/3 (report: 600/570/266, all <1 px off) and FPA2's minimum landing at the edge
+of the tested slit range, matching "falls slightly outside the slit."
+
+Using the C/D (projection) polynomials to trace a fixed-wavelength line's x-position
+across the full slit gives the real smile amplitude for the first time:
+**~33–39 px at each band's centre wavelength** — a 15–20× correction to the
+`SMILE_PX=2.0` placeholder used in every `compute_keystone_bias.ipynb` run to date.
+It is also **not constant across a band**: FPA0 is ~37 px at the short-wavelength
+edge vs. ~48 px at the long-wavelength edge.
+
+**Is the within-band variation a clocking effect? No.** Clocking (§9c) is a rigid
+*rotation* of the FPA axes relative to the grating's dispersion axis — a single angle
+that is essentially wavelength-independent. It explains the keystone curve's offset
+zero-point (a shift of the whole curve), not a change in curvature *magnitude*
+between one part of a band and another. Smile amplitude growing toward the band
+edges instead points to **field- and wavelength-dependent optical aberration in the
+spectrometer's imaging path**: the grating diffracts different wavelengths at
+different angles, sending them through different parts of the downstream camera
+optics, and residual aberrations (coma, astigmatism, field curvature) there are
+rarely uniform across the full design bandpass — commonly best-corrected near band
+centre and worse toward the edges. This is a design/manufacturing-tolerance property
+of the optics, not an alignment (clocking) effect. Not yet checked: whether this is a
+pure amplitude scaling of the same curve shape, or an actual shape change across the
+band (open decision §7 item 5) — would matter for how well a single per-band
+dispersion polynomial can represent it vs. needing a wavelength-dependent one.
+
+**Status:** row-crossing/aliasing (9b), the FPA2 calibration gap (9d), and the real
+smile amplitude (9f) are now the three best-supported, quantified corrections to the
+Phase-1 truth generator, with clocking (9c) explaining *where* row-crossing is worst
+per band. Round-trip self-consistency (9e) is ruled out. Remaining work: (a) the
+discrete row-crossing truth generator itself (§5 item 5), now with concrete targets
+for both keystone (row-averaging via Fig. 38's real curve) and smile (real, per-band,
+wavelength-dependent amplitude via `gd_polynomials`) — no more placeholders needed
+for either; (b) checking whether smile's within-band variation is amplitude-only or a
+shape change (§7 item 5).
 
 ---
 
@@ -338,16 +380,15 @@ residual had a sharp step at channel 512 in band 2" does.
 | 2 | Real keystone-vs-slit-position curve is asymmetric; each FPA's zero-keystone point is offset from slit centre, worst for FPA2 (row 25 of ~1024, nearly at the slit edge) | `keystone_report.pdf` Fig. 38/41 | FPA0 sweet row 600, FPA1 570, FPA2 25, FPA3 266 | Per-band **offset**, not just amplitude, in the keystone term — `η²` centred on 0 is wrong for FPA2 | **Confirmed**, see §9c |
 | 3 | FPA2 (strong CO₂) residual-optimization image showed vertical striping surviving even after FTIR-based polynomial refinement | `keystone_report.pdf` §4.8.6, Fig. 45 (round-trip error 0.079 px mean / 0.30 px peak for FPA2 vs. 0.025–0.03 px others); user-provided FPA2 "square of the difference" images (2026-07-22, summed residual 4933.65 → 2128.96) | FPA2 (strong CO₂), region with insufficient laser wavelength coverage during ground test | A calibration-coverage-gap term for FPA2 specifically, independent of row-crossing | **Confirmed** (separate, compounding mechanism), see §9d |
 | 4 | Geometric self-consistency (round-trip x,y→λ,s→x,y) error | `keystone_report.pdf` §4.8.4 — "easily absorbed in L2 retrieval processing" | All FPAs (except FPA2's uncalibrated region) | None — not a significant driver | **Ruled out**, see §9e |
+| 5 | Real smile amplitude is ~33–39 px at band centre (15–20× the `SMILE_PX=2.0` placeholder), and grows toward band edges (FPA0: ~37 px short-wavelength edge vs. ~48 px long-wavelength edge) | `gcmap_em27.csv` C/D polynomials via `geocarb_gert.gd_polynomials` (2026-07-22) | All FPAs; within-band variation checked for FPA0 | Real, per-band, wavelength-dependent smile amplitude in the truth generator — not a constant placeholder | **Confirmed**, see §9f |
 
 **Still open / worth checking the archive for:**
-- **Per-band smile amplitude in px** — the ground-test report quantifies keystone
-  (rows crossed) but not smile curvature directly; would need the actual A0–A3
-  dispersion-polynomial coefficients (or Fig. 34/35-equivalent data) to replace the
-  `SMILE_PX=2.0` placeholder with a real number.
 - **Spectral residual shapes from real (even non-converged) retrievals** — any
   systematic (not noise-like) `y_obs − y_model` pattern, especially how it differs
   between row-crossing and non-row-crossing scenes, to check against what the new
   truth generator (§5 item 5) predicts.
+- **Whether smile's within-band amplitude growth is a pure scaling or a shape
+  change** (§7 item 5, §9f) — check across all four FPAs, not just FPA0.
 
 **How this feeds back:** once a row here has real evidence attached, it either
 confirms an existing hypothesis (§9) or becomes a new one — either way it turns
