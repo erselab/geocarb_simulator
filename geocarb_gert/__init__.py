@@ -21,6 +21,7 @@ from .radiometry import (GEOCARB_REF, base_noise_model, model_for,
 from .adapter import pixel_geometry, sample_geometries, gsd_km, scene_from_profile
 from .scene import reference_atmosphere, albedo_for, SCENE_TYPES
 from .focalplane import FocalPlaneModel, uniform_scene, edge_scene, random_scene
+from .gd_polynomials import xy_to_wavelength_slit, wavelength_slit_to_xy
 
 __all__ = [
     "GEOCARB_BANDS", "build_geocarb_instrument",
@@ -29,4 +30,5 @@ __all__ = [
     "pixel_geometry", "sample_geometries", "gsd_km", "scene_from_profile",
     "reference_atmosphere", "albedo_for", "SCENE_TYPES",
     "FocalPlaneModel", "uniform_scene", "edge_scene", "random_scene",
+    "xy_to_wavelength_slit", "wavelength_slit_to_xy",
 ]
