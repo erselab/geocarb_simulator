@@ -819,6 +819,89 @@ rectify-then-retrieve reproduces the qualitatively severe bias/convergence-
 failure signature this whole investigation set out to explain (§9's
 motivation).
 
+### 9n. Spectral residual analysis: what the rectification error actually looks like, and a periodicity search that didn't find what it went looking for
+
+Follow-up analysis of the `gd_dense_sweep.pkl` residuals saved in §9m, using
+`scripts/gd_native_residual_periodicity.py` (`plots/
+gd_native_residual_periodicity_fpa2.png`) plus a series of ad hoc checks.
+Two separate questions, both worth recording carefully because the first
+answer that seemed right (by eye or by a quick correlation) turned out to
+be wrong or incomplete on closer inspection.
+
+**Rectified-pipeline residual mechanism — corrected.** §9l/9m described the
+rectification residual loosely as a "sub-pixel line-registration" error.
+Quantitatively checking that against `gd_dense_sweep.pkl`'s residuals:
+
+- **Row-to-row coherence is very high**: mean correlation 0.96 between
+  adjacent rows' residual vectors (894 adjacent pairs checked, order=2) —
+  confirms the pattern is a smooth, physically coherent function of row, not
+  noise.
+- **But it is *not* a simple sub-pixel wavelength shift.** Correlating each
+  row's residual against the local first derivative of the model spectrum
+  (`dI/dν`, the signature a pure registration shift would produce) gives
+  essentially zero correlation (|r| ≲ 0.05 across every row tested). The
+  second derivative (curvature) correlates just as weakly pointwise. Both of
+  these directly contradict the "shift" language used in §9l — that
+  characterization should be considered superseded by the following.
+- **Directly at absorption line centers, the real mechanism is clear and
+  one-sided**: comparing the rectified spectrum (`Rimg`, real `rectify()`
+  output) against the true spectrum at the same slit position (computed
+  independently, bypassing `rectify()` entirely — the same isolation method
+  as §9l) at each line's local minimum, the rectified spectrum is
+  **systematically brighter — shallower lines — at 98.6% of line centers
+  tested** (819/831, 11 rows spanning the slit), never the reverse, by 2–18%
+  of local line depth depending on row. Pointwise derivative correlation is
+  too local/noisy to see this; the *integrated* effect across each line's
+  width is real, consistent, and one-directional. This is bilinear
+  interpolation doing exactly what it's expected to do to a sharp, narrow
+  feature — averaging across it, pulling the interpolated value up toward
+  the brighter surrounding continuum — and it directly explains why the
+  retrieved CO₂ bias in §9l/9m is always negative, never positive: a
+  measured spectrum with systematically weaker apparent absorption than
+  truth reads as less gas than truth.
+- Caution for future work: comparing native-pipeline residuals (each row on
+  its own true per-pixel grid) against rectified-pipeline residuals (shared
+  `wn_grid`) side-by-side would require resampling one onto the other's
+  grid — which would itself smooth out exactly the kind of sharp,
+  line-center-localized structure this section just characterized, and
+  should not be done without accounting for that.
+
+**Native-pipeline residual periodicity — hypothesis not confirmed, different
+pattern found instead.** The original question was whether native-grid
+residuals show periodic structure whose *period* varies row to row (a
+plausible signature of row-dependent local dispersion nonlinearity beating
+against the real absorption-line comb). Checking this directly:
+
+- **Order=0** residuals are broadband/noise-like at every row tested — FFT
+  peaks are low-power (power fraction ~1–1.5%) and scattered with no
+  consistent location, consistent with unmodeled geometric-distortion
+  mismatch rather than a clean periodicity.
+- **Order=2** residuals do **not** show a row-varying period. Instead, every
+  row tested shows a burst of high-frequency oscillation concentrated in
+  the *same* spectral location — roughly **4865–4895 cm⁻¹**, the upper ~30
+  cm⁻¹ of the FPA2 band — regardless of row. A fixed location, not a
+  row-dependent period.
+- **The magnitude is real but more modest than it looks by eye**: residual
+  std in that zone is only ~12–17% higher than the rest of the band for the
+  native pipeline, ~24–38% higher for the rectified pipeline — worth
+  explicitly correcting against the visual impression from the plot, which
+  overstates it.
+- **Ruled out**: local absorption-line density is flat across the band
+  (3–6 line-minima per 5 cm⁻¹ bin everywhere, checked via
+  `scipy.signal.argrelextrema` on the true spectrum) — denser line packing
+  near the band edge is not the explanation.
+- **Present in both pipelines**, proportionally larger in the rectified
+  one — consistent with a real edge-of-fit-domain effect (a global order-2
+  polynomial dispersion correction has least effective constraint at the
+  edges of the band it's fit over) rather than an artifact specific to one
+  pipeline's grid construction.
+- **Not yet checked**: whether this 4865–4895 cm⁻¹ zone coincides with
+  FPA2's independently-documented ground-calibration coverage gap (§9d) —
+  plausible given §9d is FPA2-specific and involves degraded round-trip
+  accuracy in part of the band, but the gap's exact wavenumber extent
+  hasn't been pulled from `keystone_report.pdf` and checked against this
+  zone. This is the natural next step before treating the two as related.
+
 ---
 
 ## 10. Real-data observations (fill in as evidence is pulled)
