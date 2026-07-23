@@ -38,6 +38,7 @@ _TERMS = ["const", "x", "y", "xx", "xy", "yy", "xxx", "xxy", "xyy", "yyy",
           "xxxx", "xxxy", "xxyy", "xyyy", "yyyy"]
 
 N_FPA = 4
+N_PX = 1024   # real detector rows/columns
 
 
 @lru_cache(maxsize=1)
@@ -104,6 +105,37 @@ def xy_to_wavelength_slit(fpa: int, x, y):
     wavelength = _poly2d(coeffs[f"A{fpa}"], x, y)
     s = _poly2d(coeffs[f"B{fpa}"], x, y)
     return wavelength, s
+
+
+@lru_cache(maxsize=N_FPA)
+def real_wavenumber_range(fpa: int, margin_cm1: float = 10.0):
+    """This FPA's real per-pixel channel-center wavenumber range, + margin.
+
+    The nominal ``GEOCARB_BANDS`` (wn_min, wn_max) is generally *narrower*
+    than the real per-pixel range (e.g. FPA0: nominal [12950, 13190], real
+    [12957, 13233] -- up to ~40 cm-1 short). Any hi-res grid or retrieval
+    window used with the real GD curves (:mod:`geocarb_gert.gd_render`) must
+    cover this wider range, or ILS convolution silently zero-weights pixels
+    outside it. ``margin_cm1`` adds a safety buffer beyond the observed
+    real min/max (for the ILS's own truncation half-width).
+
+    Returns
+    -------
+    (wn_min, wn_max) : tuple of float
+    """
+    _check_fpa(fpa)
+    cols = np.arange(N_PX, dtype=float)
+    nu_min, nu_max = np.inf, -np.inf
+    for i in range(0, N_PX, 8):          # sparse row sampling is enough for an envelope
+        lam_row, _ = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i)))
+        nu_row = 1.0e4 / lam_row
+        nu_min = min(nu_min, float(nu_row.min()))
+        nu_max = max(nu_max, float(nu_row.max()))
+    # Snap outward to a 0.01 cm-1 grid -- ABSCOTable.wn_index requires an exact
+    # match to its own (0.01-spaced) grid, not just any float in range.
+    lo = np.floor((nu_min - margin_cm1) * 100.0) / 100.0
+    hi = np.ceil((nu_max + margin_cm1) * 100.0) / 100.0
+    return lo, hi
 
 
 def wavelength_slit_to_xy(fpa: int, wavelength, s):

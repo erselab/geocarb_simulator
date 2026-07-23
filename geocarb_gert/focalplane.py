@@ -61,11 +61,16 @@ from gert.instrument import ILS
 # ── scene helpers ───────────────────────────────────────────────────────────
 # A "scene" is a shared hi-res grid ``wn_hires`` plus a callable
 # ``radiance(η) -> S_hires`` giving the spectrum seen at object slit position η.
+# ``η`` may be a scalar or an ndarray of any shape; the return shape is always
+# ``η.shape + S_hires.shape`` (scalar η -> plain ``(n_hires,)``, as before).
+# Array-η support is what lets :mod:`geocarb_gert.gd_render` evaluate a whole
+# row's worth of per-pixel true slit positions in one vectorized call instead
+# of one Python call per pixel.
 
 def uniform_scene(S_hires: np.ndarray) -> Callable[[float], np.ndarray]:
     """A slit-homogeneous scene: the same spectrum at every slit position."""
     S = np.asarray(S_hires, dtype=float)
-    return lambda eta: S
+    return lambda eta: np.broadcast_to(S, np.shape(eta) + S.shape).copy()
 
 def random_scene(scenes, n_segments: int = 4, softness: float = 0.0,
                  seed: Optional[int] = None) -> Callable[[float], np.ndarray]:
@@ -115,14 +120,77 @@ def random_scene(scenes, n_segments: int = 4, softness: float = 0.0,
     seg = [scenes[i] for i in idx]
 
     def radiance(eta: float) -> np.ndarray:
-        S = seg[0].copy()
+        eta = np.asarray(eta, dtype=float)
+        S = np.broadcast_to(seg[0], eta.shape + seg[0].shape).copy()
         for k, b in enumerate(boundaries):
             w = 0.5 * (1.0 + np.tanh((eta - b) / max(softness, 1e-9)))
-            S = S + w * (seg[k + 1] - seg[k])
+            S = S + w[..., None] * (seg[k + 1] - seg[k])
         return S
 
     radiance.boundaries = boundaries
     radiance.segment_scenes = idx
+    return radiance
+
+
+def barcode_scene(S: np.ndarray, brightness, widths=None,
+                  softness: float = 0.0) -> Callable[[float], np.ndarray]:
+    """A diffuser-style barcode illumination: same spectral shape everywhere,
+    only the brightness (a scalar gain) varies along the slit.
+
+    Physically: sunlight reflected off a diffuser with alternating
+    light/dark reflectivity bars, e.g. for a ground-test illumination
+    pattern — the atmospheric column (and hence the spectral *shape*) is
+    identical at every slit position, since it's the same column of sky;
+    only the reflected brightness changes. This is the high-spatial-frequency
+    companion to the single-gradient along-slit albedo test in
+    ``KEYSTONE_SMILE_BIAS_PLAN.md`` Sec. 9a — chosen to probe keystone/PSF
+    row-mixing and pixel-grid aliasing where the scene varies fastest
+    (Sec. 9b), with bar widths and brightness levels independently
+    specifiable (a plain alternating high/low pattern is the ``n``-bar,
+    2-level special case).
+
+    Same telescoping-``tanh``-sum construction as :func:`random_scene`,
+    applied to the scalar brightness rather than the full spectrum.
+
+    Parameters
+    ----------
+    S : ndarray, shape (n_hires,)
+        The single hi-res spectrum, identical at every slit position.
+    brightness : sequence of float
+        Scalar gain for each bar, e.g. ``[1.0, 0.2] * 5`` for 10 alternating
+        bright/dark bars.
+    widths : sequence of float, optional
+        Bar widths in η units, same length as ``brightness``, must sum to
+        ``2.0`` (spans ``η ∈ [-1, 1]``). Default: equal-width bars.
+    softness : float
+        Transition half-width in η, same convention as :func:`edge_scene`.
+        Default ``0`` gives sharp truth bars.
+    """
+    S = np.asarray(S, dtype=float)
+    brightness = np.asarray(brightness, dtype=float)
+    n_bars = len(brightness)
+    if n_bars < 1:
+        raise ValueError("brightness must have at least one entry")
+    if widths is None:
+        widths = np.full(n_bars, 2.0 / n_bars)
+    else:
+        widths = np.asarray(widths, dtype=float)
+        if len(widths) != n_bars:
+            raise ValueError("widths and brightness must be the same length")
+        if not np.isclose(widths.sum(), 2.0):
+            raise ValueError(f"widths must sum to 2.0 (η spans [-1, 1]), got {widths.sum()}")
+    boundaries = -1.0 + np.cumsum(widths)[:-1]
+
+    def radiance(eta: float) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        g = np.broadcast_to(brightness[0], eta.shape).copy()
+        for k, b in enumerate(boundaries):
+            w = 0.5 * (1.0 + np.tanh((eta - b) / max(softness, 1e-9)))
+            g = g + w * (brightness[k + 1] - brightness[k])
+        return g[..., None] * S
+
+    radiance.boundaries = boundaries
+    radiance.brightness = brightness
     return radiance
 
 
@@ -139,10 +207,34 @@ def edge_scene(S_left: np.ndarray, S_right: np.ndarray,
     S_right = np.asarray(S_right, dtype=float)
 
     def radiance(eta: float) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
         w = 0.5 * (1.0 + np.tanh((eta - edge) / max(softness, 1e-9)))
-        return (1.0 - w) * S_left + w * S_right
+        return (1.0 - w[..., None]) * S_left + w[..., None] * S_right
 
     return radiance
+
+
+def gaussian_blur_rows(A: np.ndarray, fwhm_px: float) -> np.ndarray:
+    """Blur ``A`` along axis 0 (rows) by a normalized Gaussian of FWHM ``fwhm_px``.
+
+    Edge-extended so the array ends are not darkened. Returns ``A`` unchanged
+    when ``fwhm_px <= 0``. Shared by :meth:`FocalPlaneModel.apply_spatial_psf`
+    and :mod:`geocarb_gert.gd_render` — the same along-slit N/S PSF blur,
+    independent of which geometric-distortion model rendered the rows.
+    """
+    fwhm = float(fwhm_px)
+    if fwhm <= 0.0:
+        return A
+    sigma = fwhm / 2.3548
+    half  = max(1, int(np.ceil(4.0 * sigma)))
+    k = np.exp(-0.5 * (np.arange(-half, half + 1) / sigma) ** 2)
+    k /= k.sum()
+    n = A.shape[0]
+    Ap = np.pad(A, ((half, half), (0, 0)), mode="edge")
+    out = np.zeros_like(A)
+    for t, w in enumerate(k):                          # shift-and-add convolution
+        out += w * Ap[t:t + n]
+    return out
 
 
 # ── focal-plane model ───────────────────────────────────────────────────────
@@ -303,19 +395,7 @@ class FocalPlaneModel:
         extension so the slit ends are not darkened.  Returns ``A`` unchanged when
         ``spatial_psf_fwhm_px <= 0``.
         """
-        fwhm = float(self.spatial_psf_fwhm_px)
-        if fwhm <= 0.0:
-            return A
-        sigma = fwhm / 2.3548
-        half  = max(1, int(np.ceil(4.0 * sigma)))
-        k = np.exp(-0.5 * (np.arange(-half, half + 1) / sigma) ** 2)
-        k /= k.sum()
-        n = A.shape[0]
-        Ap = np.pad(A, ((half, half), (0, 0)), mode="edge")
-        out = np.zeros_like(A)
-        for t, w in enumerate(k):                          # shift-and-add convolution
-            out += w * Ap[t:t + n]
-        return out
+        return gaussian_blur_rows(A, self.spatial_psf_fwhm_px)
 
     # -- rendering ---------------------------------------------------------
     def image(self, wn_hires: np.ndarray,

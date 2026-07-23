@@ -65,6 +65,35 @@ def albedo_for(instrument, surface: str) -> np.ndarray:
                        f"add it to geocarb_gert.scene._BAND_ALBEDO") from None
 
 
+def hires_spectra_for(fm, surface_types=SCENE_TYPES) -> dict:
+    """Hi-res radiance spectra for each surface type, all bands at once.
+
+    Runs ``fm`` once per surface type at that surface's :func:`albedo_for`,
+    for use as the base spectra in :func:`geocarb_gert.focalplane.
+    random_scene` (a patchwork of real surface types along the slit) — e.g.
+    ``geocarb_gert.focalplane.random_scene([res[s].I_hires[b] for s in
+    SCENE_TYPES], ...)`` for band ``b``.
+
+    Parameters
+    ----------
+    fm : gert.ForwardModel
+        Already constructed (atmosphere, ABSCO, instrument, geometry, solver).
+    surface_types : sequence of str
+        Defaults to all of :data:`SCENE_TYPES`.
+
+    Returns
+    -------
+    dict[str, gert.ForwardResult]
+        Keyed by surface type. Each result's ``.wn_band_hires[b]`` /
+        ``.I_hires[b]`` give band ``b``'s hi-res wavenumber grid and
+        radiance for that surface (same ``wn_band_hires[b]`` across surface
+        types, since it depends only on the instrument/geometry).
+    """
+    nb = len(fm.instrument.windows)
+    return {s: fm.run(albedo=list(albedo_for(fm.instrument, s)), albedo_slope=[0.0] * nb)
+           for s in surface_types}
+
+
 def _std_temperature(z_km: np.ndarray) -> np.ndarray:
     """US Standard Atmosphere 1976 temperature [K] (troposphere → mesosphere)."""
     z = np.asarray(z_km, dtype=float)

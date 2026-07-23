@@ -19,16 +19,18 @@ from .instrument import GEOCARB_BANDS, build_geocarb_instrument
 from .radiometry import (GEOCARB_REF, base_noise_model, model_for,
                          staring_sweep_models, etendue_factor_for_gsd)
 from .adapter import pixel_geometry, sample_geometries, gsd_km, scene_from_profile
-from .scene import reference_atmosphere, albedo_for, SCENE_TYPES
-from .focalplane import FocalPlaneModel, uniform_scene, edge_scene, random_scene
+from .scene import reference_atmosphere, albedo_for, SCENE_TYPES, hires_spectra_for
+from .focalplane import (FocalPlaneModel, uniform_scene, edge_scene,
+                         random_scene, barcode_scene)
 from .gd_polynomials import xy_to_wavelength_slit, wavelength_slit_to_xy
+from . import gd_render
 
 __all__ = [
     "GEOCARB_BANDS", "build_geocarb_instrument",
     "GEOCARB_REF", "base_noise_model", "model_for", "staring_sweep_models",
     "etendue_factor_for_gsd",
     "pixel_geometry", "sample_geometries", "gsd_km", "scene_from_profile",
-    "reference_atmosphere", "albedo_for", "SCENE_TYPES",
-    "FocalPlaneModel", "uniform_scene", "edge_scene", "random_scene",
-    "xy_to_wavelength_slit", "wavelength_slit_to_xy",
+    "reference_atmosphere", "albedo_for", "SCENE_TYPES", "hires_spectra_for",
+    "FocalPlaneModel", "uniform_scene", "edge_scene", "random_scene", "barcode_scene",
+    "xy_to_wavelength_slit", "wavelength_slit_to_xy", "gd_render",
 ]

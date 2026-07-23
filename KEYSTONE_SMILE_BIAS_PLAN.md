@@ -161,11 +161,12 @@ compute `K` once per aerosol state where the linear diagnostic is used.
 3. **Along-slit scene builder**: `albedo(η)`, `gas_scale(η)`, `aerosol(η)` and the
    per-node hi-res radiances to blend (reuse `edge_scene`/`random_scene`).
 4. **(Later) SIF forward-model term + `sif` state element** in `gert`.
-5. **Discrete row-crossing truth generator** — model spectrum extraction as averaging
-   `N(η)` true physical rows (not a single smooth per-band polynomial), where `N`
-   follows each FPA's real, asymmetric (clocking-offset) keystone-vs-slit-position
-   curve (§9b/9c, `keystone_report.pdf` Fig. 38) — ~2 rows near the sweet spot, up to
-   ~7–10 near the slit ends. Confirmed mechanism, not yet built; see §9.
+5. ~~Discrete row-crossing truth generator~~ — **built**, see §9h:
+   `geocarb_gert.gd_render.image()` renders the full focal-plane image from the real
+   GD polynomials at native 1024×1024 resolution, non-separable (every pixel at its
+   own true wavelength/slit-position, no cross-row borrowing except the real N/S PSF
+   blur). Uncovered a new mechanism in the process — irreducible PSF×smile coupling
+   bias, §9h — not just the row-averaging effect originally anticipated.
 
 ---
 
@@ -387,16 +388,79 @@ FPA2's unusually large residual is a mix of both categories above: a known, fixa
 data gap (insufficient laser wavelength coverage, 9d) plus whatever baseline
 structural residual is present on all four FPAs.
 
-**Status:** row-crossing/aliasing (9b), the FPA2 calibration gap (9d), and the real
-smile amplitude (9f) are now the three best-supported, quantified corrections to the
-Phase-1 truth generator, with clocking (9c) explaining *where* row-crossing is worst
-per band, and 9g setting expectations for how far a smooth-polynomial truth generator
-can go. Round-trip self-consistency (9e) is ruled out. Remaining work: (a) the
-discrete row-crossing truth generator itself (§5 item 5), now with concrete targets
-for both keystone (row-averaging via Fig. 38's real curve) and smile (real, per-band,
-wavelength-dependent amplitude via `gd_polynomials`) — no more placeholders needed
-for either; (b) checking whether smile's within-band variation is amplitude-only or a
-shape change (§7 item 5).
+### 9h. Built — `gd_render.py`, and a new confirmed mechanism: irreducible PSF-driven bias on a uniform scene
+The discrete row-crossing truth generator from §5 item 5 is now built:
+`geocarb_gert.gd_render.image()` renders the full 1024×1024 focal-plane image
+directly from the real GD polynomials (not `FocalPlaneModel`'s analytic
+formulas), for any scene function. It connects to retrieval via a per-row
+`gert.instrument.SpectralWindow` with `obs_grid` set to that row's real
+per-pixel channel centres (`A(x, row)`) — model and truth are evaluated on
+the *identical* grid, so there is no interpolation or dispersion-polynomial
+approximation standing between them; any remaining mismatch is real physics,
+not a grid artifact.
+
+**A real implementation bug had to be found and fixed first.** The initial
+version mirrored `FocalPlaneModel`'s architecture: a per-row spectral step,
+then a cross-row spatial resample for keystone. That reintroduces error even
+on a *perfectly uniform* scene — because real smile varies (slowly) with row,
+the cross-row resample borrows content computed with a neighbouring row's
+slightly different dispersion curve, silently mixing two wavelength
+calibrations together. Diagnosed via a PSF on/off test: disabling the N/S PSF
+should make keystone (and this bug) exactly null on a uniform scene, but a
+~0.7–1 ppm CO₂ residual survived regardless — a smoking gun that something
+*other than* the PSF was mixing rows. Rebuilt non-separable: every pixel is
+evaluated at its own true `(wavelength, slit-position)` pair directly, with
+no cross-row borrowing anywhere except the final N/S PSF blur — the one step
+where cross-row mixing is physically correct, not an artifact.
+
+**Result, FPA2, uniform desert scene, dispersion order 2 vs. 4:**
+- **PSF disabled:** bias converges to the *identical* value (-0.0005 ppm, at
+  the level of the retrieval's convergence tolerance) at every row tested
+  (25, 100, 300, 512, 700, 900, 950) — order-2 dispersion retrieval fully
+  absorbs smile+keystone on a uniform scene, exactly reproducing the
+  idealized Phase-1 conclusion, now with the real curves. Confirms the
+  separable-version artifact is gone.
+- **PSF enabled (1.5 px FWHM):** a real, order-*independent* residual bias
+  survives — order-2 and order-4 agree to ~0.003 ppm at every row, so it is
+  not an under-fitting effect. Bias ranges from near-zero (row 512/700) to
+  -5.9 ppm (row 100), non-monotonic and asymmetric — row 100 is *worse* than
+  row 25 despite row 25 being closer to FPA2's real keystone-null point
+  (§9c) — reflecting genuine complexity in the real curve, not an idealized
+  symmetric bowl.
+
+**Mechanism:** the along-slit PSF genuinely blurs together detector rows
+that each have a slightly different real smile calibration. The signal read
+out at any one row is therefore a blend of several different wavelength
+calibrations, which no single per-row dispersion polynomial — of any order —
+can represent, because the error isn't in *that row's* dispersion, it's in
+having borrowed neighbours' dispersion too. This is a **new, previously
+undocumented bias mechanism**, distinct from both the classical
+keystone-heterogeneity mechanism (§4, needs along-slit scene structure) and
+the row-crossing/aliasing extraction mechanism (§9b, about *which* physical
+rows get combined during readout) — this one is a pure smile×PSF coupling
+effect, present even on a perfectly uniform scene, and it does not respond
+to floating a higher dispersion order.
+
+Two smaller fixes landed alongside this: `barcode_scene` (originally
+alternated two different spectra) now correctly alternates the *brightness*
+of one identical spectrum — matching a diffuser-panel illumination pattern
+where the atmospheric column, and hence spectral shape, doesn't change along
+the slit, only reflectivity does — with independently specifiable bar widths
+and brightness levels. And the per-pixel ILS convolution (`gd_render.
+_diagonal_ils_convolve`) is windowed (direct index slicing on the uniformly-
+spaced hi-res grid, instead of masking the full array ~1e6 times per render)
+for a 2× speedup; a further speedup would need compiled code; see the
+performance note in `gd_render.py`.
+
+**Status:** row-crossing/aliasing (9b), the FPA2 calibration gap (9d), the
+real smile amplitude (9f), and now the PSF×smile coupling bias (9h) are the
+best-supported, quantified corrections to the Phase-1 truth generator, with
+clocking (9c) explaining *where* row-crossing is worst per band and 9g
+setting expectations for how far a smooth-polynomial truth generator can go.
+Round-trip self-consistency (9e) is ruled out. The truth generator itself is
+now built and validated (9h) — remaining work is applying it to non-uniform
+scenes (barcode, realistic) and checking whether smile's within-band
+variation is amplitude-only or a shape change (§7 item 5).
 
 ---
 
@@ -418,6 +482,7 @@ residual had a sharp step at channel 512 in band 2" does.
 | 3 | FPA2 (strong CO₂) residual-optimization image showed vertical striping surviving even after FTIR-based polynomial refinement | `keystone_report.pdf` §4.8.6, Fig. 45 (round-trip error 0.079 px mean / 0.30 px peak for FPA2 vs. 0.025–0.03 px others); user-provided FPA2 "square of the difference" images (2026-07-22, summed residual 4933.65 → 2128.96) | FPA2 (strong CO₂), region with insufficient laser wavelength coverage during ground test | A calibration-coverage-gap term for FPA2 specifically, independent of row-crossing | **Confirmed** (separate, compounding mechanism), see §9d |
 | 4 | Geometric self-consistency (round-trip x,y→λ,s→x,y) error | `keystone_report.pdf` §4.8.4 — "easily absorbed in L2 retrieval processing" | All FPAs (except FPA2's uncalibrated region) | None — not a significant driver | **Ruled out**, see §9e |
 | 5 | Real smile amplitude is ~33–39 px at band centre (15–20× the `SMILE_PX=2.0` placeholder), and grows toward band edges (FPA0: ~37 px short-wavelength edge vs. ~48 px long-wavelength edge) | `gcmap_em27.csv` C/D polynomials via `geocarb_gert.gd_polynomials` (2026-07-22) | All FPAs; within-band variation checked for FPA0 | Real, per-band, wavelength-dependent smile amplitude in the truth generator — not a constant placeholder | **Confirmed**, see §9f |
+| 6 | On a *uniform* scene, real (non-separable) rendering + real N/S PSF leaves an order-independent CO₂ bias of up to ~-5.9 ppm that no dispersion order absorbs; with the PSF disabled the same setup converges to exactly 0 at every row | Synthetic (`gd_render.py`), not yet checked against real data | FPA2, rows 25–950, orders 2 and 4 agree to ~0.003 ppm | A real-data prediction to test: does actual GeoCarb data show an order-independent residual bias pattern under uniform illumination that scales with PSF/smile coupling rather than scene structure? | **Confirmed in simulation** (2026-07-22, see §9h); **not yet checked against real data** |
 
 **Still open / worth checking the archive for:**
 - **Spectral residual shapes from real (even non-converged) retrievals** — any
@@ -426,6 +491,10 @@ residual had a sharp step at channel 512 in band 2" does.
   truth generator (§5 item 5) predicts.
 - **Whether smile's within-band amplitude growth is a pure scaling or a shape
   change** (§7 item 5, §9f) — check across all four FPAs, not just FPA0.
+- **Does real ground-test data show the PSF×smile coupling signature from §9h** —
+  an order-independent residual bias under uniform illumination — separately from
+  the row-crossing/aliasing and FPA2-calibration-gap mechanisms already matched to
+  evidence?
 
 **How this feeds back:** once a row here has real evidence attached, it either
 confirms an existing hypothesis (§9) or becomes a new one — either way it turns
