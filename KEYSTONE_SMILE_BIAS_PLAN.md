@@ -805,6 +805,20 @@ gd_dense_sweep_fpa2.png`):**
   dramatically more reliable by raw failure count than order=0 on this
   pipeline, but it is far more trustworthy *when* it converges. 17 rows are
   off-detector near one slit edge for both orders (matches §9l).
+- **Floating dispersion suppresses the residual by roughly an order of
+  magnitude, without removing its structure.** `plots/gd_dense_sweep_fpa2.png`
+  now shows the rectified-pipeline row x wavenumber residual heatmap for
+  both orders side by side, on the same shared `wn_grid` (no interpolation
+  needed for this comparison). The two heatmaps' natural color ranges differ
+  by **~9x** (±1.72 for order=0 vs. ±0.19 for order=2) — a direct,
+  quantified measure of how much the dispersion polynomial absorbs. Order=0
+  also shows solid horizontal streaks at some rows in the heatmap — rows
+  that technically converged (chi2 finite, so not excluded) but fit so
+  poorly (chi2 up to 1338, above) that the whole row reads as residual,
+  distinct from the fine vertical line-locked structure elsewhere. Even at
+  the ~9x-suppressed order=2 scale, the line-locked pattern from §9n is
+  still present — dispersion reduces the *amplitude* of the rectification
+  error, it does not remove the *mechanism*.
 
 **Interpretation.** The core §9l finding survives full-density scrutiny and
 gets sharper: the rectification-interpolation bias is a broad,
