@@ -511,6 +511,17 @@ unless noted:
   bounded between roughly 4 rows (where the barcode test's row 100 sat from
   its nearest boundary) and 10 rows (where this test found nothing) — but
   not yet pinned down precisely (§10).
+- **Residual-shape check on the null result**: re-ran the highest-contrast
+  pair (desert-water) at the two highest-keystone boundaries (700, 850,
+  ±10 rows), this time saving the full post-fit spectral residual, not just
+  the aggregate bias/chi2 (`scripts/gd_transition_residuals.py`, output in
+  `results/gd_transitions_residuals.pkl`). The dispersion-corrected residual
+  shows the same "beat"-envelope pattern as the uniform-scene case (§9g/9h)
+  — smallest near band centre, growing toward both edges — at all four rows,
+  with **no additional feature distinguishing the two rows on either side of
+  a boundary** from each other. This confirms the null result at the level
+  of residual *shape*, not just the retrieved gas amount: at ±10 rows, there
+  is no detectable trace of the scene transition anywhere in the fit.
 
 **Performance fix found along the way:** `random_scene`/`edge_scene`'s
 multi-segment blend originally did one full `(n_pixels, n_hires)` array add
