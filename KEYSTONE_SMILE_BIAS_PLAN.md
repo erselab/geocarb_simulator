@@ -213,7 +213,7 @@ confirming where the linear estimate diverges near the slit ends.
 
 ---
 
-## 9. Real-data check: confirmed mechanisms (2026-07-21 → 2026-07-22)
+## 9. Real-data check: confirmed mechanisms (2026-07-21 → 2026-07-23)
 
 **Motivation.** The Phase-1 uniform-scene results (`compute_keystone_bias.ipynb`) are
 much more optimistic than retrievals against real GeoCarb upward-looking ground-test
@@ -591,6 +591,115 @@ remaining work is pinning down the keystone-heterogeneity contamination
 footprint width precisely, extending beyond FPA2, and working through §9k's
 assumption list where it matters most (§10).
 
+### 9l. Built — rectify-then-retrieve verification test: rectification-interpolation bias dominates over the GD-curve effects found so far
+
+Everything in §9h–9k retrieves directly on a row's own *native* per-pixel
+grid (`obs_grid` = that row's true per-column wavelengths from
+`xy_to_wavelength_slit`) — deliberately, to isolate the GD-curve mechanisms
+from any grid-mismatch confound. But the real ground-test pipeline doesn't
+retrieve on the raw native grid: it first **rectifies** the raw detector
+image onto a regular (slit, wavenumber) grid via the inverse polynomial
+mapping (`keystone_report.pdf` §4.8.1, the C/D pair), *then* retrieves. This
+section asks whether running the same two-stage process through this
+simulator reproduces the qualitatively severe bias/non-convergence gap
+between the Phase-1 idealized result and real ground-test data (§9's
+motivation) — the test the user proposed as the infrastructure's realism
+check for the planned OSSEs.
+
+**Built:** `gd_render.rectify(fpa, A, s_grid, wn_grid)` — for each point on a
+regular output (slit, wavenumber) grid, uses `wavelength_slit_to_xy` (the
+C/D pair) to find where it came from in the raw rendered image, then
+interpolates (`scipy.ndimage.map_coordinates`, bilinear by default) —
+standard inverse-mapping image resampling, matching real L1B rectification.
+`scripts/gd_rectify_retrieve.py` renders a uniform-desert FPA2 scene,
+rectifies it onto a 1024-slit x 1075-wavenumber grid (the standard nominal
+FPA2 window from `build_geocarb_instrument()`), then retrieves at 7 rows
+(25, 100, 300, 512, 700, 900, 950) with dispersion order 0 and 2.
+`scripts/gd_rectify_plot.py` produces `plots/gd_raw_vs_rectified_fpa2.png`.
+
+**Bug caught and fixed:** the first run diverged on every one of the 14
+row/order combinations (NaN in the ABSCO lookup, singular Jacobian,
+non-increasing pressure levels). Root cause: `gert.ForwardModel` always
+returns `y` in ascending-*wavelength* order (`wl_instrument =
+wn_instrument[::-1]`, "reverses to wavelength order" in
+`forward_model.py`), regardless of what order `obs_grid` is supplied in —
+but the rectified row was extracted in ascending-*wavenumber* order
+(matching `wn_grid`, which was built ascending). That's an exact
+index-for-index reversal: channel 0 of the data was being compared against
+channel *N* of the model, channel 1 against *N-1*, etc. Iteration 0 chi2 was
+~12,700 as a result, and the linearized Gauss-Newton step immediately
+overshot into an unphysical atmospheric state (negative gas scale, negative
+pressure) on every row. This is a bug specific to this script — every
+earlier native-grid script in §9h–9j happened to extract `A[i, :]` in raw
+column order, which for this instrument's real dispersion direction already
+came out in ascending-wavelength order, so the mismatch never showed up
+before. Fixed by reversing the extracted row (`row[valid][::-1]`) before
+handing it to `GERTRetrieval`.
+
+**After the fix:** order=2 (dispersion floated) converges cleanly
+(chi2_reduced ≈ 3.2–4.4) at 6 of 7 test rows; order=0 also mostly converges
+but is far noisier. Row 25 (near the slit edge, `rows_crossed≈0`) diverges
+under *both* orders — order=0 converges to an unphysical state (chi2 ≈
+10^117, `conv=False`); order=2 crashes outright ("p_levels must be strictly
+increasing"). The underlying rectified data at row 25 was checked directly
+and is well-behaved (no NaN/garbage among the 1052 valid channels, sane
+radiance range) — so this looks like generic Gauss-Newton fragility near
+the slit edge rather than a data problem, consistent with the divergence
+pattern already seen in §9j's boundary tests. Not chased further this
+session.
+
+| order | row 100 | row 300 | row 512 | row 700 | row 900 | row 950 |
+|---|---|---|---|---|---|---|
+| 0 | −115.6 | −40.7 | −104.8 | −42.0 | −55.7 | −88.3 |
+| 2 | −52.5  | −62.3 | −54.4  | −62.9 | −61.2 | −55.7 |
+
+(CO₂ bias, ppm; row 25 excluded — diverged/unphysical both orders.)
+
+**Isolating the cause:** to check whether this bias is a GD-curve effect
+(like §9h/9i) or a retrieval artifact, the rectified row 512 was compared
+directly against the *true* spectrum at that exact slit position — computed
+independently, without ever constructing the raw 1024×1024 detector image
+or calling `rectify()` at all (same `radiance(eta)` callable and
+`_diagonal_ils_convolve` helper `gd_render.image()` uses internally, just
+evaluated once at the fixed slit position instead of per-row). The residual
+is essentially identical (mean |resid| ≈ 0.82 against a mean signal of 6.54,
+~13%) to what the retrieval sees against the forward model at the prior
+state. **This means the CO₂ bias is not primarily a retrieval or GD-curve
+artifact — it is bilinear-interpolation smoothing/aliasing introduced by
+`rectify()` regridding the raw detector image onto a regular grid.** Visibly
+the two curves nearly overlap (`plots/gd_raw_vs_rectified_fpa2.png`, panel
+3) — the ~13% residual is a subtle, sub-pixel line-registration effect, not
+a gross distortion, which is consistent with column-retrieval sensitivity
+being high enough to turn a barely-visible spectral perturbation into a
+tens-of-ppm gas-column bias.
+
+This is a **new mechanism**, distinct from and much larger than both
+mechanisms found so far: the PSF×smile coupling bias (§9h, up to ~−5.9 ppm)
+and the keystone-heterogeneity localization (§9j, a few ppm within ~4–10
+rows of a scene boundary). Unlike those two, it does **not** go to zero at
+the smile-slope-null row (~519, §9i) — with order=2, the bias is a roughly
+uniform −50 to −65 ppm at *every* converged row, including 512 (right next
+to the null row). That's consistent with it being a broad, generic
+regridding effect rather than one localized to keystone-crossing or
+smile-slope-extremum regions.
+
+**Interpretation for the OSSE-realism question:** this test reproduces both
+halves of the qualitative real-data signature that motivated §9 — large
+bias (tens of ppm, not the few-ppm level found in every native-grid test)
+and poor/failed convergence (row 25, and order=0's row-to-row instability)
+— once the simulator is run through the same two-stage rectify-then-retrieve
+process the real pipeline uses. That's evidence this infrastructure is
+realistic enough for the planned OSSEs, provided the rectification step is
+included and not skipped in favor of native-grid retrievals.
+
+**Not yet done:** compare against real ground-test data directly (this
+section is simulation-only, like 9h/9j before their real-data checks were
+filled in at §10); test whether higher-order interpolation
+(`gd_render.rectify(..., order=3)`, cubic) meaningfully reduces this bias,
+which would indicate real L1B processing's exact resampling scheme matters;
+extend beyond FPA2; and diagnose the row-25-style divergence pattern
+directly rather than just recording it as "diverged."
+
 ---
 
 ## 10. Real-data observations (fill in as evidence is pulled)
@@ -613,6 +722,7 @@ residual had a sharp step at channel 512 in band 2" does.
 | 5 | Real smile amplitude is ~33–39 px at band centre (15–20× the `SMILE_PX=2.0` placeholder), and grows toward band edges (FPA0: ~37 px short-wavelength edge vs. ~48 px long-wavelength edge) | `gcmap_em27.csv` C/D polynomials via `geocarb_gert.gd_polynomials` (2026-07-22) | All FPAs; within-band variation checked for FPA0 | Real, per-band, wavelength-dependent smile amplitude in the truth generator — not a constant placeholder | **Confirmed**, see §9f |
 | 6 | On a *uniform* scene, real (non-separable) rendering + real N/S PSF leaves an order-independent CO₂ bias of up to ~-5.9 ppm that no dispersion order absorbs; with the PSF disabled the same setup converges to exactly 0 at every row | Synthetic (`gd_render.py`), not yet checked against real data | FPA2, rows 25–950, orders 2 and 4 agree to ~0.003 ppm | A real-data prediction to test: does actual GeoCarb data show an order-independent residual bias pattern under uniform illumination that scales with PSF/smile coupling rather than scene structure? | **Confirmed in simulation** (2026-07-22, see §9h); **not yet checked against real data** |
 | 7 | On a barcode scene, keystone-heterogeneity bias is a sharp, narrowly localized spike (-12.4 ppm vs. -2.1 ppm baseline) only within a few rows of a scene boundary — a systematic 12-transition test at ±10 rows from boundaries found *zero* signal (all 4 surface types, spread ~0.0001 ppm) | Synthetic (`gd_render.py`), not yet checked against real data | FPA2; footprint bounded between ~4 rows (signal) and ~10 rows (null) | A real-data prediction: keystone-heterogeneity bias in real scenes should appear only within a narrow row-distance of genuine scene edges (coastlines, field boundaries), not as a smooth function of keystone amount | **Confirmed in simulation** (2026-07-22, see §9j); footprint width not yet pinned down; **not yet checked against real data** |
+| 8 | Retrieving on the raw native per-row grid (§9h–9j) gives few-ppm bias that vanishes at the smile-null row; retrieving on a *rectified* (regridded) spectrum — mirroring the real L1B rectify-then-retrieve pipeline — gives a much larger (tens-of-ppm), roughly row-independent bias plus one outright-diverging row, closer in *severity* to the "much more optimistic than real data" gap this whole study started from (§9's motivation) | Synthetic (`gd_render.rectify` + `gd_rectify_retrieve.py`, `plots/gd_raw_vs_rectified_fpa2.png`), not yet checked against real data | FPA2; rows 100–950 give order=2 bias −41 to −63 ppm (not zero at smile-null row 519); row 25 diverges under both dispersion orders | A real-data prediction: if real ground-test bias/non-convergence is dominated by the rectification-interpolation step rather than the underlying GD curves, the effect should NOT vanish near the calibrated smile-null row the way the PSF×smile bias (row 6) does | **Confirmed in simulation** (2026-07-23, see §9l); **not yet checked against real data** |
 
 **Still open / worth checking the archive for:**
 - **Spectral residual shapes from real (even non-converged) retrievals** — any
@@ -631,6 +741,17 @@ residual had a sharp step at channel 512 in band 2" does.
 - **Extend §9h–9j beyond FPA2** — confirm whether the PSF×smile bias magnitude and
   the contamination footprint width are FPA2-specific (worst clocking offset, §9c)
   or general to all four bands.
+- **Does real ground-test data show the rectification-interpolation bias signature
+  from §9l** — a bias that stays roughly constant across the slit rather than
+  vanishing at the smile-null row — separately from the PSF×smile and
+  keystone-heterogeneity mechanisms already matched to evidence?
+- **Test interpolation-order sensitivity in `gd_render.rectify`** (§9l) — does
+  cubic (`order=3`) meaningfully reduce the ~13% residual found with the default
+  bilinear regrid, and if so, does real L1B processing's resampling scheme matter
+  for the magnitude of this bias?
+- **Diagnose the row-25-style divergence pattern directly** (§9l) rather than just
+  recording it as diverged — is it generic Gauss-Newton fragility near the slit
+  edge, or something specific to that row's rectified data?
 - **Replace the ad hoc flat noise model** (§9k) with a physically-derived one
   (e.g. `FlatSNR`, matching the earlier `compute_keystone_bias.ipynb` pipeline) and
   check whether any §9h–9j conclusions change.

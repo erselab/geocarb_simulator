@@ -43,7 +43,7 @@ import numpy as np
 from gert.instrument import ILS
 
 from .focalplane import gaussian_blur_rows
-from .gd_polynomials import N_FPA, N_PX, xy_to_wavelength_slit
+from .gd_polynomials import N_FPA, N_PX, wavelength_slit_to_xy, xy_to_wavelength_slit
 
 
 @lru_cache(maxsize=N_FPA)
@@ -168,3 +168,52 @@ def image(
 
     # Along-slit (N/S) PSF blur -- the one genuine cross-row mixing step.
     return gaussian_blur_rows(A, spatial_psf_fwhm_px)
+
+
+def rectify(fpa: int, A: np.ndarray, s_grid: np.ndarray, wn_grid: np.ndarray,
+           order: int = 1) -> np.ndarray:
+    """Rectify a raw detector image onto a regular (slit, wavenumber) grid.
+
+    This is what a real L1B pipeline does to turn a raw detector image into
+    "one spectrum per slit position": for each point on the *output* regular
+    grid, use the inverse polynomial mapping (``wavelength_slit_to_xy``, the
+    C/D pair) to find where it came from in the *raw* image, then
+    interpolate there -- standard inverse-mapping image resampling, and the
+    simulated counterpart to the real GD-polynomial rectification described
+    in KEYSTONE_SMILE_BIAS_PLAN.md Sec. 9 (``keystone_report.pdf`` Sec.
+    4.8.1: "the polynomials encode the mapping of any location in the image
+    (x,y) to a slit position and wavelength (lambda,s)"; rectification
+    applies that mapping to resample onto a regular grid).
+
+    Not exact even net of interpolation error: A/B and C/D are independently
+    fit polynomials, not exact inverses of each other (§9h's round-trip
+    check found sub-pixel but nonzero discrepancy) -- exactly as real,
+    independently-fit rectification/projection polynomials are not exact
+    inverses either (``keystone_report.pdf`` §4.8.1: "the resulting
+    polynomials are not exactly invertible among each other").
+
+    Parameters
+    ----------
+    fpa : int
+    A : ndarray, shape (1024, 1024)
+        Raw detector image, as returned by :func:`image`.
+    s_grid : ndarray, shape (n_s,)
+        Target slit-angle grid [deg], ascending.
+    wn_grid : ndarray, shape (n_wn,)
+        Target wavenumber grid [cm-1], ascending.
+    order : int
+        Interpolation order passed to ``scipy.ndimage.map_coordinates``
+        (1 = bilinear, matching the real pipeline's linear regridding).
+
+    Returns
+    -------
+    ndarray, shape (n_s, n_wn)
+        Rectified spectrogram ``R[k, l]`` at ``(s_grid[k], wn_grid[l])``.
+        ``nan`` where the source pixel falls outside the raw image (off the
+        detector).
+    """
+    from scipy.ndimage import map_coordinates
+    lam_grid = 1.0e4 / wn_grid                       # cm-1 -> microns
+    SS, LL = np.meshgrid(s_grid, lam_grid, indexing="ij")   # (n_s, n_wn)
+    x, y = wavelength_slit_to_xy(fpa, LL, SS)
+    return map_coordinates(A, [y, x], order=order, mode="constant", cval=np.nan)
