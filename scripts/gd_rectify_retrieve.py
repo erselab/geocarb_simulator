@@ -149,6 +149,9 @@ def main() -> int:
         nl["_chi2"] = float(res.chisq_reduced)
         nl["_conv"] = res.converged
         nl["_n_bad"] = int(n_bad)
+        if res.diverged:   # gert-reported: chi2 went non-finite, not just an exception
+            nl["_diverged"] = "gert: chi2 non-finite"
+            return nl, None, nu_valid[::-1]
         residual = y_dist - res.y_ret
         return nl, residual, nu_valid[::-1]
 

@@ -700,6 +700,125 @@ which would indicate real L1B processing's exact resampling scheme matters;
 extend beyond FPA2; and diagnose the row-25-style divergence pattern
 directly rather than just recording it as "diverged."
 
+### 9m. Dense along-slit sweep (1024 rows): §9l's bias confirmed non-flat, a real `gert` bug found and fixed, and honest failure-rate statistics
+
+§9l sampled only 7 rows. This section reruns native vs. rectified retrieval
+at **every** row (1024, both dispersion orders) to look for systematic
+structure in the rectification-interpolation residual, per the user's
+request to "find the cause of the errors from the rectification by looking
+at systematic patterns in the residuals." Two infrastructure problems had to
+be fixed first; both are documented here because they change how earlier
+results in this document should be read.
+
+**Performance.** A dense sweep needs ~4× the earlier row count, twice
+(native + rectified), twice again (2 dispersion orders) — profiling showed
+each retrieval spent ~62% of its wall time in `gert.instrument.ILS.
+convolve()`, which scans the *entire* hi-res wavenumber grid per instrument
+channel (an unwindowed `np.argmin` plus a full-array delta/mask) rather than
+using the local support the Gaussian kernel actually needs — the same
+anti-pattern already fixed in this repo's own `gd_render._diagonal_ils_
+convolve` earlier this session. Fixed in `gert/instrument.py` with a
+windowed lookup (index arithmetic on the known-uniform hi-res grid, same
+technique). Verified bit-exact against the original algorithm on synthetic
+gaussian/tabulated/top_hat cases (1D and 2D, both `exact_center` modes,
+non-unit `width_scale`) and via `sanity_checks/dispersion_checks.py` (18/18
+pass, unchanged) — this is a pure performance fix, not a behavior change.
+Gives roughly a 1.7× per-retrieval speedup. Combined with running rows in
+parallel (they're fully independent retrievals) via `multiprocessing`'s
+`fork` start method — the ~2.2GB ABSCO table is loaded once in the parent
+before the worker pool starts, so every worker shares it via copy-on-write
+instead of re-loading it — 16 workers took the full 4096-retrieval sweep
+from an estimated multi-hour serial runtime down to ~26 minutes.
+
+**A real `gert` bug, found by this sweep and fixed at the user's request.**
+The first full sweep showed 555 rows on the rectified pipeline reporting
+`converged=True` with `chisq_reduced=nan` and wildly unphysical bias
+(sometimes billions of ppm) — `GERTRetrieval`'s `dx_norm` convergence
+criterion measures *step size*, not chi2 validity, so a Gauss-Newton step
+that overshoots into an unphysical state (negative gas scale driving
+pressure/ABSCO lookups out of range) could still register as "converged" if
+the resulting step size happened to be small. Root cause had two parts, both
+fixed in `gert/retrieval.py` (both `GERTRetrieval.run()` and
+`DecoupledGERTRetrieval.run()`):
+
+1. An in-loop check right after each iteration's chi2 is computed — catches
+   a non-finite chi2 immediately rather than computing a Jacobian (which can
+   itself raise) at an already-bad state.
+2. A second, initially-missed check on the *final* forward call after the
+   loop exits — necessary because `dx_norm` accepts a step and breaks the
+   loop *before* that step's own chi2 is ever tested inside the loop; the
+   post-loop "final forward call" was the first place that state's chi2 was
+   evaluated, and it wasn't being checked either. (Confirmed by reproducing
+   the exact failure: row 4 initially still showed `converged=True,
+   diverged=False, chi2=nan` after the first fix — only the second closed
+   the gap.)
+
+Both paths now set `converged=False` and a new `RetrievalResult.diverged =
+True`, and skip re-evaluating the forward model at the diverged state
+(which is exactly what raises the `ValueError`/`p_levels not increasing`-
+style crashes seen elsewhere in this document — re-running it after
+detecting divergence would just risk hitting the same crash). Verified: the
+row-4 case now correctly reports `diverged=True`; row 512 (a normal case)
+is bit-identical to its pre-fix result (chi2=3.2299, co2_scale=0.8690);
+`dispersion_checks.py` still 18/18. **This means the "555 falsely
+converged" number from the first pass of this sweep was itself partly
+wrong** — re-analysis after the fix shows most of those were order=0 rows
+with a large but *finite* chi2 (legitimately converged by step size, just a
+poor fit — expected, since order=0 has no dispersion term to absorb
+geometric distortion) that an overly strict ad hoc filter had misclassified
+as bugged. The real bug count was smaller; it is now exactly zero after the
+fix (confirmed: 0 rows with `converged=True` and non-finite chi2 in the
+corrected sweep).
+
+**Results (corrected sweep, `results/gd_dense_sweep.pkl`, `plots/
+gd_dense_sweep_fpa2.png`):**
+
+- **Native pipeline: converges cleanly at all 1024 rows, both orders** —
+  chi2 ≤ 1.7 (order 0) / ≤ 0.004 (order 2) everywhere. Zero divergences.
+  This confirms (again) that the native per-row grid is not itself a source
+  of instability; every failure mode below is specific to the rectified
+  pipeline.
+- **The rectification bias is not flat.** §9l's 7-point sample looked like
+  a roughly constant −50 to −65 ppm. At full density it's a real U-shaped
+  envelope (least negative near the slit centre, most negative toward the
+  edges) with oscillatory fine structure on top — visible directly in the
+  dense bias-vs-row curve.
+- **The residual heatmap shows the mechanism directly**: dense vertical
+  striping locked to individual absorption-line positions, not smooth
+  broadband error — consistent with a sub-pixel *line-registration* error
+  (worst where the spectral gradient is steepest) rather than a gross
+  distortion, matching the single-row finding in §9l.
+- **Residual magnitude vs. keystone severity is only weakly correlated.**
+  Mean |residual| has a "floor" (~0.048) present even at rows with near-zero
+  `rows_crossed`, growing only ~25% toward the highest-keystone rows. The
+  bias is present almost everywhere, with keystone amount as a secondary
+  modulator — not the primary driver.
+- **Honest failure-rate breakdown** (now trustworthy, post-fix): rectified
+  order=0 fails on 139/1024 rows (38 `diverged` + 101 stalled at
+  `max_iter` without converging, ~13.6%), scattered fairly broadly across
+  the slit rather than only at the edges, and even its "successful" rows
+  have wildly variable chi2 (9.7 to 1338) since nothing is absorbing the
+  geometric distortion. Rectified order=2 fails on 112/1024 rows (91
+  diverged + 21 stalled, ~10.9%) — a similar *count* to order=0, but
+  concentrated much more tightly near the slit edges, and its converged
+  chi2 is tight (3.2–4.7) rather than wildly variable. Order=2 isn't
+  dramatically more reliable by raw failure count than order=0 on this
+  pipeline, but it is far more trustworthy *when* it converges. 17 rows are
+  off-detector near one slit edge for both orders (matches §9l).
+
+**Interpretation.** The core §9l finding survives full-density scrutiny and
+gets sharper: the rectification-interpolation bias is a broad,
+line-registration-driven effect present almost everywhere on the slit, only
+weakly modulated by keystone amount — not a smooth function of geometric
+distortion severity the way the earlier native-grid mechanisms (§9h's
+PSF×smile, §9j's keystone-heterogeneity) were. That, plus a failure rate
+above 10% for both dispersion orders on the rectified pipeline (with order=0
+producing many "successful" but essentially meaningless fits), is a second,
+independent piece of evidence — alongside §9l's original one — that
+rectify-then-retrieve reproduces the qualitatively severe bias/convergence-
+failure signature this whole investigation set out to explain (§9's
+motivation).
+
 ---
 
 ## 10. Real-data observations (fill in as evidence is pulled)
@@ -723,6 +842,7 @@ residual had a sharp step at channel 512 in band 2" does.
 | 6 | On a *uniform* scene, real (non-separable) rendering + real N/S PSF leaves an order-independent CO₂ bias of up to ~-5.9 ppm that no dispersion order absorbs; with the PSF disabled the same setup converges to exactly 0 at every row | Synthetic (`gd_render.py`), not yet checked against real data | FPA2, rows 25–950, orders 2 and 4 agree to ~0.003 ppm | A real-data prediction to test: does actual GeoCarb data show an order-independent residual bias pattern under uniform illumination that scales with PSF/smile coupling rather than scene structure? | **Confirmed in simulation** (2026-07-22, see §9h); **not yet checked against real data** |
 | 7 | On a barcode scene, keystone-heterogeneity bias is a sharp, narrowly localized spike (-12.4 ppm vs. -2.1 ppm baseline) only within a few rows of a scene boundary — a systematic 12-transition test at ±10 rows from boundaries found *zero* signal (all 4 surface types, spread ~0.0001 ppm) | Synthetic (`gd_render.py`), not yet checked against real data | FPA2; footprint bounded between ~4 rows (signal) and ~10 rows (null) | A real-data prediction: keystone-heterogeneity bias in real scenes should appear only within a narrow row-distance of genuine scene edges (coastlines, field boundaries), not as a smooth function of keystone amount | **Confirmed in simulation** (2026-07-22, see §9j); footprint width not yet pinned down; **not yet checked against real data** |
 | 8 | Retrieving on the raw native per-row grid (§9h–9j) gives few-ppm bias that vanishes at the smile-null row; retrieving on a *rectified* (regridded) spectrum — mirroring the real L1B rectify-then-retrieve pipeline — gives a much larger (tens-of-ppm), roughly row-independent bias plus one outright-diverging row, closer in *severity* to the "much more optimistic than real data" gap this whole study started from (§9's motivation) | Synthetic (`gd_render.rectify` + `gd_rectify_retrieve.py`, `plots/gd_raw_vs_rectified_fpa2.png`), not yet checked against real data | FPA2; rows 100–950 give order=2 bias −41 to −63 ppm (not zero at smile-null row 519); row 25 diverges under both dispersion orders | A real-data prediction: if real ground-test bias/non-convergence is dominated by the rectification-interpolation step rather than the underlying GD curves, the effect should NOT vanish near the calibrated smile-null row the way the PSF×smile bias (row 6) does | **Confirmed in simulation** (2026-07-23, see §9l); **not yet checked against real data** |
+| 9 | At full row density (not just 7 sparse points), the rectified-pipeline bias is a real U-shaped envelope with oscillatory fine structure (not flat); the post-fit residual is locked to individual absorption-line positions (sub-pixel line-registration error); and both dispersion orders fail on >10% of rows on the rectified pipeline (order=0: 13.6%, scattered broadly; order=2: 10.9%, concentrated near slit edges) even though the *native* pipeline converges cleanly at all 1024 rows | Synthetic (`gd_dense_sweep.py`, `plots/gd_dense_sweep_fpa2.png`), not yet checked against real data | FPA2, all 1024 rows, both dispersion orders | A real-data prediction: real ground-test non-convergence should be far more common on rectified/regridded data than on any per-row-native-grid analysis, at a rate order 10%+, not just occasional edge cases — and should show line-locked (not smooth) residual structure | **Confirmed in simulation** (2026-07-23, see §9m); **not yet checked against real data** |
 
 **Still open / worth checking the archive for:**
 - **Spectral residual shapes from real (even non-converged) retrievals** — any
@@ -761,3 +881,137 @@ confirms an existing hypothesis (§9) or becomes a new one — either way it tur
 directly into a truth-generator requirement in §5 and a target pattern the
 `compute_keystone_bias.ipynb`-style diagnostics should be checked against, rather
 than the model driving toward whatever's easiest to build next.
+
+---
+
+## 11. Plan: two-band (O2-A + strong CO2) joint retrieval (2026-07-23)
+
+**Motivation.** Everything through §9 retrieves a single band (FPA2) in
+isolation. The real instrument doesn't: GeoCarb's L2 algorithm fits O2-A
+jointly with the CO2/CH4 bands specifically because O2-A constrains photon
+path length (Rayleigh + aerosol scattering), which is otherwise degenerate
+with the gas column in a single SWIR band alone. This section plans a
+two-band (O2-A = FPA0, CO2_strong = FPA2) joint retrieval with a floated
+aerosol state, to test whether that degeneracy-breaking behavior shows up in
+this simulator, and whether it interacts with the rectification-
+interpolation bias found in §9l.
+
+### 11a. What's already built — no new work needed
+
+- `build_geocarb_instrument()` (`geocarb_gert/instrument.py`) already builds
+  a **multi-window** `gert.Instrument` — FPA0 (`O2_A`) and FPA2
+  (`CO2_strong`) are just two of its four windows; a 2-band instrument is a
+  subset, not a new construction path.
+- `gert.retrieval.StateVector.gas_scaling` already sizes `albedo_{b}` /
+  `albedo_slope_{b}` / dispersion polynomials **per band** from
+  `len(prior_albedo)`, and already has first-class aerosol elements
+  (`include_tau_aerosol`, `include_height_aerosol`,
+  `include_thickness_aerosol`) — the joint gas+aerosol+per-band-nuisance
+  state vector this test needs is an existing, exercised code path, not
+  something to build.
+- `geocarb_gert/scene.py`'s `albedo_for(instrument, surface)` already
+  returns per-band albedo in window order, keyed by band label — already
+  multi-band-aware.
+- **The real GD calibration polynomials cover all four FPAs already**,
+  confirmed by inspecting `gcmap_em27.csv`: every coefficient (A–H) has four
+  columns (`A0..A3`, ..., `H0..H3`), one per FPA. `gd_polynomials.py`
+  already dispatches on its `fpa` argument. FPA0 has simply never been
+  *exercised* through `gd_render`/`rectify`/retrieval this session — only
+  FPA2 has (§9h–9l).
+
+### 11b. The genuinely new problem: cross-band ground co-registration
+
+Both bands look through the *same physical slit*, so the shared coordinate
+across bands is **real slit angle `s` [deg]**, not detector row index and
+not either band's own normalized `eta` convention (`eta = s / s_max(fpa)`,
+§`gd_render` module docstring) — `s_max` itself differs slightly per FPA.
+
+Checked concretely (2026-07-23): at the *same raw pixel* (col=512, row=512),
+`xy_to_wavelength_slit` gives:
+
+| FPA | band | real `s` at (512, 512) |
+|---|---|---|
+| 0 | O2_A | +0.0225° |
+| 1 | CO2_weak | −0.0422° |
+| 2 | CO2_strong | −0.0355° |
+| 3 | CH4_CO | −0.0227° |
+
+FPA0 vs FPA2 alone differ by 0.058° at the identical pixel — with row
+spacing ≈ `2·s_max/1024` ≈ 0.0045°/row, that's over **10 rows'** worth of
+ground-position error. Pairing "row *k* of FPA0" with "row *k* of FPA2" (the
+naive approach) is wrong by a large margin. This is exactly the clocking
+effect §9c characterized for FPA2 alone, now shown to also misalign band
+to band.
+
+**Fix:** never align bands by row index. Rectify each band independently
+onto a **shared physical `s_grid`** (real degrees, not per-band-normalized)
+using that band's own C/D polynomial (`wavelength_slit_to_xy`) — this is
+exactly the `gd_render.rectify()` machinery already built in §9l, it just
+needs to target a common grid instead of each band's own `linspace(-s_max,
+s_max, ...)`. `s_max` differs per FPA (checked: 2.2899° / 2.2820° / 2.2970°
+/ 2.2858° for FPA0-3), so the joint `s_grid` must be clipped to the
+intersection — and each band's own off-detector NaN edges (§9l found ~17
+rows off-detector near FPA2's slit ends) will differ per band too, further
+narrowing the usable joint range below either band's own valid range.
+
+**Open question that can't be resolved from code alone:** were all four
+FPAs' GD polynomials calibrated against the *same* external slit-angle
+reference during ground test (`keystone_report.pdf`'s calibration chain,
+§9e), so that "s = 0.03°" means the identical physical direction in FPA0's
+and FPA2's polynomials? If yes, shared-`s_grid` rectification is sufficient
+for co-registration. If each FPA's calibration used its own local/
+independent reference, there is an additional, uncalibrated inter-band
+boresight offset not captured in these polynomials at all, and the
+retrieval would need an extra free "inter-band pointing offset" nuisance
+parameter (or an independent geometric cross-calibration step) to absorb
+it. **This is the single highest-leverage thing to check before building
+further** — check the calibration provenance/report before writing any
+cross-band registration code.
+
+### 11c. Phasing
+
+1. **Validate FPA0 individually first.** Nothing in §9h–9l has ever touched
+   FPA0. Before trusting a joint retrieval built on top of it, re-run the
+   same validation battery already done for FPA2: round-trip
+   self-consistency (§9e's method), real smile amplitude and keystone/
+   smile-slope-null rows (§9f/9i's method, expect *different* row numbers
+   than FPA2's — row 25 keystone-null and row ~519 smile-slope-null are
+   FPA2-specific, driven by FPA2's own clocking per §9c), and the uniform-
+   scene rectify→retrieve bias check (§9l's method). No new code — these
+   are the existing scripts parameterized with `fpa=0` instead of `fpa=2`.
+2. **Resolve the shared-reference-frame question** in §11b before writing
+   any cross-band registration code — it determines whether an inter-band
+   pointing nuisance parameter is needed at all.
+3. **Extend rectification to a shared, intersection-clipped `s_grid`**
+   across the two bands (small extension of `gd_render.rectify`'s existing
+   call pattern, not a rewrite).
+4. **Extend scene construction** to a shared atmosphere (now including an
+   aerosol layer — confirm/exercise `ForwardModel`'s aerosol Jacobian path,
+   already present per `forward_model.py`'s `K_aer_lay` code) with
+   per-band albedo (`albedo_for` already supports this; just needs to be
+   called for a 2-band instrument instead of 1).
+5. **Build the joint retrieval**: 2-window `Instrument`, `StateVector.
+   gas_scaling(prior_albedo=[...2 values...], gases=['co2', 'o2', 'h2o'],
+   include_tau_aerosol=True, include_dispersion=True, ...)` (note `'o2'`
+   must be in `gases` since `GEOCARB_BANDS[0]`'s molecules are
+   `['o2', 'h2o']`), single `GERTRetrieval.run()` over the combined
+   measurement vector. Start with a **uniform scene** (matching the "null
+   test" convention used for every test in §9) before anything more
+   elaborate.
+6. **Compare CO2-only vs. CO2+O2A+aerosol joint retrieval** under both the
+   native-grid and rectified pipelines. Does adding O2-A actually reduce
+   bias / break the aerosol-CO2 degeneracy the way it's supposed to?
+   Working hypothesis: it should **not** touch the −50 to −65 ppm
+   rectification-interpolation bias from §9l, since that's a spectral-
+   registration artifact independent of photon path length/aerosol —
+   worth confirming rather than assuming, since real data will have both
+   effects simultaneously and a real retrieval can't turn one off to
+   isolate the other the way this test can.
+7. **Extend to non-uniform scenes** (§9j/9l's barcode/transition/realistic
+   patchwork scenes) only once the uniform case is understood, to check
+   whether cross-band registration error interacts with along-slit scene
+   structure the way single-band rectification error did.
+
+**Status:** planning only — no code written yet. §11a inventories what's
+reusable; §11b's open question is the next concrete step (check
+`keystone_report.pdf` calibration provenance) before phase 1 begins.
