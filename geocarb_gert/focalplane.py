@@ -72,6 +72,43 @@ def uniform_scene(S_hires: np.ndarray) -> Callable[[float], np.ndarray]:
     S = np.asarray(S_hires, dtype=float)
     return lambda eta: np.broadcast_to(S, np.shape(eta) + S.shape).copy()
 
+def _segment_blend(boundaries: np.ndarray, seg_matrix: np.ndarray,
+                   softness: float = 0.0) -> Callable[[float], np.ndarray]:
+    """Build a ``radiance(eta)`` that blends across ``len(seg_matrix)`` segments.
+
+    Shared, efficient engine behind :func:`random_scene` and (with explicit,
+    non-random boundaries/segments) any other piecewise along-slit scene:
+    evaluates the telescoping-``tanh``-sum construction as one small
+    per-segment weight array (shape ``eta.shape + (n_seg,)``) followed by a
+    single matrix multiply against ``seg_matrix``, instead of one full
+    ``eta.shape + (n_hires,)`` array add per boundary.
+
+    Parameters
+    ----------
+    boundaries : ndarray, shape (n_seg - 1,)
+        Ascending η boundary positions.
+    seg_matrix : ndarray, shape (n_seg, n_hires)
+        Stacked hi-res spectrum for each segment, in slit order.
+    softness : float
+        Transition half-width in η. Default ``0`` gives sharp truth edges.
+    """
+    boundaries = np.asarray(boundaries, dtype=float)
+    n_seg = seg_matrix.shape[0]
+
+    def radiance(eta: float) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        if boundaries.size == 0:
+            return np.broadcast_to(seg_matrix[0], eta.shape + seg_matrix.shape[1:]).copy()
+        w = 0.5 * (1.0 + np.tanh((eta[..., None] - boundaries) / max(softness, 1e-9)))
+        ones = np.ones(eta.shape + (1,))
+        zeros = np.zeros(eta.shape + (1,))
+        W = np.concatenate([ones, w, zeros], axis=-1)      # (*eta.shape, n_seg+1)
+        beta = W[..., :-1] - W[..., 1:]                     # (*eta.shape, n_seg)
+        return beta @ seg_matrix                             # (*eta.shape, n_hires)
+
+    return radiance
+
+
 def random_scene(scenes, n_segments: int = 4, softness: float = 0.0,
                  seed: Optional[int] = None) -> Callable[[float], np.ndarray]:
     """A patchwork slit scene — ``edge_scene`` generalized to several transitions.
@@ -82,10 +119,17 @@ def random_scene(scenes, n_segments: int = 4, softness: float = 0.0,
     ``softness``.  One image then shows *multiple* along-slit transitions, exercising
     the keystone/clocking spatial signatures at several edges at once.
 
-    Built as a telescoping sum of ``tanh`` steps, exactly like :func:`edge_scene`
-    (which is the ``n_segments == 2`` case)::
+    Mathematically a telescoping sum of ``tanh`` steps, exactly like
+    :func:`edge_scene` (which is the ``n_segments == 2`` case)::
 
         S(η) = S₀ + Σ_k ½[1 + tanh((η − b_k)/softness)] · (S_{k+1} − S_k)
+
+    but *evaluated* as one small blend-weight computation (shape
+    ``eta.shape + (n_segments,)``) followed by a single matrix multiply
+    against the stacked segment spectra, rather than one full
+    ``eta.shape + (n_hires,)`` array add per boundary — the latter makes
+    cost scale with the number of segments, which is expensive at
+    :mod:`geocarb_gert.gd_render` scale (~1e6 pixel evaluations per image).
 
     Parameters
     ----------
@@ -117,15 +161,9 @@ def random_scene(scenes, n_segments: int = 4, softness: float = 0.0,
     for _ in range(m - 1):
         choices = [c for c in range(len(scenes)) if c != idx[-1]] or [idx[-1]]
         idx.append(int(rng.choice(choices)))
-    seg = [scenes[i] for i in idx]
+    seg_matrix = np.stack([scenes[i] for i in idx])   # (n_segments, n_hires)
 
-    def radiance(eta: float) -> np.ndarray:
-        eta = np.asarray(eta, dtype=float)
-        S = np.broadcast_to(seg[0], eta.shape + seg[0].shape).copy()
-        for k, b in enumerate(boundaries):
-            w = 0.5 * (1.0 + np.tanh((eta - b) / max(softness, 1e-9)))
-            S = S + w[..., None] * (seg[k + 1] - seg[k])
-        return S
+    radiance = _segment_blend(boundaries, seg_matrix, softness)
 
     radiance.boundaries = boundaries
     radiance.segment_scenes = idx

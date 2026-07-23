@@ -138,6 +138,36 @@ def real_wavenumber_range(fpa: int, margin_cm1: float = 10.0):
     return lo, hi
 
 
+def rows_crossed(fpa: int, row) -> np.ndarray:
+    """Keystone row-crossing at detector row(s) ``row`` -- how many physical
+    rows this row's own dispersion trace spans across its full column range.
+
+    Same quantity as ``keystone_report.pdf`` Fig. 38 (there evaluated per
+    slit position via the E(x,s) polynomial); here evaluated directly per
+    detector row via B(x, row), which is what matters for picking rows to
+    test (KEYSTONE_SMILE_BIAS_PLAN.md Sec. 9h): 0 at FPA2's row 25 (its real
+    keystone-null row, Sec. 9c), growing to ~10 at the slit ends, matching
+    the ground-test report.
+
+    Parameters
+    ----------
+    fpa : int
+    row : array-like
+
+    Returns
+    -------
+    ndarray -- rows crossed (same shape as ``row``)
+    """
+    _check_fpa(fpa)
+    row = np.asarray(row, dtype=float)
+    _, s_lo = xy_to_wavelength_slit(fpa, np.zeros_like(row) + 4.0, row)
+    _, s_hi = xy_to_wavelength_slit(fpa, np.zeros_like(row) + (N_PX - 5.0), row)
+    _, s_ref0 = xy_to_wavelength_slit(fpa, np.array([4.0]), np.array([0.0]))
+    _, s_ref1 = xy_to_wavelength_slit(fpa, np.array([4.0]), np.array([float(N_PX - 1)]))
+    deg_per_row = float(np.abs(s_ref1 - s_ref0)[0]) / (N_PX - 1)
+    return np.abs(s_hi - s_lo) / deg_per_row
+
+
 def wavelength_slit_to_xy(fpa: int, wavelength, s):
     """Project (wavelength, slit position) to detector pixel coordinates.
 

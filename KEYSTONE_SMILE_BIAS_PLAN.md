@@ -452,15 +452,133 @@ spaced hi-res grid, instead of masking the full array ~1e6 times per render)
 for a 2× speedup; a further speedup would need compiled code; see the
 performance note in `gd_render.py`.
 
+### 9i. The smile-slope-null row is not the keystone-null row
+§9h noted row 100 shows *worse* PSF×smile bias than row 25, despite row 25
+being FPA2's real keystone-null point (§9c) — surprising if you expect one
+"sweet row" to govern everything. It doesn't, and the reason is precise:
+keystone-null (row 25) and the PSF×smile mechanism depend on two different
+derivatives of the same GD polynomials.
+
+- **Keystone-null (row 25):** where `B(x, row)` has zero spread *across a
+  row's own columns* — driven by clocking (the FPA/grating rotational
+  misalignment, §9c).
+- **Smile-slope-null (row 519, at FPA2's actual band centre):** where
+  `∂A(x, row)/∂row` — how fast the *wavelength calibration itself* shifts
+  between adjacent rows — is smallest. This is what governs the PSF×smile
+  mechanism (§9h): the PSF blends adjacent rows' dispersion curves, and that
+  blend is most benign wherever those curves are locally flattest with
+  respect to row, independent of where keystone happens to be null.
+
+Verified directly from the real coefficients: `∂ν/∂row` (evaluated at the
+band-centre column) is minimised at row 519 for FPA2, and this holds within
+1 row across the *entire* spectral range (checked at columns 4, 256, 512,
+768, 1019 — all give row 518–519) — not an artifact of picking one column.
+Keystone and smile are described as orthogonal distortions in this plan
+(§1), and this is a concrete instance of that orthogonality: their
+respective critical points don't have to coincide, and for FPA2 they don't.
+The near-symmetric bowl centred close to slit centre in §9h's PSF-enabled
+result is therefore the genuine signature of the smile-slope mechanism, not
+a discrepancy to explain away.
+
+### 9j. Barcode/transition tests: keystone-heterogeneity is real but narrowly localized
+Three scene tests beyond the uniform case, all FPA2, dispersion order 2
+unless noted:
+
+- **Barcode (32 bars, brightness-only, same spectrum)**: matches the
+  uniform-scene PSF×smile baseline (§9h) almost everywhere, **except a sharp,
+  localized spike at row 100** — CO₂ bias -12.4 ppm vs. -2.1 ppm baseline (an
+  order of magnitude worse), chi2 also degrading badly there (0.62 vs.
+  ~0.003–0.005 at neighbouring rows) — because row 100 happens to land only
+  ~4 rows from a bar boundary (bars are 32 rows wide). This is the classical
+  keystone-heterogeneity mechanism (§4) showing up concretely for the first
+  time with real curves — and it is **highly localized**, not a smooth
+  function of distance from any sweet row.
+- **Realistic (6 broad desert/forest/grass/water segments)**: matched the
+  uniform baseline almost exactly at all 7 originally-tested rows — not
+  because heterogeneity doesn't matter, but because none of those rows
+  (chosen by keystone-crossing amount) happened to land near one of the 5
+  segment boundaries.
+- **Systematic 12-transition test**: all 4×3 ordered surface-type pairs
+  (desert/forest/grass/water), boundaries placed at 6 rows spanning the full
+  keystone range (100–850, `rows_crossed` 0.83–8.69), tested at each
+  boundary ±10 rows (never exactly on a boundary — with `softness=0` that's
+  a mathematical discontinuity, and an order-0 retrieval diverged into an
+  unphysical atmospheric state there on the first attempt). Result: a clean
+  **null** — all 6 surface pairs collapse onto the identical PSF×smile-only
+  curve at every row (spread ~0.0001–0.0002 ppm, pure numerical noise),
+  regardless of which two surface types were on either side. So the
+  keystone-heterogeneity contamination footprint is narrower than 10 rows —
+  bounded between roughly 4 rows (where the barcode test's row 100 sat from
+  its nearest boundary) and 10 rows (where this test found nothing) — but
+  not yet pinned down precisely (§10).
+
+**Performance fix found along the way:** `random_scene`/`edge_scene`'s
+multi-segment blend originally did one full `(n_pixels, n_hires)` array add
+*per boundary*, so cost scaled with segment count — a 6-segment scene took
+~240s to render vs. ~40s for a 32-bar `barcode_scene` (which is O(1) in
+segment count, since brightness blending is scalar-per-pixel). Refactored
+into a shared `_segment_blend` engine: compute small per-segment blend
+weights (shape `eta.shape + (n_seg,)`), then one matrix multiply against the
+stacked segment spectra — ~5× faster, cost no longer scales with segment
+count.
+
+### 9k. Known assumptions in the `gd_render` retrieval pipeline
+Everything in §9h–9j shares the same test harness, which carries assumptions
+worth stating explicitly rather than leaving implicit:
+
+- **Radiative transfer:** `SingleScatterSolver` only — no aerosols, no
+  multiple scattering (Phase 4 in this plan's original scope, not yet
+  engaged by any of this work). Fixed US Standard Atmosphere
+  (`reference_atmosphere()`), identical for every row and every scene test —
+  only albedo varies along the slit, gas columns never do. Fixed single
+  geometry (`sample_geometries(..., n=1, seed=0)`) for every row, even
+  though a real N/S slit scan has genuinely different viewing geometry at
+  different slit positions — this harness isolates the geometric-distortion
+  effect specifically, by design.
+- **Instrument model:** one Gaussian ILS (FWHM from nominal resolving power)
+  for every row/pixel — not a real measured/tabulated ILS, and not spatially
+  varying. Gaussian PSF fixed at 1.5 px FWHM — spatial blur only, no stray
+  light or ghosting (§4.9 of `keystone_report.pdf`). Truth includes the real
+  geometric distortion and PSF only — not FPA2's separate calibration-gap
+  (§9d) or any detector-level effects (nonlinearity, dark current,
+  flat-field residuals).
+- **Retrieval configuration:** noise model is an ad hoc flat 0.3%-of-peak
+  floor (`sigma = max(0.003·|y|.max(), 1e-6)`), not a physically-derived
+  SNR/shot-noise model (unlike `FlatSNR(300.)` in the earlier
+  `compute_keystone_bias.ipynb` pipeline) — so chi2 values here are not on
+  the same scale as that pipeline's. Prior albedo is always desert
+  regardless of true scene content. Convergence uses `dx_norm`,
+  `dx_tol=0.01`, `max_iter=14` (established earlier this session), not
+  re-validated against tighter tolerances. **Single-band retrieval only**
+  (FPA2 in isolation) — never GeoCarb's real multi-band joint retrieval
+  (O2-A + weak CO₂ + strong CO₂ + CH₄/CO together), so these ppm-level
+  numbers are not directly comparable to a real L2 product. Every row
+  retrieved independently, no cross-row regularization. The retrieval's only
+  miscalibration nuisance parameter is the generic dispersion polynomial —
+  it has no spatial/keystone-correction mechanism at all (presumably
+  realistic, but an assumption about what "the retrieval" means here).
+- **Scene construction:** barcode/transition scenes use sharp edges
+  (`softness=0`); the "realistic" scene is 6 broad segments built from 4
+  fixed placeholder albedo values that `geocarb_gert/scene.py` itself
+  documents as "typical clear-sky nadir reflectances, not a specific
+  measured spectrum" — not real satellite imagery or measured land-cover
+  statistics.
+- **Scope:** everything in §9h–9j is **FPA2 only** — the band with the worst
+  clocking offset (§9c). None of FPA0/1/3 have been run through this
+  pipeline yet, so it isn't yet known whether the PSF×smile bias magnitude
+  found here is FPA2-specific or general to all four bands.
+
 **Status:** row-crossing/aliasing (9b), the FPA2 calibration gap (9d), the
-real smile amplitude (9f), and now the PSF×smile coupling bias (9h) are the
+real smile amplitude (9f), and the PSF×smile coupling bias (9h/9i) are the
 best-supported, quantified corrections to the Phase-1 truth generator, with
 clocking (9c) explaining *where* row-crossing is worst per band and 9g
 setting expectations for how far a smooth-polynomial truth generator can go.
 Round-trip self-consistency (9e) is ruled out. The truth generator itself is
-now built and validated (9h) — remaining work is applying it to non-uniform
-scenes (barcode, realistic) and checking whether smile's within-band
-variation is amplitude-only or a shape change (§7 item 5).
+built and validated on a uniform scene (9h) and partially validated on
+non-uniform scenes (9j, one clean null result plus one strong positive) —
+remaining work is pinning down the keystone-heterogeneity contamination
+footprint width precisely, extending beyond FPA2, and working through §9k's
+assumption list where it matters most (§10).
 
 ---
 
@@ -483,6 +601,7 @@ residual had a sharp step at channel 512 in band 2" does.
 | 4 | Geometric self-consistency (round-trip x,y→λ,s→x,y) error | `keystone_report.pdf` §4.8.4 — "easily absorbed in L2 retrieval processing" | All FPAs (except FPA2's uncalibrated region) | None — not a significant driver | **Ruled out**, see §9e |
 | 5 | Real smile amplitude is ~33–39 px at band centre (15–20× the `SMILE_PX=2.0` placeholder), and grows toward band edges (FPA0: ~37 px short-wavelength edge vs. ~48 px long-wavelength edge) | `gcmap_em27.csv` C/D polynomials via `geocarb_gert.gd_polynomials` (2026-07-22) | All FPAs; within-band variation checked for FPA0 | Real, per-band, wavelength-dependent smile amplitude in the truth generator — not a constant placeholder | **Confirmed**, see §9f |
 | 6 | On a *uniform* scene, real (non-separable) rendering + real N/S PSF leaves an order-independent CO₂ bias of up to ~-5.9 ppm that no dispersion order absorbs; with the PSF disabled the same setup converges to exactly 0 at every row | Synthetic (`gd_render.py`), not yet checked against real data | FPA2, rows 25–950, orders 2 and 4 agree to ~0.003 ppm | A real-data prediction to test: does actual GeoCarb data show an order-independent residual bias pattern under uniform illumination that scales with PSF/smile coupling rather than scene structure? | **Confirmed in simulation** (2026-07-22, see §9h); **not yet checked against real data** |
+| 7 | On a barcode scene, keystone-heterogeneity bias is a sharp, narrowly localized spike (-12.4 ppm vs. -2.1 ppm baseline) only within a few rows of a scene boundary — a systematic 12-transition test at ±10 rows from boundaries found *zero* signal (all 4 surface types, spread ~0.0001 ppm) | Synthetic (`gd_render.py`), not yet checked against real data | FPA2; footprint bounded between ~4 rows (signal) and ~10 rows (null) | A real-data prediction: keystone-heterogeneity bias in real scenes should appear only within a narrow row-distance of genuine scene edges (coastlines, field boundaries), not as a smooth function of keystone amount | **Confirmed in simulation** (2026-07-22, see §9j); footprint width not yet pinned down; **not yet checked against real data** |
 
 **Still open / worth checking the archive for:**
 - **Spectral residual shapes from real (even non-converged) retrievals** — any
@@ -495,6 +614,15 @@ residual had a sharp step at channel 512 in band 2" does.
   an order-independent residual bias under uniform illumination — separately from
   the row-crossing/aliasing and FPA2-calibration-gap mechanisms already matched to
   evidence?
+- **Pin down the keystone-heterogeneity contamination footprint width** (§9j) —
+  test offsets between 2 and 10 rows from a boundary to find where the effect
+  actually turns on, rather than the current 4–10 row bracket.
+- **Extend §9h–9j beyond FPA2** — confirm whether the PSF×smile bias magnitude and
+  the contamination footprint width are FPA2-specific (worst clocking offset, §9c)
+  or general to all four bands.
+- **Replace the ad hoc flat noise model** (§9k) with a physically-derived one
+  (e.g. `FlatSNR`, matching the earlier `compute_keystone_bias.ipynb` pipeline) and
+  check whether any §9h–9j conclusions change.
 
 **How this feeds back:** once a row here has real evidence attached, it either
 confirms an existing hypothesis (§9) or becomes a new one — either way it turns
