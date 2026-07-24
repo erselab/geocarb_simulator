@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=100G
 #SBATCH --time=04:00:00
-#SBATCH --array=0,1
+#SBATCH --array=1
 #SBATCH --output=%x_fpa%a_%j.out
 #SBATCH --error=%x_fpa%a_%j.err
 #
@@ -15,13 +15,18 @@
 #
 #   sbatch scripts/gd_band_stress_test.slurm
 #
-# --array=0,1 covers the two bands with no known ABSCO gaps (FPA0/O2_A,
-# FPA1/CO2_weak -- see KEYSTONE_SMILE_BIAS_PLAN.md Sec. 9m/9n's coverage
-# check). Add FPA3 (,3) once the ch4/h2o/co ABSCO blocks have been
-# extended to ~4400 cm-1 (Sec. 9m) -- it will fail with a clear
-# "Wavenumber ... not found" ValueError from gert.absco until then.
-# FPA2/CO2_strong is deliberately not included here: it already has its
-# own dense-sweep results (gd_dense_sweep.py) from a uniform scene.
+# --array=1 : only FPA1/CO2_weak is actually clear to run right now.
+#   FPA0/O2_A technically runs today but on a razor-thin ABSCO margin
+#   (1.99 cm-1 at margin_cm1=10 -- breaks entirely at margin=15) -- add
+#   ,0 back once its O2 block has been padded (recommended target
+#   ~12745-13300, up from 12745-13245) in the same regeneration pass as
+#   FPA3's fix, rather than running it now on the thin margin and
+#   re-running after padding anyway.
+#   FPA3/CH4_CO is hard-blocked until the ch4/h2o/co ABSCO blocks are
+#   extended to ~4400 cm-1 -- it will fail with a clear "Wavenumber ...
+#   not found" ValueError from gert.absco until then. Add ,3 once done.
+#   FPA2/CO2_strong is deliberately not included here: it already has
+#   its own dense-sweep results (gd_dense_sweep.py) from a uniform scene.
 #
 # --cpus-per-task: gd_band_stress_test.py auto-detects available cores
 # (geocarb_gert.gd_render.available_cpus(), via os.sched_getaffinity) and
