@@ -916,6 +916,66 @@ against the real absorption-line comb). Checking this directly:
   hasn't been pulled from `keystone_report.pdf` and checked against this
   zone. This is the natural next step before treating the two as related.
 
+### 9o. Dispersion direction alternates FPA to FPA — a second wavelength-ordering bug, this time in the native pipeline
+
+Extending the dense-sweep pipeline to FPA1 (`scripts/gd_band_stress_test.py`,
+a new along-slit composition/pressure stress test with its own truth
+generator in `geocarb_gert/along_slit_scene.py` -- see `scripts/
+gd_along_slit_atm_profiles.py`'s plot for the design; distinct from §11's
+two-band *joint* retrieval plan) hit the same *class* of bug as
+§9l's rectified-pipeline ordering fix, in a new place: **every** native-grid
+retrieval failed catastrophically for FPA1 — including at the slit centre,
+where the true along-slit atmosphere equals the retrieval's own prior, a
+case that should retrieve almost trivially. Verbose Gauss-Newton tracing
+showed the state vector diverging (`albedo_0` collapsing to ~0, `p_scale`
+blowing past 3.0) within 2 iterations regardless of row.
+
+Root cause, confirmed by the user (2026-07-24): **wavenumber-vs-column
+direction alternates FPA to FPA** — internal reflections/beam splitters in
+GeoCarb's real optical path flip the dispersion direction for alternating
+bands. Checked explicitly via `xy_to_wavelength_slit` at each FPA's own
+representative row:
+
+| FPA | band | wavenumber vs. column |
+|---|---|---|
+| 0 | O2_A | descending |
+| 1 | CO2_weak | **ascending** |
+| 2 | CO2_strong | descending |
+| 3 | CH4_CO | **ascending** (expected; not yet verified end-to-end, blocked on the §9d/§11 ABSCO extension) |
+
+`gert.ForwardModel` always returns `y`/`y_ret` in ascending-*wavelength*
+(descending-wavenumber) order, regardless of `obs_grid`'s input order
+(`SpectralWindow.wn_instrument` sorts ascending, then `wl_instrument`
+reverses it — see §9l). A native-grid retrieval's `y_dist`, built by
+indexing the raw rendered row in column order, only lines up with that
+convention when the FPA's own dispersion happens to run descending — true
+for FPA0/FPA2, false for FPA1/FPA3. Every native-grid script before this
+one (§9h–9n) only ever used FPA2, so this asymmetry was invisible until a
+second band was exercised — the exact same shape of blind spot as §9l's
+original bug (a lucky accident of direction masking a real ordering
+requirement), just in the pipeline that had until now always been the
+*reliable* one.
+
+**Fixed** in `gd_band_stress_test.py`'s native-pipeline branch by checking
+the direction explicitly (`nu_row[0] < nu_row[-1]`) and reversing both
+`y_dist` and `nu_row` together when ascending, rather than assuming either
+direction — the general-purpose fix, not a per-FPA special case. Verified:
+FPA1 row 512 (slit centre) now converges cleanly (chi2=0.20, co2_scale and
+h2o_scale both close to 1 as expected); rows 0 and 960 (arid/humid slit
+ends) converge to physically sensible h2o_scale (0.55 arid, 1.86 humid,
+tracking the designed along-slit humidity gradient correctly). Documented
+as `DISPERSION_ASCENDING` in `geocarb_gert/gd_polynomials.py` so this
+doesn't need rediscovering by debugging again, though the runtime check
+remains the actual safeguard (self-verifying, not dependent on trusting a
+hardcoded table).
+
+**Implication for everything in §9h–9n**: those results are FPA2-only and
+unaffected by this bug (FPA2 happens to be on the "lucky" side). But it's a
+reminder that *every* single-band script in this study to date implicitly
+assumed a convention validated on exactly one of the four bands — worth
+keeping in mind before generalizing any §9 conclusion across bands without
+re-checking it the way this section just had to.
+
 ---
 
 ## 10. Real-data observations (fill in as evidence is pulled)

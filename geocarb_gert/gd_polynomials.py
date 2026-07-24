@@ -40,6 +40,35 @@ _TERMS = ["const", "x", "y", "xx", "xy", "yy", "xxx", "xxy", "xyy", "yyy",
 N_FPA = 4
 N_PX = 1024   # real detector rows/columns
 
+# Whether wavenumber increases with raw column index, at each FPA's own
+# column-to-wavelength mapping (xy_to_wavelength_slit at a representative
+# row). Alternates FPA to FPA -- confirmed by the user 2026-07-24: internal
+# reflections/beam splitters in the real optical path flip the dispersion
+# direction for alternating bands, not a calibration artifact.
+#
+#   FPA0 (O2_A)       False -- descending wavenumber with column
+#   FPA1 (CO2_weak)   True  -- ascending wavenumber with column
+#   FPA2 (CO2_strong) False -- descending wavenumber with column
+#   FPA3 (CH4_CO)     True  -- ascending wavenumber with column (expected;
+#                               not yet verified end-to-end pending the
+#                               ABSCO ch4/h2o/co coverage extension, see
+#                               KEYSTONE_SMILE_BIAS_PLAN.md)
+#
+# This matters because gert.ForwardModel always returns y/y_ret in
+# ascending-*wavelength* order (= descending wavenumber) regardless of
+# obs_grid's input order (gert/instrument.py's SpectralWindow.wn_instrument
+# sorts ascending, then wl_instrument reverses it). A native-grid
+# retrieval's y_dist -- built by indexing the raw rendered row in column
+# order -- only lines up with that convention for FPA0/FPA2; FPA1/FPA3 need
+# an explicit reversal. Every earlier native-grid script in this study
+# happened to only ever use FPA2, so this asymmetry went unnoticed until
+# scripts/gd_band_stress_test.py exercised FPA1 and every retrieval failed
+# catastrophically, even at the slit centre where truth == prior -- see
+# KEYSTONE_SMILE_BIAS_PLAN.md Sec. 9o. Don't assume either direction:
+# check ``nu_row[0] < nu_row[-1]`` (or use DISPERSION_ASCENDING) and
+# reverse if needed, the way gd_band_stress_test.py's _worker() does.
+DISPERSION_ASCENDING = {0: False, 1: True, 2: False, 3: True}
+
 
 @lru_cache(maxsize=1)
 def _coeffs(csv_path: str = str(_CSV_PATH)) -> dict:
