@@ -59,7 +59,7 @@ export PYTHONPATH="${REPO_ROOT}:${GERT_ROOT}"
 # either as a fatal "unbound variable" rather than running with a sane
 # default. To test a specific band outside SLURM: `FPA=0 bash scripts/
 # gd_band_stress_test.slurm`.
-FPA="${SLURM_ARRAY_TASK_ID:-${FPA:-1}}"
+FPA="${SLURM_ARRAY_TASK_ID:-${FPA:-0}}"
 CPUS="${SLURM_CPUS_PER_TASK:-$(nproc)}"
 echo "Host: $(hostname)   FPA: ${FPA}   CPUs: ${CPUS}"
 
