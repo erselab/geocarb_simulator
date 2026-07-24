@@ -36,6 +36,7 @@ import numpy as np
 import geosat_geometry as gg
 from geocarb_gert import GEOCARB_BANDS, albedo_for, reference_atmosphere, sample_geometries
 from geocarb_gert.gd_polynomials import real_wavenumber_range, xy_to_wavelength_slit
+from geocarb_gert.gd_render import available_cpus
 
 import gert
 from gert.forward_model import ForwardModel
@@ -49,7 +50,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 FPA = 2
 GASES = ["co2", "ch4", "co", "h2o"]
 ROW_STEP = 1                 # every row; set >1 to subsample
-N_WORKERS = 16
+N_WORKERS = available_cpus()
 
 # -- globals populated in main() before the Pool is forked, so every worker
 # -- inherits them via copy-on-write instead of re-loading/re-pickling --

@@ -35,6 +35,8 @@ always correspond to the true top and bottom of that FPA's slit.
 """
 from __future__ import annotations
 
+import multiprocessing as mp
+import os
 from functools import lru_cache
 from typing import Callable
 
@@ -44,6 +46,16 @@ from gert.instrument import ILS
 
 from .focalplane import gaussian_blur_rows
 from .gd_polynomials import N_FPA, N_PX, wavelength_slit_to_xy, xy_to_wavelength_slit
+
+
+def available_cpus() -> int:
+    """CPUs actually usable by this job (respects the SLURM cgroup
+    allocation, unlike ``os.cpu_count()`` which reports the whole node's
+    physical core count regardless of what's actually allocated)."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
 
 
 @lru_cache(maxsize=N_FPA)
@@ -119,12 +131,28 @@ def _diagonal_ils_convolve(wn_hires: np.ndarray, S_row: np.ndarray,
     return out
 
 
+# -- globals populated in image() before the Pool is forked, so every worker
+# -- inherits them (including the arbitrary `radiance` closure, which isn't
+# -- generally picklable) via copy-on-write instead of needing IPC transfer --
+_G_RENDER = {}
+
+
+def _render_row(i: int):
+    g = _G_RENDER
+    lam_row, s_row = xy_to_wavelength_slit(g["fpa"], g["cols"], np.full(N_PX, float(i)))
+    nu_row = 1.0e4 / lam_row                      # microns -> cm-1
+    eta_row_true = s_row / g["sm"]                # true slit position per column
+    S_row = np.asarray(g["radiance"](eta_row_true), dtype=float)   # (N_PX, n_hires)
+    return i, _diagonal_ils_convolve(g["wn_hires"], S_row, nu_row, g["ils"])
+
+
 def image(
     fpa: int,
     wn_hires: np.ndarray,
     radiance: Callable[[float], np.ndarray],
     ils: ILS,
     spatial_psf_fwhm_px: float = 1.5,
+    n_workers: int | None = None,
 ) -> np.ndarray:
     """Render the real-detector focal-plane image for one FPA.
 
@@ -145,6 +173,14 @@ def image(
         Along-slit (N/S) PSF FWHM [detector pixels] -- a *different* blur
         from ``ils`` (which is spectral, in cm-1). GeoCarb measured ~1.5 px
         (KEYSTONE_SMILE_BIAS_PLAN.md Sec. 1/9). Set 0 to disable.
+    n_workers : int, optional
+        Rows are independent (only the final PSF blur mixes them), so
+        rendering is embarrassingly parallel. Defaults to
+        :func:`available_cpus`. Set 1 to force the plain serial loop (e.g.
+        for debugging). Automatically falls back to serial if called from
+        inside an already-parallel worker process (a nested
+        ``multiprocessing.Pool`` would otherwise raise "daemonic processes
+        are not allowed to have children").
 
     Returns
     -------
@@ -156,15 +192,28 @@ def image(
     cols = np.arange(N_PX, dtype=float)
     sm = s_max(fpa)
 
-    # Every pixel at its own true (wavelength, slit-position) -- no per-row
-    # representative eta, no cross-row borrowing.
+    if n_workers is None:
+        n_workers = available_cpus()
+    if mp.current_process().daemon:
+        n_workers = 1   # already inside a worker process -- can't nest Pools
+
     A = np.empty((N_PX, N_PX), dtype=float)
-    for i in range(N_PX):
-        lam_row, s_row = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i)))
-        nu_row = 1.0e4 / lam_row                      # microns -> cm-1
-        eta_row_true = s_row / sm                     # true slit position per column
-        S_row = np.asarray(radiance(eta_row_true), dtype=float)   # (N_PX, n_hires)
-        A[i] = _diagonal_ils_convolve(wn_hires, S_row, nu_row, ils)
+    if n_workers <= 1:
+        # Every pixel at its own true (wavelength, slit-position) -- no
+        # per-row representative eta, no cross-row borrowing.
+        for i in range(N_PX):
+            lam_row, s_row = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i)))
+            nu_row = 1.0e4 / lam_row                      # microns -> cm-1
+            eta_row_true = s_row / sm                     # true slit position per column
+            S_row = np.asarray(radiance(eta_row_true), dtype=float)   # (N_PX, n_hires)
+            A[i] = _diagonal_ils_convolve(wn_hires, S_row, nu_row, ils)
+    else:
+        _G_RENDER.update(dict(fpa=fpa, cols=cols, sm=sm, wn_hires=wn_hires,
+                              radiance=radiance, ils=ils))
+        ctx = mp.get_context("fork")
+        with ctx.Pool(n_workers) as pool:
+            for i, row in pool.imap_unordered(_render_row, range(N_PX), chunksize=8):
+                A[i] = row
 
     # Along-slit (N/S) PSF blur -- the one genuine cross-row mixing step.
     return gaussian_blur_rows(A, spatial_psf_fwhm_px)
