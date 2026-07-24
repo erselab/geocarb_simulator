@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=gd_band_stress
-#SBATCH --partition=standard
+#SBATCH --partition=atmos2
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=100G
 #SBATCH --time=04:00:00
-#SBATCH --array=1
+#SBATCH --array=0,1
 #SBATCH --output=%x_fpa%a_%j.out
 #SBATCH --error=%x_fpa%a_%j.err
 #
@@ -15,7 +15,7 @@
 #
 #   sbatch scripts/gd_band_stress_test.slurm
 #
-# --array=1 : only FPA1/CO2_weak is actually clear to run right now.
+# --array=0,1 : only FPA1/CO2_weak is actually clear to run right now.
 #   FPA0/O2_A technically runs today but on a razor-thin ABSCO margin
 #   (1.99 cm-1 at margin_cm1=10 -- breaks entirely at margin=15) -- add
 #   ,0 back once its O2 block has been padded (recommended target
@@ -53,7 +53,14 @@ PYTHON="/gpfs/fs1/home/scrowel3/miniforge3/envs/analysis/bin/python"
 cd "$REPO_ROOT"
 export PYTHONPATH="${REPO_ROOT}:${GERT_ROOT}"
 
-FPA="${SLURM_ARRAY_TASK_ID}"
-echo "Host: $(hostname)   FPA: ${FPA}   CPUs: ${SLURM_CPUS_PER_TASK}"
+# Falls back to $FPA (or 1) when run directly via `bash` instead of
+# `sbatch` -- SLURM_ARRAY_TASK_ID/SLURM_CPUS_PER_TASK are only set inside
+# an actual SLURM allocation, and `set -u` above would otherwise treat
+# either as a fatal "unbound variable" rather than running with a sane
+# default. To test a specific band outside SLURM: `FPA=0 bash scripts/
+# gd_band_stress_test.slurm`.
+FPA="${SLURM_ARRAY_TASK_ID:-${FPA:-1}}"
+CPUS="${SLURM_CPUS_PER_TASK:-$(nproc)}"
+echo "Host: $(hostname)   FPA: ${FPA}   CPUs: ${CPUS}"
 
 "$PYTHON" scripts/gd_band_stress_test.py --fpa "${FPA}"
