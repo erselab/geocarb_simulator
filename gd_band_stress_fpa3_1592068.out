@@ -1,6 +1,0 @@
-Host: bhd0034   FPA: 3   CPUs: 32   Uniform: 0 Noise: 0   SNR: default   Barcode: 1
-FPA3 (CH4_CO): molecules=['ch4', 'co', 'h2o', 'n2o']  wn=[4248.60,4360.69]
-barcode scene built (32 bars, 0.1s)
-raw render done (2.6s)
-rectified (1024, 770) (3.2s)
-3072 retrievals (1024 rows x 3 pipeline/order combos), 32 workers, gases=['ch4', 'co', 'h2o']
