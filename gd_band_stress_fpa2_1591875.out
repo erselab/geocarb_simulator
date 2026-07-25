@@ -1,0 +1,24 @@
+Host: bhd0029   FPA: 2   CPUs: 32   Uniform: 1
+FPA2 (CO2_strong): molecules=['co2', 'h2o']  wn=[4781.83,4905.35]
+lookup table built (1 samples, 0.4s)
+raw render done (1.7s)
+rectified (1024, 1075) (2.6s)
+3072 retrievals (1024 rows x 3 pipeline/order combos), 32 workers, gases=['co2', 'h2o']
+  200/3072 done (106s)
+  400/3072 done (160s)
+  600/3072 done (220s)
+  800/3072 done (282s)
+  1000/3072 done (352s)
+  1200/3072 done (527s)
+  1400/3072 done (688s)
+  1600/3072 done (857s)
+  1800/3072 done (997s)
+  2000/3072 done (1123s)
+  2200/3072 done (1191s)
+  2400/3072 done (1250s)
+  2600/3072 done (1308s)
+  2800/3072 done (1358s)
+  3000/3072 done (1411s)
+all done (1419s)
+diverged: 76, off-detector (rectified only): 17, total: 3072
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/results/gd_band_stress_test_fpa2_uniform.pkl

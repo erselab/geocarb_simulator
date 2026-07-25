@@ -1,0 +1,6 @@
+Host: bhd0023   FPA: 0   CPUs: 32   Uniform: 0 Noise: 0   SNR: default   Barcode: 0
+FPA0 (O2_A): molecules=['o2', 'h2o']  wn=[12946.96,13243.01]
+lookup table built (400 samples, 5.0s)
+raw render done (37.1s)
+rectified (1024, 1046) (38.1s)
+3072 retrievals (1024 rows x 3 pipeline/order combos), 32 workers, gases=['h2o']

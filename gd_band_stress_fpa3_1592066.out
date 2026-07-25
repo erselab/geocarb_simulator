@@ -1,0 +1,6 @@
+Host: bhd0026   FPA: 3   CPUs: 32   Uniform: 0 Noise: 0   SNR: default   Barcode: 0
+FPA3 (CH4_CO): molecules=['ch4', 'co', 'h2o', 'n2o']  wn=[4248.60,4360.69]
+lookup table built (400 samples, 3.3s)
+raw render done (14.0s)
+rectified (1024, 770) (14.8s)
+3072 retrievals (1024 rows x 3 pipeline/order combos), 32 workers, gases=['ch4', 'co', 'h2o']

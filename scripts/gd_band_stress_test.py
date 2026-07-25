@@ -38,26 +38,53 @@ main() for the full rationale):
                      less-informative case for such pipelines throughout
                      this study, so it's skipped here to save compute.
   "undistorted"   (order=0 only) -- no keystone/smile/clocking/spatial
-                     PSF at all: the true spectrum at each row's exact
-                     intended slit position, evaluated directly (bypasses
-                     gd_render.image()/rectify() entirely). A baseline for
-                     whether a retrieval difficulty is a fundamental RT/
-                     information-content limit or something geometric
-                     distortion makes worse -- added 2026-07-24 to check
-                     the H2O/p_scale degeneracy found near the pressure
-                     mountain in the first FPA1 run (confirmed: the same
-                     dip appears here too, with zero distortion, so it's
-                     a real RT/retrieval limit). No real miscalibration
-                     for dispersion to correct here, so order=2 is
-                     skipped -- floating it would give those parameters
-                     nothing to fit and risks spurious degeneracy with
-                     h2o_scale/p_scale that would contaminate exactly the
-                     question this baseline exists to answer.
+                     PSF at all: the true spectrum evaluated directly at
+                     each row's own real per-pixel positions (the same 1024
+                     native positions "native" uses -- bypasses
+                     gd_render.image()/rectify() entirely, and shares
+                     native's exact sampling density, not the coarser
+                     shared nominal wn_grid this used before 2026-07-24).
+                     A baseline for whether a retrieval difficulty is a
+                     fundamental RT/information-content limit or something
+                     geometric distortion makes worse -- added 2026-07-24 to
+                     check the H2O/p_scale degeneracy found near the
+                     pressure mountain in the first FPA1 run (confirmed: the
+                     same dip appears here too, with zero distortion, so
+                     it's a real RT/retrieval limit). Matching native's real
+                     per-row grid (rather than the old shared nominal grid,
+                     which sampled ~38% more coarsely than the real detector
+                     for FPA3) removes a second confound: native vs.
+                     undistorted now differ only in whether the spectrum
+                     carries real geometric distortion, not also in sampling
+                     density. No real miscalibration for dispersion to
+                     correct here, so order=2 is skipped -- floating it
+                     would give those parameters nothing to fit and risks
+                     spurious degeneracy with h2o_scale/p_scale that would
+                     contaminate exactly the question this baseline exists
+                     to answer.
 
 Known ABSCO coverage requirement (found 2026-07-24): FPA3 (CH4_CO) needs
 the ch4/h2o/co ABSCO blocks extended to ~4400 cm-1 (see
 KEYSTONE_SMILE_BIAS_PLAN.md) -- this script will raise a clear ValueError
 from gert.absco if that hasn't been done yet. FPA0/FPA1 have no known gaps.
+
+Added 2026-07-25:
+- Every row's retrieval now saves its complete state vector (retrieved
+  value, prior, 1-sigma posterior uncertainty for every element -- not
+  just the derived gas/p_surface biases) under bias["_state_full"], plus
+  a convenience retrieved-minus-prior view for the nuisance elements
+  under bias["_state"] (see _retrieve()). Residuals were already saved
+  per row (bias["residual"] via _worker()'s return).
+- --snr / --noise / --noise-seed: SNR-based Sy_inv weighting (gert.
+  instrument.FlatSNR's definition) always replaces the old ad hoc 0.3%-
+  of-peak hack now; --noise additionally draws one random Gaussian
+  realization per pixel and adds it consistently across all three
+  pipelines (see main()'s noise_arr, shared via _G so native/rectified/
+  undistorted see the same noisy data, not independent draws). Default
+  SNR is band-specific (DEFAULT_SNR_BY_FPA): 400/300/300/200 for FPA0-3.
+- --barcode / --barcode-bars: an alternative to the along-slit composition
+  scene using geocarb_gert.focalplane.barcode_scene (brightness-only
+  variation, uniform composition truth) -- see Sec. 9j.
 
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_band_stress_test.py --fpa 1
 Output: results/gd_band_stress_test_fpa<N>.pkl
@@ -90,6 +117,12 @@ from gert.rt_solver import SingleScatterSolver
 GERT_ROOT = Path("/scratch/scrowel3_lab/gert")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Default per-band SNR (--snr overrides for whichever band --fpa targets).
+# O2-A is the brightest/highest-SNR channel; the CH4/CO band is the
+# weakest. Matches gert.instrument.FlatSNR's definition (sigma = peak
+# in-band radiance / SNR) -- see main()'s sigma_band computation.
+DEFAULT_SNR_BY_FPA = {0: 400.0, 1: 300.0, 2: 300.0, 3: 200.0}
+
 # Gases whose true column is constant along the slit (see xtrue_of_row in
 # main()) -- retrieving a separate {gas}_scale for these is nearly
 # degenerate with p_scale (every StateVector floats p_scale by default),
@@ -108,14 +141,19 @@ def _retrieve(y_dist: np.ndarray, obs_grid: np.ndarray, order: int, xtrue_row: d
     win = SpectralWindow(wn_min=g["wn_min"], wn_max=g["wn_max"],
                          ils=ILS(type="gaussian", fwhm=g["fwhm_cm"]),
                          molecules=list(g["mols"]), label=g["label"], obs_grid=obs_grid)
-    inst = Instrument(windows=[win], snr=300.0)
+    inst = Instrument(windows=[win], snr=g["snr"])
     # The retrieval's prior/forward-model atmosphere is deliberately the
     # fixed slit-centre state (g["atm"]), NOT the row's true state -- the
     # along-slit deviation from this prior is exactly what each row's
     # retrieval must recover via its gas-scale/p_scale state elements.
     fm = ForwardModel(g["atm"], g["absco"], inst, g["geo"],
                       solver=SingleScatterSolver(), solar_spectrum=g["solar"])
-    sigma = np.maximum(0.003 * np.abs(y_dist).max(), 1e-6)
+    # SNR-based sigma (gert.instrument.FlatSNR's own definition: peak
+    # in-band radiance / SNR), computed once in main() from the noiseless
+    # raw image and always used here for Sy_inv -- replaces the old ad hoc
+    # "0.3% of this row's peak" hack (2026-07-25, confirmed with the user
+    # this should apply to every run, not just ones with --noise on).
+    sigma = g["sigma_band"]
     Sy_inv = np.diag(np.full(len(y_dist), 1.0 / sigma ** 2))
     sv = StateVector.gas_scaling(prior_albedo=g["albedo"], prior_albedo_slope=np.zeros(1),
                                  gases=g["gases"],   # co2/ch4 uncertainties default to 0.10/0.20,
@@ -142,6 +180,8 @@ def _retrieve(y_dist: np.ndarray, obs_grid: np.ndarray, order: int, xtrue_row: d
     except (ValueError, np.linalg.LinAlgError) as e:
         nl = {gas: np.nan for gas in g["gases"]}
         nl["p_surface"] = np.nan
+        nl["_state"] = {}
+        nl["_state_full"] = {}
         nl["_chi2"] = np.nan
         nl["_conv"] = False
         nl["_diverged"] = str(e)
@@ -160,6 +200,34 @@ def _retrieve(y_dist: np.ndarray, obs_grid: np.ndarray, order: int, xtrue_row: d
     # get a surface-pressure bias metric.
     p_scale_ret = float(res.x_ret[names.index("p_scale")])
     nl["p_surface"] = g["p_surface_prior"] * p_scale_ret - xtrue_row["p_surface"]
+    # Every other state-vector element (T_offset, albedo_0, albedo_slope_0,
+    # and disp_a{0,1,2}_0 when order>0) has no clean along-slit "truth" to
+    # diff against the way gases/p_surface do -- the scene doesn't vary
+    # temperature or albedo independently, and there's no single scalar
+    # "true" dispersion coefficient. Tracked as retrieved-minus-prior
+    # instead (T_offset/albedo priors are 0.0/the fixed desert albedo;
+    # dispersion priors are always 0.0), added 2026-07-25 so the plot
+    # script can show every retrieved parameter, not just the "science"
+    # ones -- e.g. dispersion coefficients wandering non-smoothly along the
+    # slit would be a visible sign of them absorbing noise/degeneracy
+    # rather than real wavelength-calibration error (a question raised
+    # earlier about native's unusually low chi2, never directly checked).
+    _tracked = {f"{gas}_scale" for gas in g["gases"]} | {"p_scale"}
+    nl["_state"] = {name: float(res.x_ret[i] - prior)
+                    for i, (name, prior) in enumerate(zip(names, sv.prior))
+                    if name not in _tracked}
+    # Complete raw state vector + posterior uncertainty (added 2026-07-25,
+    # per user request): every element's retrieved value, prior, and
+    # 1-sigma posterior uncertainty (Rodgers-style, from the final Ŝ =
+    # (KᵀSy⁻¹K + Sa⁻¹)⁻¹), independent of the derived bias/diff quantities
+    # above -- this is the raw material anything else can be recomputed
+    # from, not just a convenience view.
+    nl["_state_full"] = {
+        "names": list(names),
+        "x_ret": res.x_ret.copy(),
+        "x_prior": sv.prior.copy(),
+        "sigma": res.posterior_sigma(),
+    }
     nl["_chi2"] = float(res.chisq_reduced)
     nl["_conv"] = res.converged
     if res.diverged:
@@ -204,24 +272,50 @@ def _worker(task):
             nu_out = nu_valid[::-1]
             nl["_n_bad"] = int((~valid).sum())
         else:  # "undistorted" -- no keystone/smile/clocking, no spatial PSF:
-            # the true hi-res spectrum at this row's exact intended slit
-            # position, evaluated directly and ILS-convolved onto the
-            # shared nominal wn_grid -- bypasses gd_render.image()/rectify()
-            # entirely. Isolates the retrieval's inherent ability to
-            # separate state-vector elements (e.g. H2O vs p_scale) given
-            # only RT physics + noise + prior, with zero geometric-
-            # distortion confound. Same trick used in Sec. 9l to isolate
-            # pure rectification-interpolation error from the true spectrum.
+            # the true hi-res spectrum evaluated directly at this row's own
+            # real per-pixel positions -- the SAME 1024 native positions
+            # "native" uses above, not the separate shared nominal wn_grid
+            # this used to use. Bypasses gd_render.image()/rectify() (no
+            # geometric distortion in the spectrum), but now (2026-07-24)
+            # also matches native's real per-row sampling exactly: the old
+            # shared wn_grid had ~38% coarser density than the real detector
+            # (e.g. FPA3: 8.36 vs 11.56 points/cm-1) -- an unwanted sampling-
+            # density confound on top of the distortion difference this
+            # baseline is meant to isolate. native and undistorted now share
+            # an identical grid per row; the only remaining difference is
+            # whether the spectrum itself carries real keystone/smile/PSF
+            # distortion (native, via gd_render.image()) or not (undistorted,
+            # evaluated directly from the truth lookup table).
+            cols = np.arange(1024.0)
+            lam_row, _ = xy_to_wavelength_slit(g["fpa"], cols, np.full(1024, float(k)))
+            nu_row = 1e4 / lam_row
+            reverse = nu_row[0] < nu_row[-1]   # match native's convention (see above)
+            if reverse:
+                nu_row = nu_row[::-1]
             eta_row = g["x_km_of_row"][k] / als.SLIT_HALF_KM
-            wn_grid = g["wn_grid"]
-            S_row = np.asarray(g["radiance"](np.full(len(wn_grid), eta_row)), dtype=float)
-            y_ideal = _diagonal_ils_convolve(g["wn_hires"], S_row, wn_grid, g["ils"])
-            y_dist = y_ideal[::-1]   # ascending-wn_grid order -> ascending-wavelength (gert's convention)
-            nl, resid = _retrieve(y_dist, wn_grid, order, xtrue_row)
-            nu_out = wn_grid[::-1]
+            S_row = np.asarray(g["radiance"](np.full(len(nu_row), eta_row)), dtype=float)
+            y_dist = _diagonal_ils_convolve(g["wn_hires"], S_row, nu_row, g["ils"])
+            if g["noise_arr"] is not None:
+                # Same per-(row,column) noise realization native sees via
+                # g["A"][k,:] (added once to the raw image in main(), not
+                # redrawn here) -- undistorted now shares native's exact
+                # grid (see the module docstring's 2026-07-24 sampling-
+                # density fix), so this keeps them pixel-exact-comparable:
+                # the only remaining difference is real geometric distortion,
+                # not also an independent noise draw. Column order matches
+                # g["A"]'s raw (unreversed) storage, so the same reversal
+                # flag applied to nu_row above applies here too.
+                noise_row = g["noise_arr"][k, :]
+                if reverse:
+                    noise_row = noise_row[::-1]
+                y_dist = y_dist + noise_row
+            nl, resid = _retrieve(y_dist, nu_row, order, xtrue_row)
+            nu_out = nu_row
     except Exception as e:   # noqa: BLE001 -- keep the sweep alive
         nl = {gas: np.nan for gas in g["gases"]}
         nl["p_surface"] = np.nan
+        nl["_state"] = {}
+        nl["_state_full"] = {}
         nl["_chi2"] = np.nan
         nl["_conv"] = False
         nl["_diverged"] = f"{type(e).__name__}: {e}"
@@ -240,8 +334,42 @@ def main() -> int:
     ap.add_argument("--out-tag", type=str, default=None,
                     help="append _<tag> to the output filename (e.g. --out-tag smoketest) so a "
                          "test run never overwrites a real run's results/gd_band_stress_test_fpa<N>.pkl")
+    ap.add_argument("--uniform", action="store_true",
+                    help="disable along-slit composition/pressure variation -- every row's truth "
+                         "atmosphere is the fixed slit-centre prior, isolating pure geometric-"
+                         "distortion bias for comparison against a normal (varying) run of the same "
+                         "band. Output filename gets a _uniform suffix automatically. Mutually "
+                         "exclusive with --barcode.")
+    ap.add_argument("--barcode", action="store_true",
+                    help="use a diffuser-style barcode illumination (geocarb_gert.focalplane."
+                         "barcode_scene) instead of the along-slit composition scene: same "
+                         "spectral shape at every row (uniform composition truth, like --uniform), "
+                         "but brightness alternates in --barcode-bars bars -- probes keystone/PSF "
+                         "row-mixing at sharp spatial transitions (see KEYSTONE_SMILE_BIAS_PLAN.md "
+                         "Sec. 9j, which found a real, narrowly-localized bias spike near bar "
+                         "boundaries). Mutually exclusive with --uniform.")
+    ap.add_argument("--barcode-bars", type=int, default=32,
+                    help="number of alternating brightness bars for --barcode (default 32, matching "
+                         "Sec. 9j's original test). Brightness pattern is a fixed [1.0, 0.2] repeat.")
+    ap.add_argument("--snr", type=float, default=None,
+                    help="signal-to-noise ratio for this band's Sy_inv weighting (gert.instrument."
+                         "FlatSNR definition: sigma = peak in-band radiance / SNR) and, if --noise is "
+                         "also given, the actual noise realization added to the simulated data. "
+                         "Default: DEFAULT_SNR_BY_FPA[fpa] (400/300/300/200 for FPA0-3).")
+    ap.add_argument("--noise", action="store_true",
+                    help="add a random Gaussian noise realization (sigma from --snr) to the raw "
+                         "rendered image once, shared consistently across all three pipelines (see "
+                         "main()'s noise_arr and _worker()'s undistorted branch) -- without this "
+                         "flag the simulated data stays deterministic/noiseless as in every run "
+                         "before 2026-07-25. Output filename gets a _noise suffix.")
+    ap.add_argument("--noise-seed", type=int, default=0,
+                    help="seed for --noise's random Gaussian draw (reproducible by default).")
     args = ap.parse_args()
+    if args.uniform and args.barcode:
+        ap.error("--uniform and --barcode are mutually exclusive (both force uniform composition "
+                "truth already; choose one along-slit radiance pattern)")
     FPA = args.fpa
+    snr = args.snr if args.snr is not None else DEFAULT_SNR_BY_FPA[FPA]
 
     label, wn_min_nom, wn_max_nom, mols, R = GEOCARB_BANDS[FPA]
     mols = list(mols)
@@ -257,18 +385,65 @@ def main() -> int:
     fwhm_cm = wn_c / float(R)
     wide_win = SpectralWindow(wn_min=wn_min, wn_max=wn_max, ils=ILS(type="gaussian", fwhm=fwhm_cm),
                               molecules=mols, label=label, hires_spacing=0.01, channels_per_fwhm=3)
-    wide_inst = Instrument(windows=[wide_win], snr=300.0)
+    wide_inst = Instrument(windows=[wide_win], snr=snr)
     albedo = albedo_for(wide_inst, "desert")
 
+    # Retrieval prior/forward-model atmosphere: the fixed slit-centre state
+    # (x_km=0), used for every row -- deliberately NOT each row's true
+    # state (see _retrieve's docstring comment). Computed here (moved up
+    # 2026-07-25) since --barcode needs it to build its single hi-res
+    # spectrum before the along-slit-vs-barcode branch below.
+    atm_center = als.atmosphere_at(0.0)
+
     t0 = time.time()
-    wn_hires, radiance = als.build_lookup_radiance(
-        absco, wide_inst, geo, solar, albedo,
-        n_samples=args.n_lookup_samples, n_workers=args.n_workers)
-    print(f"lookup table built ({args.n_lookup_samples} samples, {time.time()-t0:.1f}s)", flush=True)
+    if args.barcode:
+        # Diffuser-style barcode illumination (geocarb_gert.focalplane.
+        # barcode_scene): same spectral shape at every row (from atm_center,
+        # the same prior atmosphere used everywhere else), only brightness
+        # varies -- see Sec. 9j. brightness pattern: fixed [1.0, 0.2] repeat,
+        # resized to --barcode-bars (handles odd counts by truncation).
+        from geocarb_gert.focalplane import barcode_scene
+        fm_center = ForwardModel(atm_center, absco, wide_inst, geo,
+                                 solver=SingleScatterSolver(), solar_spectrum=solar)
+        res_center = fm_center.run(albedo=albedo, albedo_slope=[0.0])
+        S_center = np.asarray(res_center.I_hires[0], dtype=float)
+        brightness = np.resize([1.0, 0.2], args.barcode_bars)
+        radiance = barcode_scene(S_center, brightness=brightness, widths=None, softness=0.0)
+        wn_hires = wide_win.wn_hires
+        print(f"barcode scene built ({args.barcode_bars} bars, {time.time()-t0:.1f}s)", flush=True)
+    else:
+        wn_hires, radiance = als.build_lookup_radiance(
+            absco, wide_inst, geo, solar, albedo,
+            n_samples=args.n_lookup_samples, n_workers=args.n_workers, uniform=args.uniform)
+        n_samples_built = 1 if args.uniform else args.n_lookup_samples
+        print(f"lookup table built ({n_samples_built} samples, {time.time()-t0:.1f}s)", flush=True)
 
     A = gd_render.image(FPA, wn_hires, radiance, wide_win.ils, spatial_psf_fwhm_px=1.5,
                         n_workers=args.n_workers)
     print(f"raw render done ({time.time()-t0:.1f}s)", flush=True)
+
+    # SNR-based sigma (gert.instrument.FlatSNR's definition: peak in-band
+    # radiance / SNR), computed once from the noiseless raw image so it
+    # doesn't shift depending on whether --noise then perturbs individual
+    # pixels. Always used for the retrieval's Sy_inv (see _retrieve()) --
+    # 2026-07-25, replaces the old ad hoc 0.3%-of-peak hack for every run,
+    # not just ones with --noise on (confirmed with the user).
+    sigma_band = float(np.max(np.abs(A))) / snr
+    noise_arr = None
+    if args.noise:
+        # Added ONCE to the raw per-pixel image, not independently per
+        # pipeline -- physically there's one noisy detector readout; native
+        # reads it directly (g["A"][k,:]), rectified interpolates it
+        # (gd_render.rectify below operates on this same noisy A), and
+        # undistorted (which bypasses gd_render.image()/rectify() entirely)
+        # looks up this same per-(row,column) noise value in _worker() so
+        # it stays pixel-exact-comparable with native, not just same-
+        # statistics -- see the module docstring's 2026-07-24 sampling-
+        # density-confound fix, which this mirrors for noise.
+        rng = np.random.default_rng(args.noise_seed)
+        noise_arr = rng.normal(0.0, sigma_band, size=A.shape)
+        A = A + noise_arr
+        print(f"noise added (SNR={snr:.0f}, sigma={sigma_band:.4g}, seed={args.noise_seed})", flush=True)
 
     nominal_inst = build_geocarb_instrument()
     nominal_win = nominal_inst.windows[FPA]
@@ -278,16 +453,23 @@ def main() -> int:
     Rimg = gd_render.rectify(FPA, A, s_grid, wn_grid)
     print(f"rectified {Rimg.shape} ({time.time()-t0:.1f}s)", flush=True)
 
-    # Retrieval prior/forward-model atmosphere: the fixed slit-centre state
-    # (x_km=0), used for every row -- deliberately NOT each row's true
-    # state (see _retrieve's docstring comment).
-    atm_center = als.atmosphere_at(0.0)
-
     # -- along-slit truth at each row's real slit position, for scoring bias --
     # (row index -> real s -> eta -> x_km -> true gas column at that position)
     cols_center = np.full(1024, 512.0)
     _, s_of_row = xy_to_wavelength_slit(FPA, cols_center, np.arange(1024.0))
     x_km_of_row = (s_of_row / sm) * als.SLIT_HALF_KM
+    # x_km_of_row (above) is each row's real physical slit position -- always
+    # kept as-is, since it drives the geometric distortion (keystone/smile
+    # row-crossing) and is what plots use for the x-axis. xtrue_x_km (below)
+    # is the position used to evaluate TRUTH for scoring bias -- in --uniform
+    # or --barcode mode this is pinned to 0 (the prior's own position) for
+    # every row, so truth == prior everywhere and bias reflects pure
+    # geometric distortion (+ real brightness-transition contamination for
+    # --barcode), not composition-tracking error -- barcode only varies
+    # brightness, never composition, so its truth scoring is identical to
+    # --uniform's. Both are independent of the along-slit-vs-barcode
+    # radiance construction above, which affects rendering.
+    xtrue_x_km = np.zeros(1024) if (args.uniform or args.barcode) else x_km_of_row
     # h2o's true/prior comparison must be on the same basis _retrieve() uses
     # for every gas (mean of the full vertical profile, since h2o_scale
     # multiplies the whole prior profile shape) -- not the surface VMR
@@ -296,15 +478,15 @@ def main() -> int:
     # height (atmosphere_at always uses the default), so the ratio of
     # surface VMRs equals the ratio of profile means exactly.
     h2o_mean_prior_ppm = float(np.mean(atm_center.gases["h2o"])) * 1e6
-    h2o_surface_ratio = als.h2o_surface_vmr(x_km_of_row) / als.h2o_surface_vmr(0.0)
+    h2o_surface_ratio = als.h2o_surface_vmr(xtrue_x_km) / als.h2o_surface_vmr(0.0)
     xtrue_of_row = {
-        "co2": als.xco2_ppm(x_km_of_row),
-        "ch4": als.xch4_ppb(x_km_of_row),
-        "co": als.xco_ppb(x_km_of_row),
+        "co2": als.xco2_ppm(xtrue_x_km),
+        "ch4": als.xch4_ppb(xtrue_x_km),
+        "co": als.xco_ppb(xtrue_x_km),
         "h2o": h2o_mean_prior_ppm * h2o_surface_ratio,   # ppm, profile-mean basis (see above)
         "o2": np.full(1024, 0.2095 * 1e6),                # well-mixed, not varied along slit
         "n2o": np.full(1024, 330.0),                      # well-mixed, not varied along slit (ppb)
-        "p_surface": als.p_surface_hpa(x_km_of_row),      # hPa -- not a "gas", tracked via p_scale
+        "p_surface": als.p_surface_hpa(xtrue_x_km),       # hPa -- not a "gas", tracked via p_scale
     }
     gas_units = {"co2": 1e6, "ch4": 1e9, "co": 1e9, "h2o": 1e6, "o2": 1e6, "n2o": 1e9}
     p_surface_prior = float(als.p_surface_hpa(np.array([0.0]))[0])
@@ -346,7 +528,8 @@ def main() -> int:
          f"{n_workers} workers, gases={gases}", flush=True)
 
     _G.update(dict(fpa=FPA, A=A, Rimg=Rimg, wn_grid=wn_grid, wn_hires=wn_hires, radiance=radiance,
-                   ils=wide_win.ils, wn_min=wn_min, wn_max=wn_max,
+                   ils=wide_win.ils, wn_min=wn_min, wn_max=wn_max, snr=snr, sigma_band=sigma_band,
+                   noise_arr=noise_arr,
                    fwhm_cm=fwhm_cm, mols=mols, label=label, atm=atm_center, absco=absco,
                    geo=geo, solar=solar, albedo=albedo, gases=gases, p_surface_prior=p_surface_prior,
                    xtrue_of_row=xtrue_of_row, gas_units=gas_units, x_km_of_row=x_km_of_row))
@@ -365,12 +548,18 @@ def main() -> int:
     n_offdet = sum(1 for v in out.values() if v["bias"] is None)
     print(f"diverged: {n_diverged}, off-detector (rectified only): {n_offdet}, total: {len(out)}")
 
+    mode_suffix = "_uniform" if args.uniform else ("_barcode" if args.barcode else "")
+    noise_suffix = "_noise" if args.noise else ""
     tag_suffix = f"_{args.out_tag}" if args.out_tag else ""
-    out_path = REPO_ROOT / "results" / f"gd_band_stress_test_fpa{FPA}{tag_suffix}.pkl"
+    out_path = REPO_ROOT / "results" / f"gd_band_stress_test_fpa{FPA}{mode_suffix}{noise_suffix}{tag_suffix}.pkl"
     out_path.parent.mkdir(exist_ok=True)
     with open(out_path, "wb") as f:
         pickle.dump({"out": out, "rows": rows, "wn_grid": wn_grid, "s_grid": s_grid,
                     "A_raw": A, "R_rectified": Rimg, "FPA": FPA, "gases": gases,
+                    "uniform": args.uniform, "barcode": args.barcode,
+                    "barcode_bars": args.barcode_bars if args.barcode else None,
+                    "snr": snr, "sigma_band": sigma_band, "noise": args.noise,
+                    "noise_seed": args.noise_seed if args.noise else None,
                     "xtrue_of_row": xtrue_of_row, "x_km_of_row": x_km_of_row}, f)
     print(f"saved {out_path}")
     return 0

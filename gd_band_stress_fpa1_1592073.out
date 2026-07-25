@@ -1,0 +1,6 @@
+Host: bhd0024   FPA: 1   CPUs: 32   Uniform: 0 Noise: 0   SNR: default   Barcode: 0
+FPA1 (CO2_weak): molecules=['co2', 'h2o']  wn=[6153.54,6301.59]
+lookup table built (400 samples, 2.6s)
+raw render done (16.5s)
+rectified (1024, 1156) (17.3s)
+3072 retrievals (1024 rows x 3 pipeline/order combos), 32 workers, gases=['co2', 'h2o']

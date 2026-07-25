@@ -976,6 +976,380 @@ assumed a convention validated on exactly one of the four bands — worth
 keeping in mind before generalizing any §9 conclusion across bands without
 re-checking it the way this section just had to.
 
+### 9p. A third pipeline — "undistorted" — added to separate fundamental RT/information-content limits from geometric-distortion artifacts
+
+`gd_band_stress_test.py` gained a third retrieval pipeline alongside native
+and rectified: **undistorted**, which evaluates the true hi-res spectrum
+directly at a row's intended slit position — no keystone, no smile, no
+clocking, no spatial PSF blur across rows, bypassing `gd_render.image()`/
+`rectify()` entirely. Its purpose is a control: when native or rectified
+show a retrieval difficulty, undistorted answers whether the same difficulty
+survives with *zero* geometric distortion, isolating "fundamental RT/
+information-content limit" from "something distortion makes worse."
+
+It was added specifically to check a large negative H2O bias found co-located
+with the along-slit truth scene's pressure-depression feature in the first
+FPA1 dense run (native and rectified both showed it). Running undistorted
+reproduced the **same dip, in the same place, at the same magnitude**, with
+zero geometric distortion in the loop — confirming the H2O/p_scale
+degeneracy is a real retrieval/RT limit for this band's spectral content,
+not a keystone/smile artifact. (§9r below revisits this with a cleaner
+diagnostic and confirms the same conclusion a second way.)
+
+Because undistorted has no real wavelength-calibration error to correct, its
+dispersion order is fixed at 0 rather than the order=2 used for native/
+rectified — floating unused dispersion parameters there would only risk
+spurious degeneracy with h2o_scale/p_scale, contaminating the exact question
+the baseline exists to answer. (§9u below revisits *how* undistorted builds
+its observation grid — the version described here used a shared nominal
+grid, later found to be a confound in its own right.)
+
+### 9q. FPA0/O2_A: o2_scale floating alongside p_scale caused near-total non-convergence — fixed by excluding well-mixed gases from the retrieved state vector
+
+Extending the along-slit stress test to FPA0 (O2_A, molecules `o2`+`h2o`)
+produced a real run that finished without crashing but was, on inspection,
+almost entirely useless: **7/1024 (0.7%) converged for native, 1/1024 for
+rectified, 0/1024 for undistorted.** The script's own summary line ("diverged:
+16, off-detector: 11") looked clean because it never counted the dominant
+failure mode — "stalled" (hit `max_iter=14` without `dx_norm` settling below
+`dx_tol`), which isn't tracked separately from success in that print.
+
+Individual stalled rows showed the signature of a flat/degenerate cost-
+function valley, not real non-convergence: chi2 had already bottomed out
+(0.006–0.03, well under 1) while the state vector kept drifting slowly
+between iterations, and adjacent rows with nearly identical truth converged
+(if forced) to wildly different O2 columns (e.g. rows 0 and 1: +3753 ppm and
+−14388 ppm bias respectively).
+
+**Root cause.** `gert.retrieval.StateVector.gas_scaling()` always includes a
+`p_scale` element (10% default prior uncertainty) regardless of which gases
+are requested — a fact this study hadn't been tracking the retrieved value
+of. For FPA0, `gases=['o2','h2o']` meant `o2_scale`, `h2o_scale`, and
+`p_scale` were all floating simultaneously. O2 is well-mixed and essentially
+fixed in the real atmosphere (`xtrue_of_row["o2"]` in `gd_band_stress_test.py`
+is a hardcoded constant, `0.2095` everywhere, by design) — so a well-mixed
+gas's column and total air-mass path (what `p_scale` scales) are nearly the
+same physical quantity for a fixed-VMR species. Floating both simultaneously
+is a near-total degeneracy: the optimizer can trade `o2_scale` against
+`p_scale` along a ridge that barely changes chi2, exactly matching the
+observed flat-valley symptom.
+
+**Fixed** by introducing `WELL_MIXED_GASES = {"o2", "n2o"}` in
+`gd_band_stress_test.py` and excluding these from the retrieved `gases` list
+even when present in a band's molecule set — `p_scale` alone now carries the
+surface-pressure signal, exactly as an operational O2-A retrieval does (O2's
+column is a direct proxy for total air-mass, so there's no independent
+information in retrieving it separately). `o2` stays in the forward model's
+molecule list (real O2 physics is still computed), it just isn't a free
+`_scale` parameter. `p_scale`'s own bias is now tracked explicitly (added
+`nl["p_surface"]` to `_retrieve()`'s return, computed unconditionally since
+`p_scale` is always in the state vector — useful for every band, not just
+FPA0).
+
+**Verified**: FPA0 smoke test after the fix converged 16/16 across all three
+pipelines, with native/undistorted `p_surface` bias of a few tenths of an
+hPa — essentially perfect recovery. At full 1024-row scale (§9v): native
+1024/1024, undistorted 1024/1024, rectified 1007/1024, and the run finished
+in 2018s versus the original broken run's 5941s — the earlier run had spent
+nearly all its time hitting `max_iter` on every single retrieval; fixing the
+degeneracy let most retrievals converge in a handful of iterations instead.
+
+### 9r. h2o_scale's default 10% prior uncertainty is unrealistically tight for this scene — raised to a measured 60%, and FPA1's original H2O finding re-examined
+
+After §9q's fix, FPA0 converged cleanly but still showed a large H2O bias
+(hundreds to ~1500 ppm). Checking the actual prior-vs-truth mismatch:
+`p_scale`'s default 10% prior (1σ ≈ 96 hPa on the ~961 hPa slit-centre prior)
+covers the scene's true pressure deviation (up to −201 hPa, §9q's mountain
+feature) at **~2.1σ** — comfortably reachable, and indeed p_scale is
+recovered almost exactly. `h2o_scale`'s same 10% default, though, covers a
+scene where true h2o deviates from the fixed prior by **up to ±56%**
+(`h2o_surface_ratio` range `[0.439, 1.561]` across the slit) — **~5.6σ** away
+at a 10% prior width. A MAP estimator under a prior that tight will resist
+moving `h2o_scale` anywhere near truth almost regardless of how informative
+the spectrum is, independent of any real RT/degeneracy limit.
+
+Tested directly on FPA0 (16-row smoke tests, native pipeline, holding
+everything else fixed):
+
+| h2o_scale prior 1σ | H2O bias std (ppm) |
+|---|---|
+| 10% (old default) | 1163.5 |
+| 60% | **615.3** |
+| 200% | 903.7 |
+
+60% roughly halves the bias spread relative to the 10% default — real, and
+not just "loosen it as far as possible": 200% is *worse* than 60%, not
+better, because with too little prior regularization the fit starts drifting
+on H2O's genuinely weak (but nonzero) sensitivity in the O2-A band, the same
+flavor of problem as §9q's o2_scale/p_scale ridge, just softer. **60% is a
+measured sweet spot for this scene, not a guess**, and was adopted as the new
+default in `_retrieve()`'s `gas_uncerts={"h2o": 0.60}` — applying generically
+to every band, not just FPA0.
+
+This raised a scope question: did FPA1's *already-completed* real run (§9o,
+using the old 10% default) need to be rerun? Backed out FPA1's actual
+retrieved `h2o_scale` from its stored bias values (native pipeline, all 1024
+rows) rather than guessing:
+
+- corr(retrieved `h2o_scale`, TRUE h2o ratio) = **0.960**
+- corr(retrieved `h2o_scale`, true `p_surface`) = 0.524 (a real but
+  secondary cross-talk)
+- RMSE(retrieved − true) = 0.255 (scale units) vs. RMSE(prior=1 − true) =
+  0.452 if `h2o_scale` had never moved off prior — retrieval is doing
+  roughly **2× better than doing nothing**, not stuck.
+
+FPA1's `h2o_scale` was genuinely tracking real signal, not starved by the
+tight prior — CO2_weak has real, usable independent H2O sensitivity, unlike
+O2_A. **FPA1's original run did not need a rerun**; its H2O/p_scale
+degeneracy finding (§9p) stands as a real, secondary RT effect on top of a
+retrieval that was mostly working, not evidence of prior-starvation.
+(FPA1 *was* rerun anyway as part of §9v's full 8-run suite, to pick up
+§9u's separate undistorted-grid fix — the two issues are independent.)
+
+### 9s. FPA2 added to the along-slit stress test, with a with/without-variation comparison mode
+
+FPA2/CO2_strong had been deliberately excluded from `gd_band_stress_test.py`
+runs because it already had dense-sweep results (`gd_dense_sweep.py`, §9m) —
+but that scene holds atmospheric composition **fixed** (`reference_atmosphere()`
+as both truth and prior, only albedo varies row to row; h2o is floated as a
+nuisance parameter there but its bias is deliberately never scored, since
+truth always equals prior for it in that scene). It tests a different,
+narrower question — pure geometric distortion in isolation — and had never
+been run through *this* along-slit, composition-varying scene at all. Added
+here for consistent 4-band coverage under the same realistic truth
+atmosphere as FPA0/1/3.
+
+This also motivated a genuinely useful new diagnostic: `--uniform`, added to
+both `along_slit_scene.build_lookup_radiance()` and `gd_band_stress_test.py`.
+`uniform=True` collapses the along-slit lookup table to a single sample at
+the slit centre (matching the retrieval's own prior exactly), so every row's
+truth spectrum is identical and `xtrue_of_row` is evaluated at x_km=0 for
+every row — isolating **pure geometric-distortion bias** from **composition-
+tracking bias** by running the identical pipeline with the along-slit
+variation switched off. (Output filenames get an automatic `_uniform`
+suffix so a uniform run never collides with the real along-slit run.)
+
+Run on FPA2 (16-row smoke test, both modes): rectified's CO2 bias was
+essentially unchanged with vs. without composition variation (mean −52.20
+vs. −52.66 ppm) — direct, quantitative confirmation that this specific
+number is a pure bilinear-interpolation/line-depth-dampening artifact (§9n),
+not something composition variability contributes to. Native/undistorted's
+H2O bias, by contrast, nearly vanished in uniform mode (std ~610 → ~3 ppm) —
+confirming that bias really is about tracking real along-slit composition,
+with nothing left to explain once there's no real deviation. Both
+conclusions were later confirmed again at full 1024-row scale across all
+four bands (§9v).
+
+### 9t. FPA3 unblocked: ABSCO gaps extended, then two further bugs found and fixed (undistorted-grid shape mismatch; GEOCARB_BANDS[3]'s nominal band was offset from the real per-pixel band)
+
+FPA3 (CH4_CO) was hard-blocked all session on ABSCO coverage gaps (§9d/§11):
+ch4 and h2o's dense blocks stopped at 4350 cm⁻¹ while FPA3 needed up to
+~4360.7; co's block stopped at 4360, similarly short. The user extended
+ch4/h2o/co's ABSCO blocks to 4400 cm⁻¹ and, at the same time, padded o2's
+block from 12745–13245 to 12745–13300 (giving FPA0 headroom against the
+razor-thin 1.99 cm⁻¹ margin found earlier). Verified directly against the
+rebuilt `absco.h5` (not just the spec file) via `h5py`: all four gases'
+blocks now comfortably cover what each band's `real_wavenumber_range(...,
+margin_cm1=10.0)` requires.
+
+With FPA3 finally runnable, its first smoke test **failed 100% on the
+undistorted pipeline** (native and rectified were fine) with a shape
+mismatch inside `gert.retrieval._chisq`: `operands could not be broadcast
+together with shapes (929,) (586,)`. Traced (via a temporary full-traceback
+capture in `_retrieve()`'s and `_worker()`'s exception handlers, since neither
+had ever needed one before) to `ret.run() → self._chisq(y0, x) → self.y_true
+- y`: the forward model was silently returning fewer points than the
+observation grid requested, because part of that grid fell outside
+`[wn_min, wn_max]` (the actual forward-model-computable range). **Root
+cause**: undistorted used the fixed nominal `wn_grid` (from
+`build_geocarb_instrument()`) unfiltered, unlike native (which uses each
+row's own real, always-in-range positions) or rectified (which drops
+out-of-footprint pixels as NaN before retrieving) — neither of those two
+pipelines had a structural way to hit this, so the bug was invisible until
+undistorted was exercised on a band where nominal and real ranges
+genuinely diverge.
+
+Investigating *why* they diverge for FPA3 specifically (nominal
+`[4208.00, 4318.00]` vs. real-per-row-envelope `[4248.60, 4360.69]`, only
+586/929 nominal points inside) turned up something bigger than a filtering
+bug: `GEOCARB_BANDS[3]`'s hardcoded nominal band, `("CH4_CO", 4208.0, 4318.0,
+...)` in `geocarb_gert/instrument.py`, was centred at 4263.0 cm⁻¹ — about
+**41 cm⁻¹ below** the real per-pixel band's centre (~4304.6 cm⁻¹). That's not
+the usual "nominal snugly narrower than real" pattern this study already
+knew about and treated as expected (`gd_polynomials.py`'s
+`real_wavenumber_range()` docstring cites FPA0 as an example: nominal
+`[12950,13190]` vs. real `[12957,13233]`, ~40 cm⁻¹ short on a 240 cm⁻¹ band)
+— it was a comparable *absolute* offset on a band only 110 cm⁻¹ wide, i.e.
+proportionally about 4× worse, and a genuine *shift* rather than a
+conservative narrowing. Independently confirmed against the user's
+ground-test wavelength data (`[2.2989, 2.3461] µm` = `[4262.39, 4349.91]
+cm⁻¹`), which matched the dispersion polynomial's own per-row output almost
+exactly. **Confirmed by the user to be a stale/wrong number, not a real
+detector limit, and corrected**: `GEOCARB_BANDS[3]` is now
+`(4258.60, 4350.69)` — `real_wavenumber_range(3, margin_cm1=0.0)` exactly —
+so the nominal grid now fully contains the real per-row range with zero
+margin (770/770 points inside, vs. 586/929 before). Before the fix,
+rectified and undistorted had been silently discarding roughly a third of
+every row's real spectral content at the high-wavenumber end, for every
+single row — not an edge-row effect.
+
+(Minor footnote for the record: `real_wavenumber_range()`'s row sampling
+steps by 8 (`range(0, N_PX, 8)`), which skips the literal last row, 1023 —
+its true per-row max (4350.77) is about 0.08 cm⁻¹ above the corrected band's
+upper bound (4350.69). Negligible next to the 10 cm⁻¹ margin used elsewhere,
+and not worth chasing, but noted since it's directly relevant to the
+precision of that number.)
+
+### 9u. Undistorted's shared nominal grid was ~38% coarser than native's real per-row sampling — redesigned to match native's grid exactly
+
+A follow-up question (given native's real 1024-pixel-per-row grid and
+undistorted's shared nominal grid are built from completely different
+sources) turned up a second, independent confound in the native-vs-
+undistorted comparison, beyond §9t's range mismatch. For FPA3:
+undistorted's grid (770 points post-§9t-fix, spanning 92.09 cm⁻¹) samples at
+**8.36 points/cm⁻¹**; native's real per-row grid (1024 points spanning
+~88.6 cm⁻¹ at row 512) samples at **11.56 points/cm⁻¹** — native has ~38%
+denser sampling. The nominal grid's density comes from `channels_per_fwhm=3`
+in `build_geocarb_instrument()` (3 samples per ILS FWHM, a resolution-driven
+convention), completely independent of the real detector's actual pixel
+pitch, which happens to oversample its own ILS more densely than that
+convention gives.
+
+This matters because it's a *third*, previously uncounted contributor to
+native's consistently lower chi2 relative to undistorted (noted informally
+earlier this session): on top of (1) native having real distortion for its
+extra order=2 dispersion parameters to legitimately absorb, and (2) those
+same parameters risking absorbing residual structure they shouldn't, native
+also simply has more independent spectral samples per row to fit against —
+real extra constraining power, unrelated to distortion or to state-vector
+freedom.
+
+**Fixed** by having undistorted evaluate the truth spectrum at each row's
+own real native positions — literally the same `xy_to_wavelength_slit`-
+derived `nu_row` (and the same ascending/descending-wavenumber direction
+fix-up, §9o) that native uses — instead of the separate shared nominal grid.
+This also **simplified** the pipeline: §9t's range-filter patch (restricting
+`wn_grid` to `[wn_min, wn_max]`) became unnecessary and was removed, since a
+row's own real positions are in-range by construction, the same reason
+native never needed such a filter. Native and undistorted now share an
+identical grid per row; the only remaining difference between them is
+exactly what the baseline is meant to isolate — whether the spectrum itself
+carries real keystone/smile/PSF distortion, not also how densely or over
+what range it's sampled. Re-validated on both FPA3 and FPA1 smoke tests
+after the change (comparable convergence/divergence counts to before);
+folded into the full-scale run in §9v.
+
+### 9v. Full 4-band along-slit stress test at scale (1024 rows × 3 pipelines × 4 FPAs × with/without variation, 8 real SLURM runs)
+
+With §9q–9u's fixes in place, `scripts/gd_band_stress_test.slurm` was
+updated to submit all four bands (`--array=0,1,2,3`, previously `0,1` only)
+plus an opt-in `UNIFORM=1` env var for the §9s comparison mode (`UNIFORM=1
+sbatch --array=<N> ...`), and run by the user for all 4 FPAs × both modes —
+8 real 1024-row jobs total. Diagnostic plots (`scripts/
+gd_band_stress_test_plot.py`) for the four primary with-variation runs:
+`plots/gd_band_stress_test_fpa0.png`, `_fpa1.png`, `_fpa2.png`, `_fpa3.png` —
+each a 6-panel figure (primary-gas bias, H2O bias, and chi2 vs. along-slit
+position; the truth profile for context; a per-pipeline failure-location
+map; and H2O bias vs. true surface pressure, the degeneracy plot referenced
+throughout this section). The `--uniform` runs that the with/without
+comparison below is built from were analyzed directly from their `.pkl`
+output rather than plotted — `gd_band_stress_test_plot.py` doesn't yet have
+a paired with/without-variation view (the closest precedent is the smoke-
+scale `plots/gd_band_stress_test_fpa1_smoketest.png` / `_fpa0_smoketest2.png`
+from earlier validation, §9q/§9r, not the full-scale runs this table
+covers).
+
+**Convergence, all four bands, native/undistorted:**
+
+| FPA | pipeline | converged | diverged | stalled | off-detector |
+|---|---|---|---|---|---|
+| 0 | native | 1024/1024 | 0 | 0 | 0 |
+| 0 | rectified | 1007/1024 | 0 | 6 | 11 |
+| 0 | undistorted | 1024/1024 | 0 | 0 | 0 |
+| 1 | native | 1024/1024 | 0 | 0 | 0 |
+| 1 | rectified | 689/1024 | 154 | 160 | 21 |
+| 1 | undistorted | 1024/1024 | 0 | 0 | 0 |
+| 2 | native | 1024/1024 | 0 | 0 | 0 |
+| 2 | rectified | 914/1024 | 77 | 16 | 17 |
+| 2 | undistorted | 1024/1024 | 0 | 0 | 0 |
+| 3 | native | 1021/1024 | 0 | 3 | 0 |
+| 3 | rectified | 966/1024 | 41 | 4 | 13 |
+| 3 | undistorted | 1019/1024 | 0 | 5 | 0 |
+
+Native and undistorted are essentially fully converged everywhere. Rectified
+consistently shows the worst failure rate of the three (10-33% not usable),
+across every band — consistent with §9n/§9t's interpolation-error findings,
+not an artifact of any one band's fixes.
+
+**The with/without-variation comparison (§9s), now confirmed at full scale,
+splits the rectified-bias story into two distinct mechanisms:**
+
+For FPA1/FPA2/FPA3, rectified's primary-gas bias mean is essentially
+*identical* with real composition variation on vs. off — FPA1 CO2: −108.89
+vs. −108.64 ppm; FPA2 CO2: −52.08 vs. −52.57 ppm; FPA3 CH4: −86.77 vs.
+−83.86 ppb. **A pure geometric/bilinear-interpolation artifact**, confirmed
+now across three separate bands at full scale, not just FPA2's smoke test.
+
+**FPA0 breaks that pattern.** Rectified's `p_surface` bias standard
+deviation is 5.25 hPa with real composition variation vs. 0.35 hPa in
+uniform mode — a >10× difference, and `plots/gd_band_stress_test_fpa0.png`
+(top-left panel) shows a sharp ±15 hPa excursion localized exactly at the
+along-slit truth scene's pressure depression. Unlike the other three bands'
+primary-gas rectified bias,
+FPA0's is not a fixed geometric artifact independent of the true state — it
+is the interpolation error interacting with the true pressure gradient
+itself. This makes physical sense given O2-A senses pressure directly
+through line broadening (§9q), a mechanism the other three bands' primary
+gases don't share.
+
+**The H2O/p_scale degeneracy (§9p, §9r) is universal and strikingly
+consistent in shape** across native/undistorted for FPA1, FPA2, and FPA3 —
+essentially the same H2O-bias-vs-true-p_surface "loop," swinging roughly
+−1200 to +900 ppm regardless of band. FPA0 shows a related but distinctly
+larger-amplitude version (up to +1700 ppm) — expected, since FPA0 retrieves
+H2O directly alongside `p_scale` rather than through cross-talk with a
+differently-sensed primary gas.
+
+**Resolved: the FPA2 scatter anomaly was a single mislabeled row, not a real
+effect.** FPA2's rectified CO2 bias appeared to have *higher* row-to-row
+scatter in uniform mode (std=10.65) than with real along-slit variation
+(std=3.62) — backwards from the naive expectation that removing real signal
+should reduce structure, not add it. Traced to one row (uniform mode, row
+59, x=−1242 km, at the edge of a cluster of otherwise-correctly-flagged
+divergent neighbor rows 54–64): chi2 = 1.65×10²⁰³, co2 bias = −357 ppm,
+h2o bias = 6006 ppm — an exploded, unphysical state that nonetheless
+reported `converged=True`. Same class of bug §9m already fixed once
+(`dx_norm` measures step size, not chi2 validity, so a state that overshoots
+into something unphysical can still register a small step and thus
+"converged"), but at a boundary that fix didn't cover: chi2 here is
+enormous but *technically finite*, so it passes `gert`'s existing
+`np.isfinite(chisq_red)` divergence check untouched. Scanned all 8 real
+runs × 3 pipelines (~73,000 row/pipeline combinations): exactly one
+occurrence — rare, but real, and silent (it single-handedly inflated one
+pipeline's reported bias std ~3×). Excluding just that row drops the
+uniform-mode std to 3.44, matching the with-variation run almost exactly —
+confirming there was never a real with/without difference here.
+
+Rather than widen `gert`'s own divergence check (shared, foundational
+code), this is now handled in the analysis layer: `gd_band_stress_test_plot.py`
+gained `_chi2_outlier_mask()` (a robust, MAD-based-in-log10-space outlier
+test, applied per pipeline's own converged population — no fixed magic
+threshold) and `_robust_stats()` (median + 1.4826×MAD, a normal-equivalent
+scale estimate that isn't dragged around by a single extreme row the way
+mean/std are). Every plot panel and the new printed summary table (median,
+robust_std, mean, std, and outlier count side by side, per pipeline/gas)
+now excludes chi2-outlier rows, and the failure-location panel gained a
+`*` marker counting them explicitly as their own failure category rather
+than silently folding them into "converged." All 8 real-run plots and
+summaries were regenerated with this in place; FPA2-uniform's rectified row
+is now the only nonzero `n_outlier` anywhere in the dataset.
+
+**Runtime, confirming §9q's convergence fix translates to real wall-clock
+savings**: FPA0's full run finished in 2018s (32 cores) — down from the
+original broken run's 5941s for the same row count, roughly 3× faster,
+consistent with most retrievals now converging in a handful of iterations
+instead of always exhausting `max_iter=14`.
+
 ---
 
 ## 10. Real-data observations (fill in as evidence is pulled)

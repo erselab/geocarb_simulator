@@ -1,0 +1,24 @@
+Host: bhd0023   FPA: 0   CPUs: 32   Uniform: 0
+FPA0 (O2_A): molecules=['o2', 'h2o']  wn=[12946.96,13243.01]
+lookup table built (400 samples, 5.0s)
+raw render done (36.8s)
+rectified (1024, 1046) (37.8s)
+3072 retrievals (1024 rows x 3 pipeline/order combos), 32 workers, gases=['h2o']
+  200/3072 done (200s)
+  400/3072 done (382s)
+  600/3072 done (481s)
+  800/3072 done (609s)
+  1000/3072 done (713s)
+  1200/3072 done (890s)
+  1400/3072 done (1006s)
+  1600/3072 done (1194s)
+  1800/3072 done (1321s)
+  2000/3072 done (1461s)
+  2200/3072 done (1568s)
+  2400/3072 done (1673s)
+  2600/3072 done (1814s)
+  2800/3072 done (1897s)
+  3000/3072 done (2007s)
+all done (2018s)
+diverged: 0, off-detector (rectified only): 11, total: 3072
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/results/gd_band_stress_test_fpa0.pkl

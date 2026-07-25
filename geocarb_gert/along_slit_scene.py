@@ -147,6 +147,7 @@ def build_lookup_radiance(
     n_samples: int = 400,
     h2o_scale_height_km: float = 2.0,
     n_workers: int | None = None,
+    uniform: bool = False,
 ) -> tuple[np.ndarray, Callable]:
     """Precompute hi-res spectra at ``n_samples`` along-slit positions and
     return ``(wn_hires, radiance)`` where ``radiance(eta) -> spectrum`` does
@@ -161,11 +162,25 @@ def build_lookup_radiance(
     atmosphere) -- embarrassingly parallel like ``gd_render.image()``, same
     fork + copy-on-write pattern so ``absco``/``solar`` aren't duplicated
     per worker.
+
+    ``uniform=True`` collapses this to a single sample at the slit centre
+    (x_km=0, matching the retrieval's prior atmosphere exactly): every row
+    then sees the identical truth spectrum, so ``radiance(eta)`` is constant
+    along the slit regardless of ``eta``. This isolates pure geometric-
+    distortion bias (keystone/smile/PSF/rectification-interpolation) from
+    composition/pressure-tracking bias, for direct comparison against a
+    ``uniform=False`` run of the same band and against the older, uniform-
+    composition dense-sweep design (``gd_dense_sweep.py``). Added
+    2026-07-24 for the FPA2 with/without along-slit-variation comparison.
     """
     from gert.forward_model import ForwardModel
     from gert.rt_solver import SingleScatterSolver
 
-    x_samples_km = np.linspace(-SLIT_HALF_KM, SLIT_HALF_KM, n_samples)
+    if uniform:
+        x_samples_km = np.zeros(1)
+        n_samples = 1
+    else:
+        x_samples_km = np.linspace(-SLIT_HALF_KM, SLIT_HALF_KM, n_samples)
 
     if n_workers is None:
         n_workers = available_cpus()
@@ -198,6 +213,8 @@ def build_lookup_radiance(
 
     def radiance(eta):
         eta = np.atleast_1d(np.asarray(eta, dtype=float))
+        if n_samples == 1:   # uniform=True -- single sample, no interpolation needed
+            return np.broadcast_to(spectra[0], (len(eta), spectra.shape[1]))
         x_km = eta * SLIT_HALF_KM
         idx_hi = np.clip(np.searchsorted(x_samples_km, x_km), 1, n_samples - 1)
         idx_lo = idx_hi - 1
