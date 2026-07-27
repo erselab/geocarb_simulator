@@ -1352,6 +1352,150 @@ instead of always exhausting `max_iter=14`.
 
 ---
 
+### 9w. Row-crossing ("chunking") at the slit extremes: real, but not the dominant driver everywhere
+
+**The concern.** Keystone distortion means a single detector row's own
+dispersion trace is not a horizontal line across the FPA — near the top and
+bottom of the slit it cuts diagonally across as many as ~10 physical rows'
+worth of along-slit position. Native's forward model, however, always
+evaluates every column of a row against one fixed atmosphere (the
+slit-centre prior/truth state at that row's *nominal* position — see
+`_retrieve()`'s docstring). If the real along-slit scene varies on scales
+comparable to that smeared footprint, native's spectrum at an edge row is
+really a blend of several distinct true states that the retrieval has no
+mechanism to represent, and the concern was that this blindness should
+produce bias far larger than the "a few %" found so far.
+
+**Quantifying the smear.** Using `rows_crossed(fpa, row)` (physical rows
+spanned by one row's own dispersion trace) confirms the "~10 rows" claim
+for every band:
+
+```
+FPA0: row0=10.42  null≈row600 (val≈0)  row1023=7.33   max=10.42
+FPA1: row0=9.18   null≈row570 (val≈0)  row1023=7.34   max=9.18
+FPA2: row0=0.27   null≈row25  (val≈0)  row1023=10.41  max=10.41
+FPA3: row0=2.99   null≈row266 (val≈0)  row1023=7.86   max=7.86
+```
+
+Converting to real along-slit km smeared into one row's 1024 columns
+(`xy_to_wavelength_slit` → x_km), at the worst rows this is a genuine
+20–29 km footprint (vs. ~2–4 km at each band's own null row) — a real,
+non-negligible chunk of the along-slit scene's own ~10s-of-km-scale
+structure. Critically, **the null row (near-zero row-crossing) is not
+always at the slit centre**: FPA0/FPA1 have it mid-slit (row ≈570–600,
+matching their smile-null row per §9i's finding that these need not
+coincide), but FPA2's is near the top (row 25) and FPA3's is off-centre
+(row 266) — so a naive "edge vs. centre" split silently mixes a
+low-crossing extreme with a high-crossing one for those two bands.
+
+**Does it show up in the actual measured bias?** Correlating each in-family
+native row's `rows_crossed` value against its measured `|gas bias %|` and
+`log10(chi2)` across the full 1024-row sweep (chi2-outlier rows excluded,
+same filter as §9v):
+
+| FPA | gas | corr(rows_crossed, \|bias%\|) | corr(rows_crossed, log10 chi2) |
+|---|---|---|---|
+| 0 | p_surface | −0.09 | +0.38 |
+| 1 | co2 | **+0.63** | +0.56 |
+| 2 | co2 | +0.28 | +0.17 |
+| 3 | ch4 | −0.20 | −0.11 |
+
+**Verdict: the effect is real, and it's the dominant driver for FPA1 (CO2
+weak)** — row-crossing explains a substantial share of the along-slit bias
+variance there, confirming the intuition directly: FPA1's edge rows
+(|x|>1300 km) show −2.15%±0.49% native CO2 bias vs. −0.08%±0.25% at its
+low-crossing centre, a ~30× jump in mean bias exactly where crossing is
+highest. FPA2 shows the same sign of effect but weaker (+0.28), consistent
+with its own along-slit CO2 gradient being gentler than FPA1's in the
+region where crossing peaks. **FPA0 and FPA3 do not show this pattern** —
+their bias is governed by something else (FPA0: p_surface is retrieved via
+`p_scale` off a well-mixed-gas assumption, §9q, with near-zero overall
+bias regardless of position; FPA3: CH4/CO's own absorption-strength
+along-slit gradient and prior/noise structure dominate over the
+row-crossing term). So the answer to "can you see chunking in the rows at
+the extremes" is: **yes, unambiguously for FPA1, partially for FPA2, and
+not detectably for FPA0/FPA3** — it is a real, previously-uncharacterized
+contributor to native's bias, but it is band-dependent, not a universal
+explanation for why "native" biases stay in the low-percent range. The
+overall bias magnitudes reported in §9v were not wrong, but for FPA1 in
+particular, part of the along-slit bias curve's shape is now understood to
+be a direct signature of keystone row-crossing rather than pure
+interpolation/geometric-distortion error — this is a distinct mechanism
+from the rectification-interpolation bias in §9l/§9m, additive to it, and
+specific to native (rectified/undistorted don't have this failure mode by
+construction, since rectified resamples onto a shared grid and undistorted
+has no distortion to cross rows with).
+
+---
+
+### 9x. Why native's chi2 looks so much smaller than undistorted's -- a dispersion-order artifact, not a fit-quality difference
+
+**The question.** Every realistic-scene figure in §9v/§9w shows native's
+chi2_reduced running 1-2 orders of magnitude below undistorted's, at
+essentially every row (e.g. FPA1: native ~1e-3-1e-2, undistorted
+~0.15-0.3). Taken at face value this looks like native is simply the
+better fit -- counterintuitive, since undistorted is the zero-distortion
+baseline and might be expected to fit at least as well as native, not
+dramatically worse.
+
+**Isolating the cause.** Reran `_retrieve()` by hand on FPA1 at several
+rows, crossing both data sources against both dispersion orders (native/
+undistorted's own order choice, order=2 vs order=0, alongside the
+opposite order each doesn't normally get):
+
+| row | native, order=2 (actual) | undistorted, order=0 (actual) | native, order=0 | undistorted, order=2 |
+|---|---|---|---|---|
+| 0 | 0.0028 | 0.163 | 0.653 | 0.0010 |
+| 512 | 0.0003 | 0.161 | 0.162 | 0.0001 |
+| 1023 | 0.0035 | 0.177 | 0.470 | 0.0028 |
+
+At the orders each pipeline actually runs with, the gap is the ~50-500x
+seen in every figure. **Matched at the same order, the gap nearly
+vanishes** -- undistorted at order=0 tracks native at order=0 almost
+exactly (and is slightly *better* at slit centre and mid-slit, consistent
+with it being the cleaner baseline); undistorted at order=2 lands right on
+top of native. So this was never a difference in how well each pipeline's
+underlying data can be fit -- it's that native (and rectified) are allowed
+to float a low-order wavelength-dispersion correction
+(`disp_a0`/`disp_a1`/`disp_a2`) that undistorted is deliberately denied
+(§9k/module docstring: undistorted has no genuine wavelength-calibration
+error, so floating dispersion there risks spurious degeneracy instead of
+correcting anything real).
+
+**What that correction is actually absorbing.** Native's fitted `disp_a0`
+(constant wavelength shift) at FPA1:
+
+| row | disp_a0 | posterior significance |
+|---|---|---|
+| 0 | -0.0048 cm-1 | ~18 sigma |
+| 512 | +0.0000026 cm-1 | ~0 sigma |
+| 1023 | -0.0038 cm-1 | ~15 sigma |
+
+A real, highly-significant, but physically tiny shift (thousandths of a
+cm-1, far below one resolution element) that is essentially zero at slit
+centre and grows toward both edges -- tracking the same row-crossing
+pattern from §9w: near-zero at the low-crossing row, largest where
+keystone mixes the most true along-slit positions into one row. The
+dispersion term is finding and absorbing a small, real, keystone-
+correlated effective wavelength-registration error, exactly the kind of
+residual calibration nudge it exists to fit.
+
+**Conclusion.** Native's much lower chi2 is a direct, designed consequence
+of which pipelines get a wavelength-calibration escape valve, not evidence
+that native's fit is fundamentally better or that undistorted's data is
+somehow worse. Denying undistorted that same nuisance parameter is
+intentional -- it's what keeps the zero-distortion baseline honest about
+how much residual a genuinely well-behaved detector would still leave,
+rather than letting it silently absorb the very geometric-distortion
+signature it exists to isolate. (Rectified gets the same order=2 freedom
+as native and still stays worst of all three, per §9v/§9w -- its own
+residual comes from real interpolation corruption, §9l/§9m, which isn't
+the smooth, low-order shape a dispersion polynomial can absorb.) No code
+changed as a result of this investigation -- it's a read on existing
+behavior, not a bug.
+
+---
+
 ## 10. Real-data observations (fill in as evidence is pulled)
 
 **Purpose.** The forward model only needs *just enough* fidelity to reproduce the
@@ -1546,3 +1690,189 @@ cross-band registration code.
 **Status:** planning only — no code written yet. §11a inventories what's
 reusable; §11b's open question is the next concrete step (check
 `keystone_report.pdf` calibration provenance) before phase 1 begins.
+
+---
+
+## 12. Plan: calibration-mismatch (imperfect keystone/smile knowledge) experiment (2026-07-27)
+
+**Motivation.** Every experiment so far (§9v/§9w, the full 24-case sweep)
+gives the retrieval *exact* knowledge of the real GD polynomials — native's
+`nu_row`, rectified's rectification target grid, and undistorted's grid are
+all derived from the same `xy_to_wavelength_slit`/`wavelength_slit_to_xy`
+calls that `gd_render.image()` used to render the "truth" detector image in
+the first place. Real calibration knowledge is never exact: the ground-test
+polynomial fit (`gcmap_em27.csv`, §9's provenance) has its own residual fit
+error, and the real instrument may drift from that fit on-orbit (thermal
+changes shifting the optics). This section designs an experiment that
+introduces a genuine mismatch between what the detector *actually* does
+(render side) and what the L1B/retrieval pipeline *believes* it does
+(retrieval side) — a calibration-knowledge axis this study hasn't touched
+at all yet.
+
+### 12a. Design principle — two coefficient sets, not one
+
+Mirrors the pattern `_retrieve()` already uses for the atmosphere (prior is
+deliberately the fixed slit-centre state, not the row's true state, per its
+own docstring): keep `gd_render.image()`/`rectify()` on the **real**
+coefficients (`gcmap_em27.csv` as loaded today, unperturbed) to define
+truth, and give only the retrieval-side position bookkeeping in
+`_worker()` — native's `nu_row`, rectified's target `wn_grid`/`s_grid`,
+undistorted's `nu_row`/`eta_row` — an **assumed** (perturbed) coefficient
+set. Nothing about how a detector pixel's true spectrum is rendered
+changes; only the pipeline's *belief* about which (wavelength, slit
+position) that pixel corresponds to changes. This isolates calibration
+error from every mechanism already characterized (rectification
+interpolation §9l/§9m, row-crossing §9w, prior-atmosphere mismatch) since
+none of those require the two coefficient sets to differ at all.
+
+### 12b. Two perturbation mechanisms, matching the two named causes
+
+- **Training-data noise** — a single random, smooth, low-order perturbation
+  to the (wavelength, slit) polynomial maps, drawn once per experiment with
+  a fixed seed. Deliberately *not* per-pixel white noise: the real error
+  source is a finite-sample polynomial fit, whose residual error is smooth
+  across (x, y), not independent pixel-to-pixel. Implemented as an additive
+  perturbation to a handful of the polynomial's own low-order terms
+  (`const`, `x`, `y`, `xx`, `yy` — see `_TERMS` in `gd_polynomials.py`),
+  scaled to a target RMS in physical units (cm⁻¹ for wavelength, km for
+  slit position) rather than raw coefficient magnitude, so the knob means
+  the same thing regardless of which terms happen to carry it.
+- **On-orbit thermal drift** — a deterministic (not random), smooth
+  systematic shift, representing optical-bench thermal expansion moving
+  the whole dispersion/keystone relation. Modeled the same way (perturb
+  the same low-order terms) but with a fixed sign/shape rather than a
+  random draw, and swept over a magnitude parameter standing in for
+  assumed ΔT, rather than reseeded.
+
+Both perturbation types share one mechanism (`perturbed_coeffs()` in
+§12d below) — "noise" and "drift" differ only in whether the perturbation
+vector is drawn randomly (seeded) or set deterministically, not in how
+it's applied.
+
+### 12c. Critical asymmetry to exploit — wavelength error is partly self-correcting, slit-position error is not
+
+Native/rectified already float `disp_a0_0`/`disp_a1_0`/`disp_a2_0` in the
+state vector when `order=2` (`_retrieve()`'s `include_dispersion=(order>0)`)
+— a nuisance nudge to the assumed *wavelength* calibration that a real
+retrieval fits per-scene. A **wavelength-only** mismatch experiment
+therefore measures how much of an assumed smile/dispersion error the
+existing pipeline can absorb before it shows up as gas bias.
+
+There is **no equivalent nuisance parameter for slit position** anywhere
+in `StateVector.gas_scaling()` — nothing in the state vector lets a fit
+compensate for "this pixel's assumed along-slit position is wrong." A
+**keystone/slit-only** mismatch experiment therefore measures a raw,
+structurally uncorrectable bias: whatever error this injects is exactly
+what a real pipeline would carry too, since there's nothing today (in
+either this simulator or, presumably, an equivalent real L2 algorithm's
+own state vector) built to self-calibrate it out.
+
+Plan: run wavelength-only, slit-only, and both-combined mismatch as three
+separate cases (not just one "calibration error" case) specifically to
+keep these two failure modes distinguishable in the results.
+
+### 12d. Implementation sketch
+
+New function `perturbed_coeffs(fpa, wn_bias_cm1=0.0, wn_noise_rms_cm1=0.0,
+slit_bias_km=0.0, slit_noise_rms_km=0.0, seed=None)` returns a copy of
+`gd_polynomials._coeffs()`'s `A{fpa}`/`B{fpa}` term dicts with the `const`
+(and optionally `x`/`y`) terms nudged by an amount calibrated to hit the
+requested RMS/bias in physical units over the real pixel grid — a
+low-order, smooth perturbation by construction, satisfying §12b's "not
+per-pixel noise" requirement without needing a richer basis. A parallel
+`xy_to_wavelength_slit_assumed(fpa, x, y, mismatch)` evaluates the same
+`_poly2d` call `xy_to_wavelength_slit` does, but against the perturbed
+coefficients — a drop-in replacement wherever `_worker()` currently calls
+the real function for retrieval-side bookkeeping.
+
+`gd_band_stress_test.py` gains a `--mismatch-mode {none,wavelength,slit,
+both}`, `--mismatch-wn-bias-cm1`, `--mismatch-wn-noise-cm1`,
+`--mismatch-slit-bias-km`, `--mismatch-slit-noise-km`, `--mismatch-seed`
+CLI surface; `_worker()`'s native/rectified/undistorted branches call
+`xy_to_wavelength_slit_assumed(...)` instead of `xy_to_wavelength_slit(...)`
+when any mismatch is requested. `gd_render.image()`'s own truth-rendering
+call is untouched.
+
+### 12e. Run matrix
+
+Start with the **realistic** scene (most physically relevant), all 4 FPAs,
+no measurement noise (isolate the mismatch signal cleanly before stacking
+it with SNR noise): `{none, wavelength-only, slit-only, both} x {small,
+large magnitude}` = 8 mismatch cases x 4 FPAs = 32 runs, reusing the
+existing bias/chi2/robust-stats (§9v) and grid/residual-spectra plotting
+scripts unchanged (they already key off whatever's in each result pkl).
+Extend to noisy/uniform/barcode scenes only once the mismatch-only signal
+is characterized, mirroring how §9v's own scope grew.
+
+### 12f. Open: where do the magnitude numbers come from
+
+Ideally the "noise" magnitude is the real ground-test polynomial fit's own
+residual scatter (if `keystone_report.pdf` documents a fit RMS/covariance)
+rather than a guess. Absent that, parameterize both magnitudes as a
+fraction of each FPA's own real smile/keystone amplitude — a "small"
+mismatch comparable to the report's stated fit-quality claims, a "large"
+one large enough to be clearly visible in the bias/chi2 statistics — and
+say so explicitly in the run's metadata so results are never mistaken for
+a real, documented calibration-error estimate.
+
+### 12g. Built and smoke-tested (2026-07-27) -- a finding that revises §12c
+
+Implemented: `geocarb_gert.gd_polynomials.perturbed_coeffs()` and
+`xy_to_wavelength_slit_assumed()` (bias + seeded-random low-order
+perturbation of the real A{fpa}/B{fpa} term dicts, physical units in,
+verified against target RMS/bias -- see module for details); `gd_band_
+stress_test.py` gained the `--mismatch-mode {none,wavelength,slit,both}`
+CLI surface described in §12d, wired into native's and undistorted's
+`nu_row` construction in `_worker()`. `rectified` is dropped from the run
+whenever a mismatch is active (needs an assumed-*inverse* mapping,
+`wavelength_slit_to_xy`'s counterpart, not built yet -- `gd_render.
+rectify()` still only knows the real one).
+
+A 4-row FPA1 smoke test (`--row-step 300`, `wavelength` vs `slit` vs
+`none`) turned up something the design in §12a-c didn't anticipate:
+**`slit`-mode mismatch has exactly zero effect on native/undistorted's
+retrieved bias** -- byte-identical results to the `none` baseline at every
+row, not just small. `wavelength`-mode mismatch, by contrast, does move
+the bias (row 0: −3.955 -> −3.483 ppm CO2 at wn_bias=0.05 cm-1 + wn_noise_
+rms=0.02 cm-1), confirming that channel works as designed.
+
+**Why**: tracing `_worker()`/`_retrieve()`, slit/keystone position never
+actually enters the retrieval math for native or undistorted. Native reads
+its row directly from the real rendered image (`g["A"][k,:]`) and only
+ever hands the retrieval a wavenumber grid (`nu_row`, from the wavelength
+polynomial) -- there is no per-pixel slit-position input anywhere in
+`ForwardModel`/`StateVector.gas_scaling()`'s single-atmosphere-per-row
+design. Undistorted's simulated measurement is built from the row's REAL
+`x_km_of_row` (correctly so -- that's the true position the along-slit
+scene should be evaluated at); an *assumed* slit position has nowhere to
+plug in without conflating "what the detector saw" with "what the
+retrieval believes," which would defeat the render/retrieval separation
+Sec. 12a is built on.
+
+The one place slit-position calibration error *does* have a real
+mechanism to bias results is **rectified**: `gd_render.rectify()`'s
+inverse mapping (`wavelength_slit_to_xy`) decides which raw pixel's data
+lands at a given target `(s, wn)` grid point -- get that mapping wrong and
+the rectified spectrum is built from the wrong raw pixels, a genuine,
+already-partially-built mechanism (§9l's whole rectification-
+interpolation-bias finding lives in this same function). This reframes
+§12c's asymmetry: it isn't just that keystone error is *harder to
+correct* than wavelength error within this simulator -- with the current
+sketch, keystone error has **no way to enter the bias at all** for
+native/undistorted, and the only pipeline structurally sensitive to it
+(rectified) is exactly the one this sketch had to drop for lack of an
+assumed-inverse mapping.
+
+**Revised next step**: build `wavelength_slit_to_xy_assumed()` (same
+`perturbed_coeffs()` dict, evaluated through the C{fpa}/D{fpa} inverse
+polynomials) and a parallel `rectify_assumed()` (or a `mismatch` kwarg on
+`gd_render.rectify()` itself) so `slit`-mode mismatch has a real pipeline
+to show up in. Until that exists, `--mismatch-mode slit`/`both` for
+native/undistorted should be understood as exercising the wavelength term
+only in practice (`both` currently degrades to `wavelength` for those two
+pipelines) -- not wrong, just not yet testing what its name promises.
+
+**Status:** `wavelength`-mode mismatch is real and usable today for
+native/undistorted (not yet run at full 1024-row/4-FPA scale -- only the
+4-row smoke test above). `slit`-mode mismatch needs the assumed-inverse-
+mapping/rectify extension above before it measures anything.

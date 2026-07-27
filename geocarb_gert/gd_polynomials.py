@@ -217,3 +217,133 @@ def wavelength_slit_to_xy(fpa: int, wavelength, s):
     x = _poly2d(coeffs[f"C{fpa}"], wavelength, s)
     y = _poly2d(coeffs[f"D{fpa}"], wavelength, s)
     return x, y
+
+
+# ---------------------------------------------------------------------------
+# Assumed (mismatched) calibration -- for the imperfect-knowledge experiment,
+# see KEYSTONE_SMILE_BIAS_PLAN.md Sec. 12. `xy_to_wavelength_slit` above is
+# always the REAL calibration, used to render truth (gd_render.image()/
+# rectify() must stay on it). The functions below build a separate ASSUMED
+# calibration -- what a retrieval pipeline believes the mapping is, when the
+# ground-test polynomial fit has residual noise and/or the on-orbit
+# instrument has thermally drifted from that fit -- for use only in
+# retrieval-side position bookkeeping (gd_band_stress_test.py's _worker()).
+# ---------------------------------------------------------------------------
+
+_LOW_ORDER_TERMS = _TERMS[:6]   # const, x, y, xx, xy, yy -- smooth, not per-pixel
+
+
+def _rescaled_random_field(seed, target_rms: float, x: np.ndarray, y: np.ndarray) -> dict:
+    """A random low-order 2D polynomial (see _LOW_ORDER_TERMS), rescaled so
+    its RMS over (x, y) equals target_rms. {} (no perturbation) if seed is
+    None or target_rms <= 0 -- a "noise" term that's off unless both a
+    magnitude and a seed are given."""
+    if seed is None or target_rms <= 0:
+        return {}
+    rng = np.random.default_rng(seed)
+    raw = {t: (rng.normal() if t in _LOW_ORDER_TERMS else 0.0) for t in _TERMS}
+    field = _poly2d(raw, x, y)
+    achieved = float(np.sqrt(np.mean(field ** 2)))
+    if achieved < 1e-12:
+        return {}
+    scale = target_rms / achieved
+    return {t: c * scale for t, c in raw.items()}
+
+
+def perturbed_coeffs(fpa: int, wn_bias_cm1: float = 0.0, wn_noise_rms_cm1: float = 0.0,
+                     slit_bias_km: float = 0.0, slit_noise_rms_km: float = 0.0,
+                     seed: int | None = None, slit_half_km: float = 1400.0) -> dict:
+    """Build an ASSUMED coefficient set for one FPA: the real A{fpa}/B{fpa}
+    term dicts, each with a low-order perturbation added -- a deterministic
+    bias (thermal-drift stand-in) plus a random smooth field at a target RMS
+    (ground-test fit-noise stand-in), specified in physical units (cm-1 for
+    wavelength, km for slit position) and converted to the polynomial's own
+    units (microns, degrees) via a band-centre scale factor.
+
+    See KEYSTONE_SMILE_BIAS_PLAN.md Sec. 12 for the experiment this
+    supports and why the perturbation is smooth/low-order rather than
+    per-pixel: a finite polynomial fit's own residual error is spatially
+    smooth, not iid noise, and a real thermal drift shifts the whole
+    dispersion/keystone relation, not individual pixels.
+
+    Parameters
+    ----------
+    fpa : int
+    wn_bias_cm1 : float
+        Deterministic wavenumber bias [cm-1] (thermal-drift stand-in).
+        Positive = assumed wavenumber too high (assumed wavelength too low).
+    wn_noise_rms_cm1 : float
+        RMS of a random smooth wavenumber perturbation [cm-1] (ground-test
+        fit-noise stand-in). Only applied if `seed` is not None.
+    slit_bias_km : float
+        Deterministic along-slit position bias [km].
+    slit_noise_rms_km : float
+        RMS of a random smooth along-slit position perturbation [km]. Only
+        applied if `seed` is not None.
+    seed : int, optional
+        Seed for the noise draws (the wavelength and slit noise fields use
+        `seed` and `seed + 1` respectively, so they're independent draws
+        from one experiment seed). None disables both noise terms
+        regardless of the *_rms args -- bias-only perturbation.
+    slit_half_km : float
+        Real half-slit-length [km] used for the deg<->km conversion --
+        pass `geocarb_gert.along_slit_scene.SLIT_HALF_KM` (1400.0) to match
+        the rest of this codebase's convention; not imported directly here
+        to avoid a circular import.
+
+    Returns
+    -------
+    dict
+        {"A{fpa}": {...term dict...}, "B{fpa}": {...term dict...}} -- ready
+        to substitute into a `_poly2d` call in place of `_coeffs()`'s own
+        entries (see `xy_to_wavelength_slit_assumed`).
+    """
+    _check_fpa(fpa)
+    coeffs = _coeffs()
+    cols = np.arange(N_PX, dtype=float)
+    rows = np.arange(N_PX, dtype=float)
+    gx, gy = np.meshgrid(cols, rows)   # full pixel grid, for RMS calibration
+
+    # Band-centre scale factors converting the physical-unit bias/RMS
+    # (cm-1, km) into the polynomial's own units (microns, degrees). Uses
+    # the REAL mapping (xy_to_wavelength_slit, not this function) since the
+    # conversion factor itself should reflect the true instrument, not an
+    # already-perturbed one.
+    lam_c, _ = xy_to_wavelength_slit(fpa, np.array([N_PX / 2]), np.array([N_PX / 2]))
+    lam_c = float(lam_c[0])
+    um_per_cm1 = lam_c ** 2 / 1.0e4             # |dlambda/dnu| at band centre
+    _, s_edge = xy_to_wavelength_slit(fpa, np.full(2, N_PX / 2 - 0.5), np.array([0.0, N_PX - 1.0]))
+    sm = float(np.abs(s_edge).max())            # same definition as gd_render.s_max
+    deg_per_km = sm / slit_half_km
+
+    wn_bias_um = -wn_bias_cm1 * um_per_cm1      # wavenumber up -> wavelength down
+    wn_noise_um = wn_noise_rms_cm1 * um_per_cm1
+    slit_bias_deg = slit_bias_km * deg_per_km
+    slit_noise_deg = slit_noise_rms_km * deg_per_km
+
+    A = dict(coeffs[f"A{fpa}"])
+    B = dict(coeffs[f"B{fpa}"])
+    A["const"] = A["const"] + wn_bias_um
+    B["const"] = B["const"] + slit_bias_deg
+
+    rand_A = _rescaled_random_field(seed, wn_noise_um, gx, gy)
+    rand_B = _rescaled_random_field(None if seed is None else seed + 1, slit_noise_deg, gx, gy)
+    for t, c in rand_A.items():
+        A[t] = A.get(t, 0.0) + c
+    for t, c in rand_B.items():
+        B[t] = B.get(t, 0.0) + c
+
+    return {f"A{fpa}": A, f"B{fpa}": B}
+
+
+def xy_to_wavelength_slit_assumed(fpa: int, x, y, mismatch: dict):
+    """Same as `xy_to_wavelength_slit`, but evaluated against an ASSUMED
+    (perturbed) coefficient set from `perturbed_coeffs()` instead of the
+    real one -- the retrieval-side "what the pipeline believes the mapping
+    is" counterpart. Never use this to render truth: gd_render.image()/
+    rectify() must stay on the real `xy_to_wavelength_slit`, or there is no
+    actual mismatch to measure."""
+    _check_fpa(fpa)
+    wavelength = _poly2d(mismatch[f"A{fpa}"], x, y)
+    s = _poly2d(mismatch[f"B{fpa}"], x, y)
+    return wavelength, s

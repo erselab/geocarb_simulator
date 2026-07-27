@@ -103,7 +103,8 @@ import geosat_geometry as gg
 from geocarb_gert import GEOCARB_BANDS, albedo_for, along_slit_scene as als, sample_geometries
 from geocarb_gert import gd_render
 from geocarb_gert import build_geocarb_instrument
-from geocarb_gert.gd_polynomials import real_wavenumber_range, xy_to_wavelength_slit
+from geocarb_gert.gd_polynomials import (real_wavenumber_range, xy_to_wavelength_slit,
+                                         perturbed_coeffs, xy_to_wavelength_slit_assumed)
 from geocarb_gert.gd_render import available_cpus, s_max
 from geocarb_gert.gd_render import _diagonal_ils_convolve
 
@@ -245,7 +246,15 @@ def _worker(task):
     try:
         if pipeline == "native":
             cols = np.arange(1024.0)
-            lam_row, _ = xy_to_wavelength_slit(g["fpa"], cols, np.full(1024, float(k)))
+            # ASSUMED calibration (Sec. 12) when g["mismatch"] is set: this
+            # is the retrieval's own position bookkeeping -- what it
+            # believes each column's wavenumber is -- so it's the one that
+            # should see the mismatch, not g["A"] (rendered with the REAL
+            # mapping in main(), untouched here).
+            if g["mismatch"] is not None:
+                lam_row, _ = xy_to_wavelength_slit_assumed(g["fpa"], cols, np.full(1024, float(k)), g["mismatch"])
+            else:
+                lam_row, _ = xy_to_wavelength_slit(g["fpa"], cols, np.full(1024, float(k)))
             nu_row = 1e4 / lam_row
             y_dist = g["A"][k, :]
             # gert's y/y_ret is always in ascending-wavelength (descending
@@ -287,7 +296,15 @@ def _worker(task):
             # distortion (native, via gd_render.image()) or not (undistorted,
             # evaluated directly from the truth lookup table).
             cols = np.arange(1024.0)
-            lam_row, _ = xy_to_wavelength_slit(g["fpa"], cols, np.full(1024, float(k)))
+            # Same ASSUMED-calibration substitution as native above --
+            # undistorted's own spectrum (S_row/eta_row below) is still
+            # looked up at the REAL x_km_of_row position (that's the "no
+            # geometric distortion" baseline this pipeline exists to be);
+            # only its belief about each column's wavenumber changes.
+            if g["mismatch"] is not None:
+                lam_row, _ = xy_to_wavelength_slit_assumed(g["fpa"], cols, np.full(1024, float(k)), g["mismatch"])
+            else:
+                lam_row, _ = xy_to_wavelength_slit(g["fpa"], cols, np.full(1024, float(k)))
             nu_row = 1e4 / lam_row
             reverse = nu_row[0] < nu_row[-1]   # match native's convention (see above)
             if reverse:
@@ -364,12 +381,64 @@ def main() -> int:
                          "before 2026-07-25. Output filename gets a _noise suffix.")
     ap.add_argument("--noise-seed", type=int, default=0,
                     help="seed for --noise's random Gaussian draw (reproducible by default).")
+    ap.add_argument("--mismatch-mode", type=str, default="none",
+                    choices=["none", "wavelength", "slit", "both"],
+                    help="calibration-knowledge mismatch (KEYSTONE_SMILE_BIAS_PLAN.md Sec. 12): "
+                         "give the retrieval's position bookkeeping (native/undistorted's nu_row) "
+                         "an ASSUMED GD mapping that differs from the REAL one gd_render.image() "
+                         "renders truth with, via geocarb_gert.gd_polynomials.perturbed_coeffs(). "
+                         "'wavelength' perturbs only the smile/dispersion map (partially "
+                         "correctable via this pipeline's own dispersion-coefficient nuisance "
+                         "parameters, order=2); 'slit' perturbs only the keystone/slit-position "
+                         "map (NOT correctable -- no equivalent nuisance parameter exists in "
+                         "StateVector.gas_scaling()); 'both' perturbs both independently. Default "
+                         "'none' reproduces every earlier run exactly (perfect calibration "
+                         "knowledge). NOTE: 'rectified' is dropped from this run's pipeline list "
+                         "whenever mismatch-mode != none -- gd_render.rectify() only has a real-"
+                         "calibration inverse mapping today; see Sec. 12d.")
+    ap.add_argument("--mismatch-wn-bias-cm1", type=float, default=0.0,
+                    help="deterministic wavenumber bias [cm-1] (on-orbit thermal-drift stand-in).")
+    ap.add_argument("--mismatch-wn-noise-cm1", type=float, default=0.0,
+                    help="RMS of a random smooth wavenumber perturbation [cm-1] over the full "
+                         "detector (ground-test fit-noise stand-in). Redrawn only when "
+                         "--mismatch-seed changes.")
+    ap.add_argument("--mismatch-slit-bias-km", type=float, default=0.0,
+                    help="deterministic along-slit position bias [km].")
+    ap.add_argument("--mismatch-slit-noise-km", type=float, default=0.0,
+                    help="RMS of a random smooth along-slit position perturbation [km].")
+    ap.add_argument("--mismatch-seed", type=int, default=0,
+                    help="seed for the --mismatch-*-noise-* draws (reproducible by default; "
+                         "wavelength and slit noise fields use seed and seed+1 respectively).")
     args = ap.parse_args()
     if args.uniform and args.barcode:
         ap.error("--uniform and --barcode are mutually exclusive (both force uniform composition "
                 "truth already; choose one along-slit radiance pattern)")
     FPA = args.fpa
     snr = args.snr if args.snr is not None else DEFAULT_SNR_BY_FPA[FPA]
+
+    # ASSUMED (mismatched) calibration -- see Sec. 12 / --mismatch-mode's
+    # help text. None (perfect calibration knowledge, every earlier run's
+    # behavior) unless a mismatch mode was requested. Built once here, not
+    # per-row -- it's the retrieval's fixed *belief* about the geometry,
+    # not something that varies row to row.
+    mismatch = None
+    if args.mismatch_mode != "none":
+        use_wn = args.mismatch_mode in ("wavelength", "both")
+        use_slit = args.mismatch_mode in ("slit", "both")
+        mismatch = perturbed_coeffs(
+            FPA,
+            wn_bias_cm1=args.mismatch_wn_bias_cm1 if use_wn else 0.0,
+            wn_noise_rms_cm1=args.mismatch_wn_noise_cm1 if use_wn else 0.0,
+            slit_bias_km=args.mismatch_slit_bias_km if use_slit else 0.0,
+            slit_noise_rms_km=args.mismatch_slit_noise_km if use_slit else 0.0,
+            seed=args.mismatch_seed)
+        print(f"calibration mismatch active: mode={args.mismatch_mode} "
+             f"wn_bias={args.mismatch_wn_bias_cm1 if use_wn else 0.0}cm-1 "
+             f"wn_noise_rms={args.mismatch_wn_noise_cm1 if use_wn else 0.0}cm-1 "
+             f"slit_bias={args.mismatch_slit_bias_km if use_slit else 0.0}km "
+             f"slit_noise_rms={args.mismatch_slit_noise_km if use_slit else 0.0}km "
+             f"seed={args.mismatch_seed} -- 'rectified' pipeline dropped this run (Sec. 12d)",
+             flush=True)
 
     label, wn_min_nom, wn_max_nom, mols, R = GEOCARB_BANDS[FPA]
     mols = list(mols)
@@ -521,6 +590,15 @@ def main() -> int:
     # artifact" question this baseline exists to answer (order=0 only,
     # keeping the state vector matched to the true generative model).
     pipeline_orders = {"native": [2], "rectified": [2], "undistorted": [0]}
+    if mismatch is not None:
+        # gd_render.rectify() (already run above, Rimg) only has a REAL-
+        # calibration inverse mapping (wavelength_slit_to_xy) -- there's no
+        # assumed-inverse counterpart yet (Sec. 12d), so rectified's
+        # position bookkeeping can't honor `mismatch` today. Dropping it
+        # rather than silently running it on the real grid, which would
+        # make it look artificially immune to a mismatch it was never
+        # actually exposed to.
+        del pipeline_orders["rectified"]
     tasks = [(pipeline, order, k) for pipeline, orders in pipeline_orders.items()
             for order in orders for k in rows]
     print(f"{len(tasks)} retrievals ({len(rows)} rows x "
@@ -529,7 +607,7 @@ def main() -> int:
 
     _G.update(dict(fpa=FPA, A=A, Rimg=Rimg, wn_grid=wn_grid, wn_hires=wn_hires, radiance=radiance,
                    ils=wide_win.ils, wn_min=wn_min, wn_max=wn_max, snr=snr, sigma_band=sigma_band,
-                   noise_arr=noise_arr,
+                   noise_arr=noise_arr, mismatch=mismatch,
                    fwhm_cm=fwhm_cm, mols=mols, label=label, atm=atm_center, absco=absco,
                    geo=geo, solar=solar, albedo=albedo, gases=gases, p_surface_prior=p_surface_prior,
                    xtrue_of_row=xtrue_of_row, gas_units=gas_units, x_km_of_row=x_km_of_row))
@@ -550,8 +628,10 @@ def main() -> int:
 
     mode_suffix = "_uniform" if args.uniform else ("_barcode" if args.barcode else "")
     noise_suffix = "_noise" if args.noise else ""
+    mismatch_suffix = f"_mismatch{args.mismatch_mode}" if args.mismatch_mode != "none" else ""
     tag_suffix = f"_{args.out_tag}" if args.out_tag else ""
-    out_path = REPO_ROOT / "results" / f"gd_band_stress_test_fpa{FPA}{mode_suffix}{noise_suffix}{tag_suffix}.pkl"
+    out_path = (REPO_ROOT / "results" /
+               f"gd_band_stress_test_fpa{FPA}{mode_suffix}{noise_suffix}{mismatch_suffix}{tag_suffix}.pkl")
     out_path.parent.mkdir(exist_ok=True)
     with open(out_path, "wb") as f:
         pickle.dump({"out": out, "rows": rows, "wn_grid": wn_grid, "s_grid": s_grid,
@@ -560,6 +640,12 @@ def main() -> int:
                     "barcode_bars": args.barcode_bars if args.barcode else None,
                     "snr": snr, "sigma_band": sigma_band, "noise": args.noise,
                     "noise_seed": args.noise_seed if args.noise else None,
+                    "mismatch_mode": args.mismatch_mode,
+                    "mismatch_wn_bias_cm1": args.mismatch_wn_bias_cm1,
+                    "mismatch_wn_noise_cm1": args.mismatch_wn_noise_cm1,
+                    "mismatch_slit_bias_km": args.mismatch_slit_bias_km,
+                    "mismatch_slit_noise_km": args.mismatch_slit_noise_km,
+                    "mismatch_seed": args.mismatch_seed if args.mismatch_mode != "none" else None,
                     "xtrue_of_row": xtrue_of_row, "x_km_of_row": x_km_of_row}, f)
     print(f"saved {out_path}")
     return 0
