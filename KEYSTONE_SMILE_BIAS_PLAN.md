@@ -22,7 +22,7 @@ The focal-plane model is scale-free in physical length: `slit_length_mm`,
 | slit → detector | 3000 km ground → **1024 spatial px** and **1024 spectral px** |
 | ground sampling (GSD) | 3000 / 1024 ≈ **2.93 km/pixel** (set by the telescope fore-optics, *upstream* of this model) |
 | keystone | slit **image** grows **20 px** blue→red = **1.95 %** (`keystone_px=20`); modeled symmetric about slit centre → each end grows 10 px. **Magnitude confirmed by ground-test GD characterization** (up to ~10 rows crossed at the slit ends, §9) — but the real curve is **not symmetric about centre**; each FPA's zero-keystone "sweet row" is offset by clocking, worst for FPA2 (see §9) |
-| N/S PSF | **1.5 px** FWHM (`spatial_psf_fwhm_px=1.5`) ≈ 4.4 km ground blur. **Confirmed** — ground test reports the same ~1.5 px FWHM (§9) |
+| N/S PSF | **1.5 px** FWHM (`spatial_psf_fwhm_px=1.5`) ≈ 4.4 km ground blur. **Confirmed** — ground test reports the same ~1.5 px FWHM for all four FPAs (§9), consistent with an along-slit PSF set mainly by the shared telescope/slit image rather than by each arm's own downstream optics (not diffraction-limited — a diffraction-limited system would scale with wavelength, roughly 3× wider for FPA3 than FPA0; see §11b) |
 | smile | "pronounced", parabolic opening toward long-wave. **Confirmed from the real GD polynomials** (`geocarb_gert.gd_polynomials`, §9f): **~33–39 px** at each band's centre wavelength — a **15–20× correction** to the `SMILE_PX=2.0` placeholder. Not even constant across a band: e.g. FPA0 ~37 px at the short-wavelength edge vs. ~48 px at the long-wavelength edge |
 
 Physical translations at 2.93 km/px: keystone shifts a sounding's footprint **~29 km**
@@ -307,7 +307,19 @@ retrieval processing." Not the driver, except in FPA2's uncalibrated region (9d)
 
 ### Calibration chain (for reference, `keystone_report.pdf` §4.8.1–4.8.6)
 1. **Laser-spot GD test**: 55 control points per FPA (11 wavelengths × 5 slit
-   positions), 2D Gaussian centroid fit to sub-pixel precision.
+   positions), 2D Gaussian centroid fit to sub-pixel precision. Mechanism
+   (confirmed directly by the instrument team, 2026-07-27 — see §11b for the
+   cross-band implication): co-aligned lasers spanning the relevant
+   wavelengths shared one common optical path focused on the slit, so at any
+   instant they all illuminated the *same physical point* on the calibration
+   scanning mirror. The 5 slit positions were swept by steering that common,
+   co-aligned beam with the mirror; the 11 wavelengths were swept separately
+   by tuning laser frequency at fixed mirror position. Because every
+   wavelength shares one physical beam at every slit-position step, each of
+   the 55 lattice points has exactly one true physical slit angle common to
+   *all four FPAs at once* — the polynomial fit inherits that shared
+   reference directly from how the data was taken, not from an assumption
+   made afterward.
 2. **4th-degree 2D polynomial** (not bicubic — 15 coefficients, `(x,y)→(λ,s)` and 7
    other transforms) fit to the 55 points per FPA by pseudo-inverse least squares.
    Degree was tuned (N=3,4,5 tested) — N=4 gave the best round-trip-residual balance;
@@ -1594,7 +1606,7 @@ interpolation bias found in §9l.
   *exercised* through `gd_render`/`rectify`/retrieval this session — only
   FPA2 has (§9h–9l).
 
-### 11b. The genuinely new problem: cross-band ground co-registration
+### 11b. Cross-band ground co-registration — resolved: shared physical reference confirmed
 
 Both bands look through the *same physical slit*, so the shared coordinate
 across bands is **real slit angle `s` [deg]**, not detector row index and
@@ -1615,35 +1627,162 @@ FPA0 vs FPA2 alone differ by 0.058° at the identical pixel — with row
 spacing ≈ `2·s_max/1024` ≈ 0.0045°/row, that's over **10 rows'** worth of
 ground-position error. Pairing "row *k* of FPA0" with "row *k* of FPA2" (the
 naive approach) is wrong by a large margin. This is exactly the clocking
-effect §9c characterized for FPA2 alone, now shown to also misalign band
-to band.
+effect §9c characterized for FPA2 alone, now shown to also misalign band to
+band — but see below: this disagreement at a fixed *pixel* is expected and
+is not, by itself, evidence against a shared reference at a fixed *angle*.
 
-**Fix:** never align bands by row index. Rectify each band independently
-onto a **shared physical `s_grid`** (real degrees, not per-band-normalized)
-using that band's own C/D polynomial (`wavelength_slit_to_xy`) — this is
-exactly the `gd_render.rectify()` machinery already built in §9l, it just
-needs to target a common grid instead of each band's own `linspace(-s_max,
-s_max, ...)`. `s_max` differs per FPA (checked: 2.2899° / 2.2820° / 2.2970°
-/ 2.2858° for FPA0-3), so the joint `s_grid` must be clipped to the
-intersection — and each band's own off-detector NaN edges (§9l found ~17
-rows off-detector near FPA2's slit ends) will differ per band too, further
-narrowing the usable joint range below either band's own valid range.
+**Never align bands by row index; the shared coordinate is real slit
+angle `s`.** That much was already clear. What was genuinely open was
+whether `s` itself means the same physical direction across all four FPAs'
+independently-fit polynomials — resolved below.
 
-**Open question that can't be resolved from code alone:** were all four
-FPAs' GD polynomials calibrated against the *same* external slit-angle
-reference during ground test (`keystone_report.pdf`'s calibration chain,
-§9e), so that "s = 0.03°" means the identical physical direction in FPA0's
-and FPA2's polynomials? If yes, shared-`s_grid` rectification is sufficient
-for co-registration. If each FPA's calibration used its own local/
-independent reference, there is an additional, uncalibrated inter-band
-boresight offset not captured in these polynomials at all, and the
-retrieval would need an extra free "inter-band pointing offset" nuisance
-parameter (or an independent geometric cross-calibration step) to absorb
-it. **This is the single highest-leverage thing to check before building
-further** — check the calibration provenance/report before writing any
-cross-band registration code.
+**Instrument optical architecture** (from the instrument team, 2026-07-27).
+All four bands share one physical slit. Just inside the slit, the light
+splits into two arms — one shortwave, one longwave — each with its own
+optical path, until a final beam splitter *within* each arm separates that
+arm's own two bands onto their own two detectors. So the shared front end
+(telescope + slit) is common to all four bands; each arm's relay/grating
+optics are common to only two of the four; each detector is unique to one
+band. The instrument team's own working assumption is that the smile/
+keystone *differences* between bands come from each individual detector's
+own mounting (decenter/tilt/rotation in its focal plane), not from
+wavelength-dependent aberration in the shared telescope, slit, or either
+arm's relay optics.
 
-### 11c. Phasing
+**Build-time alignment.** Everything upstream of the detectors — telescope,
+slit, both arm splits, both arms' relay optics — was verified at
+integration using a chief-ray ("gut ray") alignment strategy: a laser at a
+representative wavelength for *each* band was used to confirm that light
+from slit centre lands on that band's own optical boresight. This was done
+independently per band, in both arms, not once for the whole instrument —
+so there is no reason to expect an *arm-level* boresight difference between
+a same-arm band pair and a cross-arm pair (e.g. O2-A + CO2_strong, §11's
+proposed test pair, likely sit in different arms given their wavelengths).
+Combined with the detector-only misalignment assumption above, this pins
+any real cross-band registration error to a single, well-defined degree of
+freedom per detector — a rigid offset (plus possibly a small rotation/scale
+if that detector is also tipped), not a distributed or wavelength-dependent
+effect spread across the shared optics.
+
+**Ground-test calibration methodology closes the loop.** The build alignment
+above is a design/integration-time guarantee; the actual GD polynomials in
+`gcmap_em27.csv` come from a separate ground-test data-collection step (the
+"Laser-spot GD test," calibration-chain bullet 1 above), and it was that
+step — not the build alignment — that could in principle have reintroduced
+a per-FPA reference ambiguity if it had been done independently per band.
+It wasn't: the calibration lasers spanning all four bands' wavelengths were
+co-aligned onto one common optical path focused on the slit, so at every
+lattice point they illuminated the *same physical spot* on the calibration
+scanning mirror simultaneously. Slit position was swept by steering that
+one shared beam with the mirror; wavelength was swept separately by tuning
+laser frequency. **Conclusion: every one of the 55 calibration lattice
+points has exactly one true physical slit angle common to all four FPAs at
+once, and each FPA's polynomial was fit against that same shared stimulus.**
+`s = 0.03°` in FPA0's polynomial and `s = 0.03°` in FPA2's polynomial mean
+the same physical direction, by construction of the calibration data itself
+— not by an assumption this study had to make. The FPA0-vs-FPA2 disagreement
+at a fixed *pixel* shown above is exactly what real, independent per-detector
+clocking differences at a shared true angle should look like, and is no
+longer evidence of an unresolved reference problem.
+
+**One narrower residual question, not yet checked.** The coefficients this
+codebase actually uses (`gcmap_em27.csv`) are not the raw laser-lattice fit
+— they are that fit *refined* by a separate EM27/SUN sun-viewing step
+(calibration-chain bullet 3, §4.8.6), a per-FPA Nelder-Mead optimization
+against each FPA's own measured solar spectrogram. If that refinement's
+solar observations were taken through the same shared telescope/slit (the
+instrument's normal viewing path, and the same underlying reason the laser
+test preserved a shared reference), it should inherit the same cross-band
+consistency for the same reason. But that hasn't been confirmed the way the
+laser-test mechanism now has — worth a direct check of the EM27/SUN
+refinement's own observation setup before treating the *refined*
+coefficients' cross-band consistency as fully closed, as opposed to just
+the initial fit's.
+
+**Practical effect:** shared-`s_grid` co-registration (§11c) no longer needs
+to carry a mandatory, unconstrained inter-band pointing-offset nuisance
+parameter as insurance against an unknown-shape reference mismatch — the
+mechanism above rules out anything but a small, specifically-shaped
+(rigid, per-detector) residual. Keeping that offset as a free but
+*expected-to-be-near-zero* parameter in the first joint-retrieval test is
+still worthwhile: cheap, and a direct empirical check on both the residual
+build-alignment tolerance and the still-open EM27/SUN question above.
+
+### 11c. Co-registration mechanism: risks and alternatives to plain rectification
+
+With §11b's reference question resolved, the remaining design choice is
+*how* to combine each band's real per-pixel data at a shared slit angle —
+and the obvious first answer (rectify each band onto a shared `s_grid`)
+carries a real, already-quantified risk.
+
+**Rectification risk.** The mechanism §11b originally proposed — retarget
+`gd_render.rectify()` at a grid shared across bands instead of each band's
+own `linspace(-s_max, s_max, ...)` — is the *same* interpolation-based
+resampling already shown, repeatedly (§9l/§9m, and every "rectified" curve
+in §9v/§9w's figures), to be the single largest bias source found in this
+whole study, independent of and on top of geometric distortion itself.
+Reusing it for cross-band co-registration would run that same interpolation
+error twice (once per band) plus whatever residual cross-band mismatch
+remains post-§11b, right at the step meant to make the two bands
+comparable. `s_max` and each band's off-detector edge rows also differ
+slightly per FPA (checked: `s_max` = 2.2899° / 2.2820° / 2.2970° / 2.2858°
+for FPA0-3; §9l found ~17 rows off-detector near FPA2's slit ends), so the
+joint grid would also need clipping to the cross-band intersection, on top
+of the interpolation-bias problem.
+
+**Alternative 1 — nearest native row.** For a target shared slit angle, look
+up each band's own nearest *real* row (no interpolation of the spectrum
+itself) and retrieve both bands' rows jointly (shared aerosol/atmosphere
+state, stacked into one cost function), each on its own real per-pixel
+`obs_grid` — exactly how native already operates today, just paired across
+bands instead of resampled. The only new error is row-quantization: the two
+bands' nearest real rows sit at most half a row's spacing apart in true
+angle, a small, bounded discretization error rather than an interpolation
+blend across whatever scene structure falls inside an arbitrary grid cell.
+Coverage is irregular (whatever discrete angles happen to be close between
+the two bands) rather than a clean shared axis, which is likely an
+acceptable tradeoff for a retrieval.
+
+**Alternative 2 — PSF-area-weighted average.** Rather than picking one
+nearest row, combine the few real rows nearest the target angle, weighted
+by the real along-slit PSF — physically motivated, since a real detector
+row is already the true scene convolved once with that same PSF
+(`spatial_psf_fwhm_px=1.5`, §1/§9h — the one place cross-row mixing is
+physically correct rather than an artifact). Confined to combining *rows*
+only, with each contributing row's own real wavelength grid left untouched,
+this avoids rectification's core problem (a geometric kernel with no
+physical basis mixing across wavelength *and* position at once). The one
+subtlety to get right: each real row is already the result of one PSF
+convolution, so re-combining several already-blurred rows with a second
+copy of the same kernel *compounds* the blur rather than just re-weighting
+it (two convolutions of width σ produce an effective width of σ√2, not σ) —
+a quiet, easy-to-miss resolution loss. Two ways to avoid it: combine each
+row's *pre-blur* per-pixel spectrum (reaching one step earlier into
+rendering, before the single PSF convolution is applied) rather than the
+already-rendered rows; or use a deliberately narrower weighting kernel whose
+quadrature sum with the existing blur reproduces the true PSF width. The
+former is more invasive but safer — the same "prefer the real, unresampled
+thing" instinct that made native beat rectified everywhere else in this
+study.
+
+**PSF commonality across bands.** Both alternatives above are simpler if
+the two bands in a pair share one PSF kernel rather than needing two
+separately-calibrated ones. §1 already records ground test reporting the
+same ~1.5 px FWHM for all four FPAs — a single shared number, not four
+independently-measured ones that happen to agree — which is stronger
+evidence than "the telescope should dominate" would be on its own, since it
+also rules out the along-slit PSF being diffraction-limited (a
+diffraction-limited system would scale with wavelength, roughly 3× wider
+for FPA3 at 2.3 µm than FPA0 at 0.76 µm). Consistent with the shared
+telescope/slit architecture in §11b: the along-slit PSF is set mainly by
+the common front end, not by each arm's own downstream optics. The residual
+caveat is unit conversion, not physics — "same PSF" is exact in angular
+terms and only approximately so in pixels, since converting to a pixel
+FWHM needs each band's own plate scale. Given all four FPAs share the
+1024-row format and `s_max` values within ~0.6% of each other, this is a
+small, already-bounded correction, not a live risk.
+
+### 11d. Phasing
 
 1. **Validate FPA0 individually first.** Nothing in §9h–9l has ever touched
    FPA0. Before trusting a joint retrieval built on top of it, re-run the
@@ -1654,12 +1793,19 @@ cross-band registration code.
    FPA2-specific, driven by FPA2's own clocking per §9c), and the uniform-
    scene rectify→retrieve bias check (§9l's method). No new code — these
    are the existing scripts parameterized with `fpa=0` instead of `fpa=2`.
-2. **Resolve the shared-reference-frame question** in §11b before writing
-   any cross-band registration code — it determines whether an inter-band
-   pointing nuisance parameter is needed at all.
-3. **Extend rectification to a shared, intersection-clipped `s_grid`**
-   across the two bands (small extension of `gd_render.rectify`'s existing
-   call pattern, not a rewrite).
+2. ~~Resolve the shared-reference-frame question~~ **Done (§11b,
+   2026-07-27)** — confirmed by the ground-test calibration methodology
+   (co-aligned lasers, shared scanning-mirror point) rather than assumed.
+   Only remaining piece: confirm the EM27/SUN refinement step's observation
+   setup preserves the same property (§11b's residual question) — worth a
+   quick check, not blocking.
+3. **Pick a co-registration mechanism** (§11c): nearest-native-row pairing
+   or PSF-area-weighted row combination, both preferred over shared-grid
+   rectification given §9l/§9m's already-quantified interpolation bias.
+   Nearest-row is the simpler first cut; PSF-weighting is more physically
+   faithful if the pre-blur double-counting subtlety in §11c is handled
+   correctly. Either is a small, targeted piece of new code, not the
+   `gd_render.rectify()` extension originally planned here.
 4. **Extend scene construction** to a shared atmosphere (now including an
    aerosol layer — confirm/exercise `ForwardModel`'s aerosol Jacobian path,
    already present per `forward_model.py`'s `K_aer_lay` code) with
@@ -1674,7 +1820,8 @@ cross-band registration code.
    test" convention used for every test in §9) before anything more
    elaborate.
 6. **Compare CO2-only vs. CO2+O2A+aerosol joint retrieval** under both the
-   native-grid and rectified pipelines. Does adding O2-A actually reduce
+   native-grid (paired via §11c's mechanism) and, if built for comparison,
+   the rectified pipeline. Does adding O2-A actually reduce
    bias / break the aerosol-CO2 degeneracy the way it's supposed to?
    Working hypothesis: it should **not** touch the −50 to −65 ppm
    rectification-interpolation bias from §9l, since that's a spectral-
@@ -1688,8 +1835,10 @@ cross-band registration code.
    structure the way single-band rectification error did.
 
 **Status:** planning only — no code written yet. §11a inventories what's
-reusable; §11b's open question is the next concrete step (check
-`keystone_report.pdf` calibration provenance) before phase 1 begins.
+reusable; §11b's reference-frame question is now resolved (2026-07-27, from
+the instrument team directly); §11c lays out the co-registration mechanism
+choice this unblocks. Phase 1 (§11d item 1, validating FPA0 individually)
+is the next concrete step.
 
 ---
 
