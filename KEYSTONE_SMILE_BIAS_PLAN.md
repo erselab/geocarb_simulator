@@ -1784,28 +1784,22 @@ small, already-bounded correction, not a live risk.
 
 ### 11d. Phasing
 
-1. **Validate FPA0 individually first.** Nothing in §9h–9l has ever touched
-   FPA0. Before trusting a joint retrieval built on top of it, re-run the
-   same validation battery already done for FPA2: round-trip
-   self-consistency (§9e's method), real smile amplitude and keystone/
-   smile-slope-null rows (§9f/9i's method, expect *different* row numbers
-   than FPA2's — row 25 keystone-null and row ~519 smile-slope-null are
-   FPA2-specific, driven by FPA2's own clocking per §9c), and the uniform-
-   scene rectify→retrieve bias check (§9l's method). No new code — these
-   are the existing scripts parameterized with `fpa=0` instead of `fpa=2`.
+1. ~~Validate FPA0 individually first~~ **Done (§11e, 2026-07-27) — FPA0
+   passes.** No FPA2-style anomaly found; one genuine but non-blocking
+   methodological gap surfaced (round-trip self-consistency, affects all
+   four FPAs equally, not an FPA0-specific issue). See §11e for the full
+   battery and numbers.
 2. ~~Resolve the shared-reference-frame question~~ **Done (§11b,
    2026-07-27)** — confirmed by the ground-test calibration methodology
    (co-aligned lasers, shared scanning-mirror point) rather than assumed.
    Only remaining piece: confirm the EM27/SUN refinement step's observation
    setup preserves the same property (§11b's residual question) — worth a
    quick check, not blocking.
-3. **Pick a co-registration mechanism** (§11c): nearest-native-row pairing
-   or PSF-area-weighted row combination, both preferred over shared-grid
-   rectification given §9l/§9m's already-quantified interpolation bias.
-   Nearest-row is the simpler first cut; PSF-weighting is more physically
-   faithful if the pre-blur double-counting subtlety in §11c is handled
-   correctly. Either is a small, targeted piece of new code, not the
-   `gd_render.rectify()` extension originally planned here.
+3. ~~Pick a co-registration mechanism~~ **Nearest-native-row: built and
+   validated (§11f, 2026-07-27)** — `geocarb_gert.cross_band.
+   nearest_row_pairing()`. PSF-area-weighted combination (§11c) remains
+   available as a later refinement if nearest-row's discretization error
+   turns out to matter in practice; it hasn't been built.
 4. **Extend scene construction** to a shared atmosphere (now including an
    aerosol layer — confirm/exercise `ForwardModel`'s aerosol Jacobian path,
    already present per `forward_model.py`'s `K_aer_lay` code) with
@@ -1834,11 +1828,330 @@ small, already-bounded correction, not a live risk.
    whether cross-band registration error interacts with along-slit scene
    structure the way single-band rectification error did.
 
-**Status:** planning only — no code written yet. §11a inventories what's
-reusable; §11b's reference-frame question is now resolved (2026-07-27, from
-the instrument team directly); §11c lays out the co-registration mechanism
-choice this unblocks. Phase 1 (§11d item 1, validating FPA0 individually)
-is the next concrete step.
+### 11e. FPA0 individual validation results (2026-07-27) — passes
+
+The phase-1 battery from §11d item 1, run directly against the real
+coefficients (polynomial checks) and the existing FPA0 uniform-scene sweep
+result (`results/gd_band_stress_test_fpa0_uniform.pkl`, already produced by
+§9v's original run — no new render/retrieve needed for this part).
+
+**Keystone-null row: confirmed at row 600.0** (`rows_crossed` minimised
+there, value 0.0054) — matches §9f's earlier finding (599.7) and the
+report's stated 600.
+
+**Smile-slope-null row: ~550, distinct from the keystone-null row.**
+Checked at the same five columns §9i used for FPA2 (4, 256, 512, 768,
+1019): minimum |∂ν/∂row| lands at row 548–556 depending on column, a
+~8-row spread across the full spectral range — wider than FPA2's <1-row
+spread, but still a single well-defined, well-separated minimum, ~50 rows
+from the keystone-null row. Confirms §9i's keystone/smile-slope
+orthogonality finding isn't FPA2-specific.
+
+**Smile amplitude: ~42–55 px across the band**, band-centre ~48 px,
+growing toward the long-wavelength edge (short edge 42.2 px → centre
+47.8 px → long edge 55.5 px) — same qualitative growth-toward-long-
+wavelength-edge shape already reported in §9f, broadly consistent with
+(not pixel-identical to) that section's figures — the small numerical
+difference is most likely a methodology detail (exact wavelength/`s`-range
+endpoints chosen), not a new finding.
+
+**Uniform-scene rectify→retrieve bias check: FPA0 matches the established
+cross-band pattern exactly, no FPA2-style anomaly.**
+
+| pipeline (order) | converged in-family | bias (p_surface / h2o) | chi2 median |
+|---|---|---|---|
+| native (2) | 1024/1024 | ±0.015 hPa std / ±35 ppm std | 0.00055 |
+| undistorted (0) | 1024/1024 | ±0.13 hPa std / ±104 ppm std | 0.078 |
+| rectified (2) | 1010/1024 | ±0.35 hPa std / ±486 ppm std | 3.02 |
+
+Native and undistorted both converge cleanly at every one of 1024 rows,
+with small biases and native's chi2 ~140× lower than undistorted's — the
+same dispersion-order artifact already explained in §9x, not a new effect.
+Rectified's 14 non-converging rows split cleanly into two unremarkable
+categories: 11 off-detector rows sitting exactly at the two slit extremes
+(rows 0–9 and row 1023 — the same edge-clipping behaviour already seen for
+FPA2, §9l), and 3 scattered mid-slit stalls (rows 334/750/818, no spatial
+clustering). Total failure rate ~1.4%, well below FPA2's known ~11–14% on
+the harder dense-sweep test (§9m) — no sign of an FPA2-style localized
+calibration-coverage gap (§9d): no bias spike or failure cluster anywhere
+in particular, just the expected edge effect plus ordinary optimizer noise.
+
+**One genuine gap surfaced, but it's methodological and not FPA0-specific:
+round-trip self-consistency could not be independently reproduced.**
+Computing `xy_to_wavelength_slit` → `wavelength_slit_to_xy` round-trip
+residual on a generic pixel grid gives residuals of order 0.1–2 px,
+scattered non-monotonically across the detector (e.g. FPA0 at dead centre,
+pixel (512,512): 0.96 px) — one to two orders of magnitude larger than the
+report's cited "few hundredths of a pixel," and **not** concentrated at
+the edges the way a simple extrapolation story would predict. Checked
+across all four FPAs for context, since a discrepancy isolated to FPA0
+would be a real concern: it isn't — FPA1 (0.05 px), FPA2 (0.83 px), and
+FPA3 (0.37 px) show the same order-of-magnitude mismatch at their own
+centre pixels, in an order that doesn't even track the report's own
+FPA-ranking (FPA2 is supposed to be the outlier, worst by far; here it
+isn't uniquely so). The most likely explanation: the report's figure was
+evaluated at or very near the actual 55 sparse calibration control points
+(or the ~1M-point EM27/SUN reference, §9g), neither of which this codebase
+has access to — a 4th-degree, 15-coefficient polynomial fit to only 55
+points per FPA has real room to wobble *between* those constraints even
+while matching them closely. This is a limit on what's independently
+verifiable from the coefficients alone, affecting every FPA equally, and
+it does **not** touch §11b's cross-band conclusion — that rested on how
+the calibration lattice was physically *acquired* (co-aligned lasers,
+shared scanning-mirror point), not on any single FPA's own forward/inverse
+polynomial-pair self-consistency, which is what this check measures.
+
+**Conclusion: FPA0 is validated for the multi-band plan to proceed.**
+Nothing here resembles FPA2's real, independently-documented calibration
+gap (§9d) — the round-trip discrepancy is a shared measurement-methodology
+limit across all four bands, not a defect discovered in FPA0.
+
+### 11f. Nearest-native-row co-registration: built and validated (2026-07-27)
+
+`geocarb_gert.cross_band` (new module): `real_s_of_row(fpa, rows)` (each
+row's real slit angle, the same convention `x_km_of_row` already uses
+elsewhere) and `nearest_row_pairing(fpa_a, fpa_b, rows_a)` — for each row of
+one band, the real row of the other band closest in true `s`, no
+interpolation of either spectrum, rows outside the other band's covered
+range dropped rather than extrapolated. Keyed on real `s` throughout, never
+normalized `eta` (§11b, and directly re-quantified for this exact pair when
+asked, 2026-07-27, below).
+
+**Smoke-tested on the plan's proposed pair, FPA0+FPA2:**
+
+| check | result |
+|---|---|
+| coverage | 1007/1024 rows kept (17 dropped, outside FPA2's range — same magnitude as the ~11–17-row edge coverage loss already seen for both bands individually, §9l/§11e) |
+| mismatch bound | mean 0.262 rows, **max 0.500 rows** — bounded, as it must be for nearest-neighbour matching against a ~1024-point target grid |
+| position dependence | no systematic edge growth — 0.31/0.04/0.43 rows at the two edges and centre respectively; jagged, not monotonic, consistent with a discretization "beat" between two almost-but-not-quite-matched row grids rather than any real physical trend |
+| monotonicity | `rows_a` vs. matched `rows_b`: correlation 1.0000 |
+| reciprocity | FPA2→FPA0 gives the same magnitude (mean 0.262, max 0.502 rows) and similar coverage (1012/1024) — symmetric, no directional bug |
+
+**This also gives the eta-vs-real-`s` question from earlier in the
+conversation a concrete before/after number, not just the general argument.**
+Using normalized `eta` instead for this same FPA0+FPA2 pair would have
+introduced a *systematic*, edge-growing mismatch up to **1.58 rows** at the
+slit edge (computed directly, previous turn) — roughly **3× worse than
+nearest-row-in-real-`s`'s worst case (0.50 rows), and unlike nearest-row's
+error, not bounded**: it keeps growing for any pair with a larger `s_max`
+gap (up to 3.35 rows for the worst pair, FPA1+FPA2). Real `s` isn't just
+the more principled choice — it measurably dominates the alternative here.
+
+**Status:** phases 1–3 of §11d are done (FPA0 validated, §11e; reference
+frame resolved, §11b; co-registration mechanism built and validated, this
+section).
+
+### 11g. First joint retrieval result: FPA0+FPA2, no aerosol, order=0, uniform scene (2026-07-27)
+
+**Deliberately skipped ahead of §11d item 4 (aerosol).** Aerosol's own
+nonlinearity would compound with anything found here and costs much more
+compute — decided to see what row-pairing plus a shared gas/pressure state
+does *on its own* first, uniform scene (Sec. 9's null-test convention),
+before adding it.
+
+**Built:** `scripts/gd_joint_band_test.py` (new). Renders both bands' native
+detector images independently (same real projection-operator + ILS
+mechanism as every single-band result in this study), pairs rows via
+§11f's `nearest_row_pairing`, then retrieves both bands' native spectra
+*jointly* against one shared state vector — a single `p_scale` and
+`h2o_scale` common to both bands, `co2_scale` sensitive only through FPA2.
+(Confirmed by reading `gert`'s own multi-window Jacobian assembly before
+writing this: a gas absent from a window's molecule list gets a correctly
+zeroed column block there automatically — no special-casing needed.
+`gert.osse.py`/`gert_demo.ipynb` is the only prior working multi-window
+precedent anywhere in either codebase; nothing in `geocarb_simulator` had
+ever exercised a real 2+-window joint retrieval before this.) Dispersion
+order 0 for both bands, to keep the new state vector's plumbing as simple
+as possible to validate first.
+
+**Full 1024-row uniform-scene sweep: 1007/1007 paired rows converged
+(100%).**
+
+| quantity | joint (FPA0+FPA2) | single-band FPA2 alone | single-band FPA0 alone |
+|---|---|---|---|
+| co2 bias [ppm], order=0 | mean −0.18, **std 0.39** | mean −0.32, std **1.71** | — |
+| p_surface bias [hPa], order=0 | mean +0.063, std 0.149 | — | mean +0.002, std **0.130** |
+
+(order=0 "undistorted" used for both single-band comparisons — the
+order-matched baseline, not native's order=2, which benefits from the
+dispersion-order chi2 artifact in §9x and isn't a fair comparison here.)
+
+**CO2 improves substantially; surface pressure itself doesn't.** CO2's bias
+scatter drops **~4.4×** (std 1.71 → 0.39 ppm) when the fit shares a common
+pressure/H2O state with O2-A instead of retrieving CO2_strong alone — the
+expected degeneracy-breaking mechanism (a real pressure constraint loosens
+the `co2_scale`/`p_scale` tie inside the CO2 band's own fit), showing up
+for the first time in this study on real per-pixel synthetic data rather
+than as a stated hypothesis. Surface pressure itself does *not* improve the
+same way: joint's std (0.149 hPa) is worse than FPA0 alone (0.130 hPa), and
+the mean bias moves further from zero (+0.063 vs +0.002 hPa). Plausible
+reading: FPA0 alone already constrains pressure very tightly, so folding
+CO2_strong's own weaker, noisier pressure sensitivity into the *same*
+shared parameter pulls the combined estimate slightly off O2-A's clean
+value, even as CO2 benefits from borrowing it. A real asymmetric win, not a
+symmetric one — worth remembering when deciding how a production algorithm
+should weight the two bands' pressure information (an O2-A-dominated
+pressure prior, rather than one equally-shared parameter, might get CO2's
+improvement without pressure's small cost) rather than assuming joint
+retrieval helps everything it touches equally.
+
+**Caveats before reading too much into this:** one band pair, uniform
+scene, no noise, no aerosol, dispersion order 0. The improvement could
+shrink, grow, or change character with dispersion floated per band, with
+real along-slit composition variation, with noise added, or with aerosol's
+own nonlinear coupling to photon path length (still deliberately deferred).
+A first, genuinely encouraging data point, not a final result.
+
+**Status:** §11d item 5 (build the joint retrieval, uniform scene first) is
+done for the no-aerosol case. Natural next steps, in rough order of
+cheapness: (a) repeat with dispersion order=2 per band, to check whether
+CO2's improvement survives once each band also gets its own
+wavelength-calibration nuisance term; (b) repeat on the realistic scene now
+that the uniform null test looks clean; (c) the aerosol extension (§11d
+item 4/6) remains deliberately deferred.
+
+### 11h. Full joint battery built: uniform/barcode/realistic x noise/no-noise x native/rectified/undistorted (2026-07-27)
+
+**The single-band full battery's (§9v/§9w) exact counterpart for the joint
+case.** `gd_joint_band_test.py` extended (still no aerosol, same rationale
+as §11g) to cover all three scenes and both noise settings, and gained the
+two pipelines §11g didn't yet have:
+
+- **native / undistorted** — unchanged mechanism from §11g, nearest-row
+  paired (§11f).
+- **rectified** — new. Each band rectified independently (`gd_render.
+  rectify`, already-existing single-band machinery) onto **one shared
+  cross-band `s_grid`** (real degrees, intersection-clipped to both bands'
+  covered range) — this is the *original* co-registration mechanism
+  §11b/§11c proposed and then set aside in favor of nearest-row, built here
+  specifically so the decision could be checked empirically rather than
+  left as an argument. Rows align by construction (same `s_grid` index for
+  both bands) — no pairing call needed for this pipeline.
+
+**Smoke-tested all four scene/noise combinations (uniform, barcode,
+realistic, uniform+noise) across all three pipelines** before handing off —
+every combination renders and retrieves without error. One result already
+worth reporting from the smoke test itself, at just 4 rows: **rectified's
+CO2 bias sits around −8 ppm, versus native's/undistorted's well under
+1 ppm** — the same order-of-magnitude gap already established for the
+single-band case (§9l/§9m), now confirmed to reproduce when rectification
+is the *cross-band* co-registration mechanism too. Consistent with §11c's
+prediction; not yet run at full row-count/scene coverage to know if it
+holds everywhere the way the single-band finding does.
+
+**Realistic-scene rendering is the slow part**: ~110s per band for the
+along-slit lookup table (both bands together ~220s), versus ~10s total for
+uniform/barcode. Full native+undistorted (~1007 nearest-row pairs each)
+plus rectified (~1024 shared-grid points) is roughly 3000 joint retrievals
+per scene/noise combination — the one full run done so far (§11g, native
+only, order=0, uniform, 1007 rows) took 585s at ~16-worker parallelism, so
+the full 3-pipeline battery is real compute, not something to run
+interactively case by case.
+
+**Built for SLURM submission, not run at full scale yet:**
+`scripts/gd_joint_band_test.slurm` (one task per scene/noise combination,
+all three pipelines within it, env-var driven — `FPA_A`/`FPA_B`/`UNIFORM`/
+`BARCODE`/`BARCODE_BARS`/`NOISE`/`SNR`/`NOISE_SEED`/`PIPELINES`/`ROW_STEP`,
+mirroring `gd_band_stress_test.slurm`'s conventions) and
+`scripts/gd_joint_band_test_submit_all.sh` (6 `sbatch` calls — 3 scenes x 2
+noise settings — for the default FPA0+FPA2 pair, mirroring
+`gd_band_stress_test_submit_all.sh`). Output:
+`results/gd_joint_fpa<A>_fpa<B>[_uniform|_barcode][_noise].pkl`, one file
+per combination, no collisions regardless of submission order.
+
+**Status:** infrastructure complete and smoke-tested; queued for the user
+to submit via `bash scripts/gd_joint_band_test_submit_all.sh`. Once results
+land: build the same bias-vs-slit-position summary figures §9v/§9w used for
+the single-band case, and check whether §11g's CO2-improves/pressure-
+doesn't asymmetry (and this section's early rectified-bias signal) hold up
+across all six combinations, not just the one uniform/order=0 case tested
+so far.
+
+### 11i. Full battery results, and a real barcode-specific failure mode found and diagnosed (2026-07-27)
+
+**All 6 combinations completed** (`scripts/gd_joint_band_test_submit_all.sh`,
+~3000 joint retrievals each, ~35-55 min per combination at 32 cores).
+`scripts/gd_joint_band_plot.py` built for the summary figures (bias/chi2 vs.
+along-slit position + failure-location panel, all three pipelines at once,
+the joint counterpart of §9v/§9w's figures) and
+`scripts/gd_joint_band_plot_residual_spectra.py` for representative
+spectral residuals **by band** (best/worst/10-spanning native chi2, same
+method as the single-band script) — output pkls only saved scalar bias/
+chi2, not residuals, so this script re-renders each case and re-runs just
+the ~12x3 representative retrievals fresh rather than the full ~3000;
+noted directly in its own docstring as a gap found after the battery had
+already completed, not by design.
+
+**Realistic/uniform (both noise settings) reproduce §11g's pattern at full
+scale**: native/undistorted track each other closely with small bias; a
+real, shared feature (the H2O/pressure degeneracy, same one every single-
+band figure shows) survives in both; rectified sits apart at a large,
+roughly position-dependent offset (co2 mean -8 ppm, p_surface excursions up
+to +16/-20 hPa in the realistic case) -- confirming §11c's prediction that
+shared-grid rectification for cross-band co-registration inherits (and
+here, compounds with real cross-band mismatch) the same interpolation bias
+already found for single-band rectification (§9l/§9m).
+
+**Barcode is a real, new joint-specific failure mode -- found, diagnosed,
+not a bug.** Native's convergence drops to 844/1007 (barcode) / 843/1007
+(barcode+noise) -- far below uniform/realistic's ~100% -- and of those
+"converged" rows, a further 117 are chi2-outliers (§9v's mask), leaving
+only 727/1007 (72%) actually trustworthy. Unlike the single-band barcode
+finding (§9j: a sharp, narrowly-localized spike at a handful of rows near
+bar boundaries), this failure is spread broadly across almost the entire
+slit, not confined to a few rows.
+
+Diagnosed directly from the residual-spectra plots: the "worst" row's
+residual (chi2=6.43, no noise) is a huge spike concentrated in a handful of
+channels near one band's edge (~1.5, against an otherwise near-zero
+residual everywhere else) -- not a broadly bad fit, a narrow one. Since
+`chi2_reduced` sums squared residuals over *every* channel, a handful of
+channels with a huge residual dominate the whole statistic even though 99%+
+of the spectrum fits essentially perfectly -- this is §9j's own mechanism
+(keystone-heterogeneity produces a sharp spike right at a bar boundary),
+just with much wider reach here. The reach is wider specifically *because*
+it's joint: each band has its own real keystone/smile geometry, so bar-edge
+discontinuities land at different rows in FPA0 than in FPA2 -- a joint fit
+inherits *both* bands' own bar-transition footprints, not just one,
+roughly doubling the exposed-row count relative to either band alone.
+
+**With noise added, this mostly disappears** -- barcode+noise's worst chi2
+drops to 1.15 and looks like ordinary noise-dominated residual throughout,
+no isolated catastrophic spike. A deterministic spike that's dramatic
+against an otherwise-perfect noiseless background is largely swamped once
+real photon noise (~O(0.5-1) amplitude here) is already present everywhere.
+
+**Bearing on the next band pair (FPA0+FPA1 vs. FPA0+FPA3, asked about
+directly 2026-07-28):** computed the smile-slope-null row for FPA1/FPA3
+(only ever done for FPA2 then FPA0 before now) specifically to check
+parity before choosing:
+
+| FPA | keystone-null row | smile-slope-null row | separation |
+|---|---|---|---|
+| 0 | 600 | ~550 | ~50 rows |
+| 1 | 570 | ~565-572 | **~2-7 rows** |
+| 2 | 25 | 519 | ~494 rows |
+| 3 | 266 | ~507-511 | ~243 rows |
+
+FPA1 is the one band where these two critical points nearly coincide --
+every other band has them well separated, giving those bands a broader
+region where at least one of the two mechanisms is favorable. FPA1 likely
+has less of that safe margin. Combined with the barcode mechanism above
+(each band contributes its own exposed-row footprint to a joint fit),
+**FPA0+FPA1's barcode case is expected to show an equal or higher affected-
+row fraction than FPA0+FPA2's ~28%, not less** -- a prediction to check once
+that battery runs, not a reason to hold off on it.
+
+**Status:** summary and residual-spectra figures complete for all 6
+FPA0+FPA2 combinations. Barcode's failure mode is understood and explained
+by an already-known single-band mechanism (§9j) operating jointly across
+two bands' independent geometries -- not a defect in the joint-retrieval
+machinery itself, and already correctly handled by the existing chi2-
+outlier filtering in the summary statistics. FPA0+FPA3 (O2-A + CH4/CO,
+`scripts/gd_joint_o2a_ch4co_submit_all.sh`) queued next; FPA0+FPA1 flagged
+above as plausibly the more barcode-sensitive pair given FPA1's null-row
+coincidence, worth running rather than skipping specifically because of
+that prediction.
 
 ---
 

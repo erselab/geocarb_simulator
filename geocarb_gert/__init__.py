@@ -26,6 +26,7 @@ from .gd_polynomials import (xy_to_wavelength_slit, wavelength_slit_to_xy, rows_
                              DISPERSION_ASCENDING)
 from . import gd_render
 from . import along_slit_scene
+from . import cross_band
 
 __all__ = [
     "GEOCARB_BANDS", "build_geocarb_instrument",
