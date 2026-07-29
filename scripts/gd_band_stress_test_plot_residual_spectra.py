@@ -34,7 +34,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 import pickle
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PIPELINE_ORDER = {"native": 2, "rectified": 2, "undistorted": 0}
+PIPELINE_ORDER = {"native": 2, "rectified": 2, "undistorted": 2}  # undistorted floats dispersion too, since 2026-07-28 (Sec. 11k) -- a numerical workaround, not a physical correction
 PIPELINE_COLOR = {"native": "tab:blue", "rectified": "tab:orange", "undistorted": "tab:green"}
 
 FPAS = (0, 1, 2, 3)

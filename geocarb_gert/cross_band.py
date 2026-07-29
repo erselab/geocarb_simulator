@@ -111,3 +111,75 @@ def nearest_row_pairing(fpa_a: int, fpa_b: int, rows_a=None) -> dict:
                s_a=s_a_valid, s_b=s_b_matched,
                mismatch_deg=mismatch_deg, mismatch_rows=mismatch_rows,
                n_dropped=n_dropped)
+
+
+def fpas_tag(fpas) -> str:
+    """Canonical filename tag for an ordered list of >=2 FPA indices, e.g.
+    [0, 2] -> "fpa0_fpa2", [0, 1, 2, 3] -> "fpa0_fpa1_fpa2_fpa3" -- the
+    naming convention shared by gd_joint_band_test.py and its two plotting
+    scripts, so a run's output filenames and a plot's expected input
+    filenames can never drift apart independently."""
+    return "_".join(f"fpa{fpa}" for fpa in fpas)
+
+
+def nearest_row_pairing_multi(fpas, rows_ref=None) -> dict:
+    """Generalizes nearest_row_pairing to >=2 bands for a multi-band joint
+    retrieval: pairs every band in `fpas[1:]` to `fpas[0]` (the along-slit
+    position reference) independently via nearest_row_pairing, then
+    restricts to the `fpas[0]` rows that fall within *every* other band's
+    covered range (the N-way intersection, not just one pairwise range).
+
+    Each individual pairing is independently bounded (<=0.5-row mismatch,
+    confirmed 2026-07-27 for the FPA0+FPA2 pair -- see
+    KEYSTONE_SMILE_BIAS_PLAN.md Sec. 11f), so error does not compound as
+    more bands are added -- only the valid along-slit coverage can shrink,
+    since it's an intersection across all bands' ranges.
+
+    Parameters
+    ----------
+    fpas : sequence of int, len >= 2
+        Ordered FPA indices; fpas[0] is the along-slit position reference.
+    rows_ref : array-like, optional
+        Rows of fpas[0] to pair. Default: every row, 0..N_PX-1.
+
+    Returns
+    -------
+    dict with:
+        fpas : list[int]                   -- as given
+        rows : dict[int, ndarray[int]]     -- per-FPA matched row, same
+                                               length/order for every FPA
+        s : dict[int, ndarray[float]]      -- per-FPA real slit angle [deg]
+        mismatch_deg : dict[int, ndarray]  -- vs. reference, 0 for fpas[0]
+        mismatch_rows : dict[int, ndarray] -- vs. reference, 0 for fpas[0]
+        n_dropped : int                    -- reference rows dropped by the
+                                               intersection
+    """
+    fpas = list(fpas)
+    ref = fpas[0]
+    if rows_ref is None:
+        rows_ref = np.arange(N_PX, dtype=float)
+    rows_ref = np.asarray(rows_ref, dtype=float)
+
+    pairings = {fpa: nearest_row_pairing(ref, fpa, rows_ref) for fpa in fpas[1:]}
+
+    valid_int = set(rows_ref.astype(int).tolist())
+    for p in pairings.values():
+        valid_int &= set(p["rows_a"].tolist())
+    valid_rows_ref = np.array(sorted(valid_int), dtype=int)
+    n_dropped = int(len(rows_ref) - len(valid_rows_ref))
+
+    rows = {ref: valid_rows_ref}
+    s = {ref: real_s_of_row(ref, valid_rows_ref.astype(float))}
+    mismatch_deg = {ref: np.zeros(len(valid_rows_ref))}
+    mismatch_rows = {ref: np.zeros(len(valid_rows_ref))}
+
+    for fpa, p in pairings.items():
+        idx_of = {int(ra): i for i, ra in enumerate(p["rows_a"])}
+        sel = np.array([idx_of[r] for r in valid_rows_ref], dtype=int)
+        rows[fpa] = p["rows_b"][sel]
+        s[fpa] = p["s_b"][sel]
+        mismatch_deg[fpa] = p["mismatch_deg"][sel]
+        mismatch_rows[fpa] = p["mismatch_rows"][sel]
+
+    return dict(fpas=fpas, rows=rows, s=s, mismatch_deg=mismatch_deg,
+               mismatch_rows=mismatch_rows, n_dropped=n_dropped)

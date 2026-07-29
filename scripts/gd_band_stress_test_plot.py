@@ -5,10 +5,11 @@ adds the along-slit truth profile for context and a failure-location panel
 tied to physical position (x_km), since this scene's failures may cluster
 near the pressure mountain / plumes rather than just the slit edges.
 
-Each pipeline only has one dispersion order available (native/rectified:
-order=2 only; undistorted: order=0 only -- see gd_band_stress_test.py's
-pipeline_orders for why), so every panel here plots each pipeline at its
-own single available order rather than assuming both exist everywhere.
+Each pipeline only has one dispersion order available (all three: order=2
+only, since 2026-07-28 -- see gd_band_stress_test.py's pipeline_orders and
+KEYSTONE_SMILE_BIAS_PLAN.md Sec. 11k for why undistorted changed from
+order=0), so every panel here plots each pipeline at its own single
+available order rather than assuming both exist everywhere.
 
 Chi2-outlier filtering (added 2026-07-25): `gert`'s own divergence check
 only catches non-finite (NaN/Inf) chi2 -- a Gauss-Newton step that
@@ -47,7 +48,7 @@ from geocarb_gert import along_slit_scene as als
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # pipeline -> its only available dispersion order (see gd_band_stress_test.py)
-PIPELINE_ORDER = {"native": 2, "rectified": 2, "undistorted": 0}
+PIPELINE_ORDER = {"native": 2, "rectified": 2, "undistorted": 2}  # undistorted floats dispersion too, since 2026-07-28 (Sec. 11k) -- a numerical workaround, not a physical correction
 PIPELINE_COLOR = {"native": "tab:blue", "rectified": "tab:orange", "undistorted": "tab:green"}
 
 
@@ -117,8 +118,9 @@ def _state_series(out, rows, x_km_of_row, pipeline: str, key: str):
     dispersion coefficients -- see gd_band_stress_test.py's _retrieve()) --
     retrieved-minus-prior, not retrieved-minus-truth, since these elements
     have no along-slit truth to diff against. Returns empty arrays if this
-    pipeline/order never had `key` (e.g. dispersion keys for undistorted,
-    order=0) or if the results predate the 2026-07-25 _state capture."""
+    pipeline/order never had `key` (e.g. dispersion keys for a pre-2026-07-28
+    undistorted .pkl, back when it was order=0) or if the results predate
+    the 2026-07-25 _state capture."""
     ks, biases, _, outlier = _in_family_rows(out, rows, pipeline)
     xs, vals = [], []
     for k, b, is_out in zip(ks, biases, outlier):
@@ -132,19 +134,23 @@ def _state_series(out, rows, x_km_of_row, pipeline: str, key: str):
 
 # Nuisance state-vector elements to plot, beyond the gases/p_surface already
 # in the main figure -- (key, ylabel, [pipelines expected to have it]).
-# Dispersion keys only exist for order>0 (native/rectified); undistorted
-# (order=0) never includes them (see gd_band_stress_test.py's
-# pipeline_orders). albedo_slope_0 has an extremely tight prior (1-sigma
-# 1e-10 in StateVector.gas_scaling's defaults) so it's expected to sit at
-# ~0 regardless of row -- included for completeness, not because it's
+# Dispersion keys only exist for order>0 -- all three pipelines, since
+# 2026-07-28 (see gd_band_stress_test.py's pipeline_orders and
+# KEYSTONE_SMILE_BIAS_PLAN.md Sec. 11k). undistorted's dispersion
+# coefficients are expected to sit near zero (floated purely as a
+# numerical workaround, not because it has real calibration error) --
+# worth watching in these panels as a direct check of that expectation.
+# albedo_slope_0 has an extremely tight prior (1-sigma 1e-10 in
+# StateVector.gas_scaling's defaults) so it's expected to sit at ~0
+# regardless of row -- included for completeness, not because it's
 # expected to show structure.
 STATE_PANELS = [
     ("T_offset", "T_offset bias vs prior [K]", ("native", "rectified", "undistorted")),
     ("albedo_0", "albedo_0 bias vs prior", ("native", "rectified", "undistorted")),
     ("albedo_slope_0", "albedo_slope_0 bias vs prior\n(tight prior, ~0 expected)", ("native", "rectified", "undistorted")),
-    ("disp_a0_0", "disp_a0_0 (shift) [cm-1]", ("native", "rectified")),
-    ("disp_a1_0", "disp_a1_0 (stretch) [cm-1]", ("native", "rectified")),
-    ("disp_a2_0", "disp_a2_0 (quadratic) [cm-1]", ("native", "rectified")),
+    ("disp_a0_0", "disp_a0_0 (shift) [cm-1]", ("native", "rectified", "undistorted")),
+    ("disp_a1_0", "disp_a1_0 (stretch) [cm-1]", ("native", "rectified", "undistorted")),
+    ("disp_a2_0", "disp_a2_0 (quadratic) [cm-1]", ("native", "rectified", "undistorted")),
 ]
 
 

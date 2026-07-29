@@ -15,7 +15,8 @@ state -- see that script's module docstring for why this check exists).
 
 Panel layout is fixed (same slots in the same order for every case, "no
 data" where a case doesn't have that element -- e.g. dispersion panels for
-undistorted, order=0) so all 24 figures are directly visually comparable.
+a pre-2026-07-28 undistorted .pkl, back when it was order=0) so all 24
+figures are directly visually comparable.
 
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_band_stress_test_plot_grid.py
 Output: plots/gd_band_stress_test_fpa<N>[_uniform|_barcode][_noise]_grid.png (up to 24)
@@ -33,7 +34,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 import pickle
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PIPELINE_ORDER = {"native": 2, "rectified": 2, "undistorted": 0}
+PIPELINE_ORDER = {"native": 2, "rectified": 2, "undistorted": 2}  # undistorted floats dispersion too, since 2026-07-28 (Sec. 11k) -- a numerical workaround, not a physical correction
 PIPELINE_COLOR = {"native": "tab:blue", "rectified": "tab:orange", "undistorted": "tab:green"}
 
 FPAS = (0, 1, 2, 3)

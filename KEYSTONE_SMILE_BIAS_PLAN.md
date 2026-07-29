@@ -2153,6 +2153,186 @@ above as plausibly the more barcode-sensitive pair given FPA1's null-row
 coincidence, worth running rather than skipping specifically because of
 that prediction.
 
+### 11j. Generalized to N>=2 bands (2026-07-28)
+
+Everything in §11f-§11i above was built for exactly 2 fixed bands
+(`fpa_a`/`fpa_b`). Asked directly what generalizing to more bands (e.g. a
+full 4-FPA joint retrieval) would require; answer was that `gert`'s own
+forward-model/state-vector machinery already handles an arbitrary number
+of `Instrument` windows with no changes needed (`ForwardModel.run()`
+concatenates however many windows it's given; `StateVector.gas_scaling()`
+already zeroes a gas's Jacobian column per-window automatically) -- the
+2-band assumption lived entirely in this study's own stress-test scripts,
+in five specific places, all now generalized:
+
+1. **Row co-registration.** `geocarb_gert.cross_band.nearest_row_pairing`
+   (pairwise, unchanged) is joined by a new `nearest_row_pairing_multi
+   (fpas, rows_ref=None)`: pairs every band in `fpas[1:]` to `fpas[0]`
+   independently, then restricts to the along-slit rows that fall within
+   *every* other band's covered range (an N-way intersection, not just one
+   pairwise range). Each individual pairing stays independently bounded
+   (<=0.5-row mismatch, §11f), so error doesn't compound as bands are
+   added -- only the valid coverage can shrink.
+2. **Rectified shared grid.** `_shared_s_grid(fpas, n=1024)` (both in
+   `gd_joint_band_test.py` and reimplemented locally in
+   `gd_joint_band_plot.py`, matching that file's existing
+   don't-cross-import-plotting-helpers convention) now intersects all of
+   `fpas`' covered ranges, not just two. Coverage shrinks (never grows) as
+   more bands are added -- worth checking before committing to a specific
+   4-band combination, since each FPA has a slightly different `s_max`.
+3. **Band-indexed setup/state.** `_band_setup`/`_native_row`/
+   `_undistorted_row`/`_rectified_row` were already single-band functions,
+   unchanged; `_joint_retrieve` and `_joint_retrieve_with_residual` now
+   take **lists** of bands/nu/y (order matching `fpas`) and build the
+   `Instrument`'s windows, `prior_albedo`, and `y_true`/`sigma` concatenation
+   in a loop instead of two hardcoded `_a`/`_b` slots. Per-band state names
+   (`albedo_{b}`, `disp_a{k}_{b}`) already used the window's *position* in
+   `instrument.windows`, so no change was needed there -- `b` now just
+   ranges over more values. The per-gas truth-source rule generalizes the
+   original 2-band rule (prefer `band_b`, default `band_a`) to "prefer the
+   *last* band in `fpas` order whose molecule list contains the gas,
+   default the first (reference) band."
+4. **Task/key format.** Result-dict keys changed from
+   `(pipeline, order, ka, kb)` to `(pipeline, order, rows)`, where `rows` is
+   a tuple of one row/grid-index per band in `fpas` order -- a single
+   representation that works identically for 2 bands or N, rather than a
+   fixed-arity tuple. This is a breaking change to the on-disk pkl format
+   (old 2-tuple `ka, kb` keys), but only the already-superseded FPA0+FPA2
+   battery predates it, and those files were already being cleaned up as
+   part of this same session's earlier request.
+5. **CLI/SLURM/filenames.** `--fpa-a`/`--fpa-b` became a single `--fpas`
+   flag taking a comma-separated list (>=2, unique, each 0-3); `gd_joint_
+   band_test.slurm`'s `FPA_A`/`FPA_B` env vars became one `FPAS` env var
+   (same comma-separated form); `gd_joint_band_test_submit_all.sh`'s
+   positional-arg support (added externally between sessions, must not be
+   reverted) now takes one positional arg holding the whole `FPAS` string
+   rather than two separate `$1`/`$2` slots. Output filenames use a new
+   shared helper `geocarb_gert.cross_band.fpas_tag(fpas)` (`[0, 2] ->
+   "fpa0_fpa2"`, `[0, 1, 2, 3] -> "fpa0_fpa1_fpa2_fpa3"`) so the test
+   script's output names and both plotting scripts' expected input names
+   can never drift apart independently -- both plot scripts (`gd_joint_
+   band_plot.py`, `gd_joint_band_plot_residual_spectra.py`) gained the same
+   `--fpas` flag and now build filenames via the same helper.
+   `gd_joint_band_plot_residual_spectra.py`'s per-band figure layout
+   (previously a fixed 2-column native-`nu_a`/`nu_b` grid) is now
+   `n_bands` columns wide, one per band in `fpas` order.
+
+**Smoke-tested** (`--uniform --row-step 100-200`, small subsets): the
+2-band FPA0+FPA2 case reproduces byte-for-byte the same state-vector names
+and co2/p_surface bias as before the rewrite (regression check); a genuine
+3-band FPA0+FPA1+FPA2 case runs cleanly end-to-end through all three
+pipelines (native/rectified/undistorted converge; N-way pairing reports
+each additional band's own mismatch-vs-reference separately), and both
+plotting scripts render correctly against the 3-band result (`gd_joint_
+band_plot.py`'s 2x2 summary figure; `gd_joint_band_plot_residual_spectra.
+py`'s N=3-column residual grid, 11 representative rows x 3 bands = 33
+axes, matching expectation).
+
+**Status:** the pipeline now supports any >=2-band combination (e.g. a
+future full FPA0+FPA1+FPA2+FPA3 run) without further script changes --
+only a `--fpas 0,1,2,3`-style argument. Not yet run at full battery scale
+for any >2-band combination; the FPA0+FPA1 and FPA0+FPA3 2-band batteries
+already queued (§11i) are unaffected by this rewrite (still 2-band, just
+now going through the generalized code path, confirmed equivalent above).
+
+### 11k. Undistorted's excess scatter root-caused and fixed: float dispersion there too (2026-07-28)
+
+**Symptom.** FPA0+FPA3 uniform/no-noise summary plots showed undistorted's
+chi2 (~0.05) and gas-bias scatter far worse than native's (~1e-4-1e-8),
+which was confusing given undistorted is supposed to be the *cleanest*
+pipeline (zero geometric distortion, real per-row wavelength grid, same
+gases retrieved almost to the true state). `_conv=True` for every row --
+this was never a convergence failure.
+
+**Root cause, traced to source.** Evaluated the forward model directly at
+the TRUE prior state (no optimizer involved) and found the mismatch
+between the "truth" measurement and a fresh `ForwardModel.run()` call
+already present there, at essentially the SAME magnitude for native and
+undistorted alike (std 0.0731/0.0731 FPA0, 0.0107/0.0107 FPA3, matched to
+4 significant figures for the same row) -- ruling out a bug in
+`_undistorted_row` specifically, since native's completely different
+rendering path (`gd_render.image()`, real 2D pixel projection + spatial
+PSF) shows the identical floor. Traced into `gert`:
+
+- `geocarb_gert/gd_render.py`'s `_diagonal_ils_convolve` -- shared by BOTH
+  native's rendering and undistorted's row construction to build the
+  "truth" -- always centers the ILS kernel on the *exact* channel
+  wavenumber.
+- `gert/instrument.py`'s `ILS.convolve(..., exact_center: bool = False)`
+  defaults to snapping the kernel center to the nearest hi-res grid point
+  instead ("the legacy behaviour that reproduces the original
+  ForwardFunction pipeline," per its own docstring).
+- `gert/forward_model.py:797-801` is the switch between the two:
+  ```python
+  wn_centers = None
+  if dispersion is not None and i in dispersion:
+      wn_centers = win.dispersion_centers(dispersion[i])
+  R_wn = win.convolve(I, wn_centers=wn_centers, width_scale=s_ils)
+  ```
+  `SpectralWindow.convolve()` only requests `exact_center=True` when
+  `wn_centers` is given. Merely *having* dispersion in the state vector
+  (order>=1) is enough to take this branch on every iteration --
+  regardless of whether the coefficients are literally zero -- flipping
+  the retrieval's own forward-model evaluation onto the same exact-center
+  convolution the truth-generation path always uses. Order=0 (undistorted,
+  no dispersion at all) can never take this branch, so it's permanently
+  stuck on grid-snapped convolution, a small but real, ~row-independent
+  chi2 floor against the exact-centered truth -- invisible everywhere else
+  in this study because real gas signal or measurement noise normally
+  swamps it, exposed here only because FPA0+FPA3's uniform/no-noise case
+  removes both.
+
+**Empirically confirmed** via `scripts/gd_joint_undistorted_dispersion_diag.py`
+(a standalone diagnostic, not part of the regular battery -- runs
+native/undistorted-order-0/undistorted-order-2 side by side for a ~26-row
+sample across 3 scenes):
+
+| scene | native (order=2) chi2 | undistorted order=0 chi2 | undistorted order=2 chi2 |
+|---|---|---|---|
+| uniform, no noise | median 9.9e-05 | median 0.050 | median **8.2e-11**, ch4/co/h2o std **0.000** |
+| uniform, noise | median 0.997 | median 1.055 | median 0.996 (noise-dominated, floor irrelevant) |
+| realistic, no noise | median 0.00409 | median 0.0545 | median **0.00337** |
+
+Floating dispersion for undistorted doesn't just shrink the gap -- it
+collapses it to at or below native's own level in every no-noise case,
+and makes no difference once real measurement noise dominates (as
+expected, since the floor is tiny relative to noise).
+
+**Fix applied**, contained to the joint-retrieval scripts:
+`gd_joint_band_test.py`'s undistorted task now uses order=2 (was 0) --
+same 6 dispersion parameters as native/rectified, expected to converge to
+~0 since there's no real calibration error for them to explain; floated
+purely to force the matching exact-center convolution path. Both plotting
+scripts' `PIPELINE_ORDER` dicts and the residual-spectra script's
+undistorted retrieval call updated to match. Docstrings in all three
+updated to explain this is a numerical-self-consistency workaround, not a
+physical correction -- so a future reader doesn't mistake undistorted's
+now-nonzero dispersion coefficients for it modeling a real effect.
+
+**Scope note -- single-band script NOT changed.** `gd_band_stress_test.py`
+has the identical `pipeline_orders = {"native": [2], "rectified": [2],
+"undistorted": [0]}` convention, with its own comment explaining the
+original reasoning: floating dispersion for undistorted "would give those
+parameters nothing real to fit, risking spurious degeneracy with
+h2o_scale/p_scale that would contaminate exactly the 'fundamental limit
+vs. distortion artifact' question this baseline exists to answer." The
+diagnostic evidence above directly contradicts that worry for the joint
+case (dispersion collapsed the scatter, it didn't create spurious
+degeneracy) -- but single-band `gd_band_stress_test.py`'s undistorted
+results underpin a large fraction of this document's already-recorded §9
+analysis (the H2O/p_scale degeneracy findings explicitly rely on comparing
+against this order=0 baseline). Changing it would be a much bigger, more
+consequential decision than the joint-only fix above -- left untouched
+pending an explicit, separate decision on whether/how to revisit those
+existing §9 conclusions.
+
+**Status:** fix applied and smoke-tested for the joint scripts (FPA0+FPA3
+uniform, native+undistorted only, chi2 confirmed collapsing to ~1e-10,
+matching the diagnostic). FPA0+FPA3's existing battery results (all now
+superseded by this convention change) queued for a full rerun next,
+`--pipelines native,undistorted` (rectified is unaffected by this fix and
+not being rerun).
+
 ---
 
 ## 12. Plan: calibration-mismatch (imperfect keystone/smile knowledge) experiment (2026-07-27)

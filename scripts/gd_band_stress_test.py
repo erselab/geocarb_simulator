@@ -37,31 +37,56 @@ main() for the full rationale):
                      absorb; order=0 has consistently been the noisy,
                      less-informative case for such pipelines throughout
                      this study, so it's skipped here to save compute.
-  "undistorted"   (order=0 only) -- no keystone/smile/clocking/spatial
-                     PSF at all: the true spectrum evaluated directly at
-                     each row's own real per-pixel positions (the same 1024
-                     native positions "native" uses -- bypasses
-                     gd_render.image()/rectify() entirely, and shares
-                     native's exact sampling density, not the coarser
-                     shared nominal wn_grid this used before 2026-07-24).
-                     A baseline for whether a retrieval difficulty is a
-                     fundamental RT/information-content limit or something
-                     geometric distortion makes worse -- added 2026-07-24 to
-                     check the H2O/p_scale degeneracy found near the
-                     pressure mountain in the first FPA1 run (confirmed: the
-                     same dip appears here too, with zero distortion, so
-                     it's a real RT/retrieval limit). Matching native's real
-                     per-row grid (rather than the old shared nominal grid,
-                     which sampled ~38% more coarsely than the real detector
-                     for FPA3) removes a second confound: native vs.
-                     undistorted now differ only in whether the spectrum
-                     carries real geometric distortion, not also in sampling
-                     density. No real miscalibration for dispersion to
-                     correct here, so order=2 is skipped -- floating it
-                     would give those parameters nothing to fit and risks
-                     spurious degeneracy with h2o_scale/p_scale that would
-                     contaminate exactly the question this baseline exists
-                     to answer.
+  "undistorted"   (order=2, since 2026-07-28 -- see below) -- no keystone/
+                     smile/clocking/spatial PSF at all: the true spectrum
+                     evaluated directly at each row's own real per-pixel
+                     positions (the same 1024 native positions "native"
+                     uses -- bypasses gd_render.image()/rectify() entirely,
+                     and shares native's exact sampling density, not the
+                     coarser shared nominal wn_grid this used before
+                     2026-07-24). A baseline for whether a retrieval
+                     difficulty is a fundamental RT/information-content
+                     limit or something geometric distortion makes worse --
+                     added 2026-07-24 to check the H2O/p_scale degeneracy
+                     found near the pressure mountain in the first FPA1 run
+                     (confirmed: the same dip appears here too, with zero
+                     distortion, so it's a real RT/retrieval limit).
+                     Matching native's real per-row grid (rather than the
+                     old shared nominal grid, which sampled ~38% more
+                     coarsely than the real detector for FPA3) removes a
+                     second confound: native vs. undistorted now differ
+                     only in whether the spectrum carries real geometric
+                     distortion, not also in sampling density.
+
+                     Originally order=0 (no real miscalibration for
+                     dispersion to correct, and floating it was assumed to
+                     risk spurious degeneracy with h2o_scale/p_scale --
+                     see the historical note in `pipeline_orders` below).
+                     Changed to order=2 2026-07-28 (KEYSTONE_SMILE_BIAS_
+                     PLAN.md Sec. 11k) after the joint-retrieval study
+                     found and root-caused a real, confirmed forward-model
+                     self-consistency floor that specifically afflicts
+                     order=0 retrievals: `gert.forward_model`'s ILS
+                     convolution only uses exact (un-snapped) channel
+                     centering when dispersion is present in the state
+                     vector (`wn_centers is not None` triggers `gert.
+                     instrument.ILS.convolve`'s `exact_center=True`);
+                     without it, the retrieval's own forward model
+                     evaluates against grid-snapped centers while this
+                     project's truth-rendering path (`gd_render.
+                     _diagonal_ils_convolve`, shared by native and
+                     undistorted) always uses exact centers -- a small but
+                     real, near-row-independent chi2 floor with nothing to
+                     do with atmospheric retrieval quality. Empirically,
+                     floating dispersion collapsed this floor (and the
+                     spurious-degeneracy worry above did not materialize --
+                     see the joint-retrieval diagnostic, `scripts/
+                     gd_joint_undistorted_dispersion_diag.py`, and Sec. 11k
+                     for the full evidence). Retrieved dispersion
+                     coefficients here are still expected to sit near zero;
+                     they're floated purely as a numerical workaround, not
+                     because undistorted now has real calibration error to
+                     correct.
 
 Known ABSCO coverage requirement (found 2026-07-24): FPA3 (CH4_CO) needs
 the ch4/h2o/co ABSCO blocks extended to ~4400 cm-1 (see
@@ -576,20 +601,27 @@ def main() -> int:
     # information-content limit -- present even with a perfect instrument
     # -- or something geometric distortion is making worse.
     #
-    # Dispersion order is matched to what's physically appropriate per
-    # pipeline rather than run uniformly: native/rectified have real
-    # keystone/smile-driven wavelength-calibration error for the
-    # dispersion polynomial to absorb (order=2 only -- order=0 has
-    # consistently been the noisy, less-informative case throughout this
-    # study for pipelines with real distortion, not worth the extra
-    # compute). undistorted has zero such error by construction -- the
-    # true spectrum is evaluated exactly on the nominal grid -- so
-    # floating dispersion there would give those parameters nothing real
-    # to fit, risking spurious degeneracy with h2o_scale/p_scale that
-    # would contaminate exactly the "fundamental limit vs. distortion
-    # artifact" question this baseline exists to answer (order=0 only,
-    # keeping the state vector matched to the true generative model).
-    pipeline_orders = {"native": [2], "rectified": [2], "undistorted": [0]}
+    # Dispersion order: native/rectified have real keystone/smile-driven
+    # wavelength-calibration error for the dispersion polynomial to absorb
+    # (order=2 only -- order=0 has consistently been the noisy, less-
+    # informative case throughout this study for pipelines with real
+    # distortion, not worth the extra compute). undistorted ALSO gets
+    # order=2 as of 2026-07-28 (previously order=0) -- not because it has
+    # real calibration error to correct (it doesn't), but because floating
+    # dispersion is the only way to make `gert.forward_model` evaluate its
+    # ILS convolution with exact (un-snapped) channel centering, matching
+    # this project's truth-rendering convention (`gd_render.
+    # _diagonal_ils_convolve`, used to build undistorted's own measurement,
+    # always uses exact centers). Without it, order=0 carries a small,
+    # confirmed, spurious chi2 floor that has nothing to do with retrieval
+    # quality -- see the module docstring's "undistorted" bullet and
+    # KEYSTONE_SMILE_BIAS_PLAN.md Sec. 11k for the full root-cause and
+    # empirical evidence (a joint-retrieval diagnostic showed this floating
+    # dispersion collapses the floor rather than creating the spurious
+    # h2o_scale/p_scale degeneracy originally feared -- see the historical
+    # comment this replaced). Retrieved dispersion coefficients are still
+    # expected to sit near zero.
+    pipeline_orders = {"native": [2], "rectified": [2], "undistorted": [2]}
     if mismatch is not None:
         # gd_render.rectify() (already run above, Rimg) only has a REAL-
         # calibration inverse mapping (wavelength_slit_to_xy) -- there's no
