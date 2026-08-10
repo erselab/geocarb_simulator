@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Representative post-fit spectral residual shapes, by band, for the joint
-multi-band battery (gd_joint_band_test.py / KEYSTONE_SMILE_BIAS_PLAN.md
+multi-band battery (gd_test.py / KEYSTONE_SMILE_BIAS_PLAN.md
 Sec. 11h) -- the joint-retrieval counterpart of
 gd_band_stress_test_plot_residual_spectra.py.
 
 Reads residuals directly from the saved .pkl (`_residuals`/`_nus`, one
-array per band, added 2026-07-29 to gd_joint_band_test.py's
+array per band, added 2026-07-29 to gd_test.py's
 `_joint_retrieve` -- see KEYSTONE_SMILE_BIAS_PLAN.md's residual-capture
 note). Earlier versions of this script had to re-render each case and
 re-run ~36 retrievals from scratch because that data didn't exist yet;
@@ -21,7 +21,7 @@ the same along-slit position, since it isn't indexed the same way as
 native/undistorted's row tuples -- computed here from the saved geometry
 only, no rendering).
 
-Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_band_plot_residual_spectra.py --fpas 0,2
+Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_plot_residual_spectra.py --fpas 0,2
 Output: plots/gd_joint_<fpas_tag>[_uniform|_barcode][_noise]_residual_spectra.png (up to 6)
         plots/gd_joint_<fpas_tag>_all_residual_spectra.pdf
 """
@@ -42,7 +42,7 @@ from geocarb_gert.gd_render import s_max
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gd_joint_band_test import _shared_s_grid  # noqa: E402
+from gd_test import _shared_s_grid  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PIPELINE_COLOR = {"native": "tab:blue", "rectified": "tab:orange", "undistorted": "tab:green"}
@@ -187,7 +187,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--fpas", type=str, default="0,2",
                     help="comma-separated list of >=2 FPA indices, matching "
-                         "the gd_joint_band_test.py run to analyze")
+                         "the gd_test.py run to analyze")
     args = ap.parse_args()
     fpas = [int(x) for x in args.fpas.split(",")]
 

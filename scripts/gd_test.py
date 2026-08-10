@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Full joint multi-band (no-aerosol) stress test: the co-located-scene
-counterpart of gd_band_stress_test.py's single-band battery --
-uniform/barcode/realistic scenes x noise/no-noise x native/rectified/
-undistorted pipelines -- for an ordered set of >=2 GeoCarb bands (default
-FPA0 + FPA2). See KEYSTONE_SMILE_BIAS_PLAN.md Sec. 11g (first no-aerosol
-joint result, order=0, uniform-only, 2 bands) and Sec. 11h (the full
-2-band battery this generalizes) for the rationale. Deliberately no aerosol
-still (Sec. 11's own motivation would have that nonlinearity compound with
-anything found here, and it costs much more compute) -- see Sec. 11d
-items 4/6 for when that gets added back in.
+"""Full multi-band (no-aerosol) stress test -- uniform/barcode/realistic
+scenes x noise/no-noise x native/rectified/undistorted pipelines -- for an
+ordered set of >=1 GeoCarb bands (default FPA0 + FPA2). A single FPA (e.g.
+--fpas 0) runs the plain single-band battery that used to be a separate
+script (gd_band_stress_test.py, retired 2026-08-10 once this generalized to
+N>=1 cleanly -- see the "N ordered bands" note below); >=2 FPAs runs a joint
+retrieval sharing one state vector. See KEYSTONE_SMILE_BIAS_PLAN.md Sec. 11g
+(first no-aerosol joint result, order=0, uniform-only, 2 bands) and Sec. 11h
+(the full 2-band battery this generalizes) for the rationale. Deliberately
+no aerosol still (Sec. 11's own motivation would have that nonlinearity
+compound with anything found here, and it costs much more compute) -- see
+Sec. 11d items 4/6 for when that gets added back in.
 
 Three pipelines, with a specifically cross-band meaning each, generalized
 from 2 bands to N ordered bands `fpas = [fpas[0], fpas[1], ...]` (fpas[0]
@@ -81,7 +83,7 @@ no real calibration error for them to explain); they're floated purely to
 force `gert`'s exact-center ILS convolution path, matching this project's
 truth-rendering convention -- see the "undistorted" bullet above.
 
-Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_band_test.py \\
+Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_test.py \\
         --fpas 0,2 [--uniform | --barcode [--barcode-bars N]] \\
         [--noise [--snr S] [--noise-seed N]] [--row-step N] [--out-tag TAG]
       (--fpas takes any >=2 comma-separated FPA indices, e.g. 0,1,2,3)
@@ -102,6 +104,8 @@ import numpy as np
 import geosat_geometry as gg
 from geocarb_gert import GEOCARB_BANDS, albedo_for, along_slit_scene as als, sample_geometries
 from geocarb_gert import gd_render, build_geocarb_instrument
+from geocarb_gert import (RADIOMETRIC_SPEC_BY_FPA, geocarb_noise_model,
+                          geocarb_noise_model_multi)
 from geocarb_gert.cross_band import fpas_tag, nearest_row_pairing_multi, real_s_of_row
 from geocarb_gert.gd_polynomials import real_wavenumber_range, xy_to_wavelength_slit
 from geocarb_gert.gd_render import available_cpus, s_max, _diagonal_ils_convolve
@@ -157,11 +161,24 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
 
     A = gd_render.image(fpa, wn_hires, radiance, wide_win.ils, spatial_psf_fwhm_px=1.5,
                         n_workers=n_workers)
-    sigma_band = float(np.max(np.abs(A))) / snr
+    # LinearShotNoise, calibrated from real instrument-test data
+    # (geocarb_gert.radiometry.RADIOMETRIC_SPEC_BY_FPA) rather than the
+    # legacy flat FlatSNR(snr) floor: sigma now scales with each pixel's own
+    # rendered radiance, so e.g. a barcode scene's dark bars (5x fainter)
+    # correctly get a smaller noise floor than its bright bars, instead of
+    # borrowing the bright-bar sigma everywhere.
+    band_noise = geocarb_noise_model(fpa)
+    noise_n0, noise_n1, noise_i_max = band_noise.N0, band_noise.N1, band_noise.I_max
+    sat_mask = np.abs(A) > noise_i_max
+    n_sat = int(sat_mask.sum())
+    if n_sat:
+        print(f"  WARNING: {n_sat}/{A.size} pixels exceed I_max={noise_i_max:g} "
+             f"(saturated) in FPA{fpa}'s rendered image", flush=True)
+    sigma_map = np.sqrt(noise_n0 ** 2 + noise_n1 * np.abs(A))
     noise_arr = None
     if noise:
         rng = np.random.default_rng(noise_seed)
-        noise_arr = rng.normal(0.0, sigma_band, size=A.shape)
+        noise_arr = rng.normal(0.0, sigma_map)
         A = A + noise_arr
 
     nominal_inst = build_geocarb_instrument()
@@ -182,7 +199,8 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
     }
     return dict(fpa=fpa, label=label, mols=mols, R=R, wn_min=wn_min, wn_max=wn_max,
                fwhm_cm=fwhm_cm, albedo=albedo, A=A, wn_hires=wn_hires, radiance=radiance,
-               ils=wide_win.ils, wn_grid=wn_grid, sigma_band=sigma_band, noise_arr=noise_arr,
+               ils=wide_win.ils, wn_grid=wn_grid, noise_n0=noise_n0, noise_n1=noise_n1,
+               noise_i_max=noise_i_max, sat_mask=sat_mask, noise_arr=noise_arr,
                x_km_of_row=x_km_of_row, xtrue_of_row=xtrue_of_row)
 
 
@@ -252,17 +270,26 @@ def _gas_truth_source(gas: str, bands: list, xtrue_rows: list) -> dict:
 
 def _joint_retrieve(nus: list, ys: list, order: int, xtrue_rows: list, bands: list):
     g = _G
-    atm_center, absco, geo, solar, snr = g["atm"], g["absco"], g["geo"], g["solar"], g["snr"]
+    atm_center, absco, geo, solar = g["atm"], g["absco"], g["geo"], g["solar"]
     n_bands = len(bands)
 
     windows = [SpectralWindow(wn_min=b["wn_min"], wn_max=b["wn_max"],
                               ils=ILS(type="gaussian", fwhm=b["fwhm_cm"]),
                               molecules=b["mols"], label=b["label"], obs_grid=nu)
               for b, nu in zip(bands, nus)]
-    inst = Instrument(windows=windows, snr=snr)
+    # Per-band LinearShotNoise, calibrated from real instrument-test data
+    # (geocarb_gert.radiometry.RADIOMETRIC_SPEC_BY_FPA, same source
+    # _band_setup used to render each band's own noise). sigma is computed
+    # from THIS row's own measured spectrum `ys`, not a scene-wide scalar,
+    # so Sy_inv is now genuinely per-row -- a dim row (e.g. a barcode dark
+    # bar, or a low-radiance edge of a realistic scene) gets a
+    # correspondingly tighter noise floor rather than inheriting the
+    # scene's brightest pixel's sigma.
+    noise_model = geocarb_noise_model_multi([b["fpa"] for b in bands])
+    inst = Instrument(windows=windows, noise_model=noise_model)
 
     y_true = np.concatenate(ys)
-    sigma = np.concatenate([np.full(len(y), b["sigma_band"]) for y, b in zip(ys, bands)])
+    sigma = noise_model.sigma(ys, windows)
     Sy_inv = np.diag(1.0 / sigma ** 2)
 
     fm = ForwardModel(atm_center, absco, inst, geo, solver=SingleScatterSolver(),
@@ -327,7 +354,7 @@ def _joint_retrieve(nus: list, ys: list, order: int, xtrue_rows: list, bands: li
 
     # Post-fit residual (y_true - y_ret) and each band's own wavenumber
     # grid, one array per band in `bands`/`fpas` order -- added 2026-07-29,
-    # closing the exact gap gd_joint_band_plot_residual_spectra.py's own
+    # closing the exact gap gd_plot_residual_spectra.py's own
     # docstring flagged (it had to re-render + re-run a representative row
     # subset from scratch because this wasn't saved here). Mirrors
     # gd_band_stress_test.py's convention (residual/nu saved per row since
@@ -371,9 +398,10 @@ def _worker(task):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--fpas", type=str, required=True,
-                    help="comma-separated list of >=2 FPA indices (0-3), e.g. "
-                         "0,2 or 0,1,2,3; the first is the along-slit position "
-                         "reference used for row-pairing and plots")
+                    help="comma-separated list of >=1 FPA indices (0-3), e.g. "
+                         "0 for a single-band run, or 0,2 / 0,1,2,3 for a joint "
+                         "one; the first is the along-slit position reference "
+                         "used for row-pairing and plots (a no-op for N=1)")
     ap.add_argument("--row-step", type=int, default=1, help="subsample the reference band's native rows")
     ap.add_argument("--n-lookup-samples", type=int, default=400)
     ap.add_argument("--n-workers", type=int, default=None)
@@ -395,8 +423,8 @@ def main() -> int:
     pipelines = args.pipelines.split(",")
 
     FPAS = [int(x) for x in args.fpas.split(",")]
-    if len(FPAS) < 2:
-        ap.error("--fpas needs at least 2 band indices")
+    if len(FPAS) < 1:
+        ap.error("--fpas needs at least 1 band index")
     if len(set(FPAS)) != len(FPAS):
         ap.error("--fpas entries must be unique")
     for fpa in FPAS:

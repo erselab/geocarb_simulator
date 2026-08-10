@@ -20,6 +20,9 @@ from __future__ import annotations
 
 from typing import Optional
 
+import numpy as np
+
+from gert.instrument import LinearShotNoise
 from gert.radiometry import DetectorSpec, RadiometricNoise
 
 # GeoCarb reference design point (matches geosat_geometry.LongSlitGeoSatellite
@@ -29,6 +32,68 @@ GEOCARB_REF = {
     "t_int_s": 10.0,
     "sat_alt_km": 35786.0,
 }
+
+# Real per-band radiometric calibration from instrument testing (all
+# radiances in W/m^2/sr/um), keyed by FPA index (0=O2/SIF, 1=WCO2, 2=SCO2,
+# 3=CH4/CO -- same order as geocarb_gert.instrument.GEOCARB_BANDS):
+#   I_ref, SNR_ref -- SNR measured at a reference radiance.
+#   I_min          -- the "minimum measurable signal": the radiance at
+#                     which SNR = 1.
+#   I_max          -- the "maximum measurable signal": the saturation cap.
+# I_ref/SNR_ref and I_min together pin down LinearShotNoise's two free
+# parameters exactly (sigma(I)^2 = N0^2 + N1*I): sigma(I_ref) = I_ref/SNR_ref
+# and sigma(I_min) = I_min (SNR=1 by definition of "minimum measurable
+# signal") is a 2x2 linear system in (N0^2, N1) -- see
+# :func:`linear_shot_noise_params`.
+RADIOMETRIC_SPEC_BY_FPA = {
+    0: dict(I_ref=71.0, SNR_ref=395.0, I_min=0.04,  I_max=360.0),   # O2/SIF
+    1: dict(I_ref=14.0, SNR_ref=389.0, I_min=0.006, I_max=60.0),    # WCO2
+    2: dict(I_ref=5.0,  SNR_ref=302.0, I_min=0.004, I_max=24.0),    # SCO2
+    3: dict(I_ref=2.7,  SNR_ref=254.0, I_min=0.006, I_max=20.0),    # CH4/CO
+}
+
+
+def linear_shot_noise_params(spec: dict) -> tuple:
+    """Solve `LinearShotNoise`'s ``(N0, N1)`` from a two-point radiometric
+    calibration: ``sigma(I_ref) = I_ref/SNR_ref`` and ``sigma(I_min) =
+    I_min`` (SNR=1 at the minimum measurable signal, by definition).
+
+    Parameters
+    ----------
+    spec : dict
+        One entry of :data:`RADIOMETRIC_SPEC_BY_FPA` -- needs ``I_ref``,
+        ``SNR_ref``, ``I_min``.
+
+    Returns
+    -------
+    (N0, N1) : tuple of float
+    """
+    I_ref, SNR_ref, I_min = spec["I_ref"], spec["SNR_ref"], spec["I_min"]
+    sigma_ref = I_ref / SNR_ref
+    N1 = (sigma_ref ** 2 - I_min ** 2) / (I_ref - I_min)
+    N0 = float(np.sqrt(max(I_min ** 2 - N1 * I_min, 0.0)))
+    return N0, N1
+
+
+def geocarb_noise_model(fpa: int) -> LinearShotNoise:
+    """`LinearShotNoise` for one GeoCarb band, calibrated from real
+    instrument-test data in :data:`RADIOMETRIC_SPEC_BY_FPA`.
+
+    Includes the saturation cap (``I_max``), so
+    ``geocarb_noise_model(fpa).saturation_mask(...)`` is meaningful directly.
+    """
+    spec = RADIOMETRIC_SPEC_BY_FPA[fpa]
+    N0, N1 = linear_shot_noise_params(spec)
+    return LinearShotNoise(N0=N0, N1=N1, I_max=spec["I_max"])
+
+
+def geocarb_noise_model_multi(fpas) -> LinearShotNoise:
+    """`LinearShotNoise` for several GeoCarb bands at once (e.g. a joint
+    retrieval) -- per-band ``N0``/``N1``/``I_max`` arrays, in ``fpas`` order.
+    """
+    models = [geocarb_noise_model(fpa) for fpa in fpas]
+    return LinearShotNoise(N0=[m.N0 for m in models], N1=[m.N1 for m in models],
+                           I_max=[m.I_max for m in models])
 
 
 def etendue_factor_for_gsd(gsd_km: float, gsd_ref_km: float = GEOCARB_REF["gsd_km"]) -> float:

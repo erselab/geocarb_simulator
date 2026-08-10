@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summary diagnostics for the joint multi-band battery (gd_joint_band_test.py
+"""Summary diagnostics for the joint multi-band battery (gd_test.py
 / KEYSTONE_SMILE_BIAS_PLAN.md Sec. 11h) -- the joint-retrieval counterpart of
 gd_band_stress_test_plot.py: bias vs. along-slit position for whichever
 gas(es) the given band pair actually retrieves (read directly off the
@@ -17,12 +17,12 @@ choice, not a source of error). native/undistorted rows come from
 geocarb_gert.cross_band.real_s_of_row at each row tuple's reference-band
 entry; rectified's position is the shared `s_grid` value at its own row
 index (rebuilt fresh here, deterministic and cheap -- see
-gd_joint_band_test.py's `_shared_s_grid`).
+gd_test.py's `_shared_s_grid`).
 
 Same chi2-outlier filtering as gd_band_stress_test_plot.py (robust
 MAD-based, excludes rows reporting converged=True over an exploded state).
 
-Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_band_plot.py --fpas 0,2
+Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_plot.py --fpas 0,2
 Output: plots/gd_joint_<fpas_tag>[_uniform|_barcode][_noise]_summary.png (up to 6)
         plots/gd_joint_<fpas_tag>_all_summary.pdf (all available cases)
         (fpas_tag = "fpa0_fpa2", "fpa0_fpa1_fpa2_fpa3", etc. -- see
@@ -89,7 +89,7 @@ def _gas_list(out) -> list:
     """Which gases this band pair actually retrieves -- e.g. co2 for
     FPA0+FPA2, but ch4+co (no co2 at all) for FPA0+FPA3. Read directly off
     the result dicts' own bias keys (set unconditionally by
-    gd_joint_band_test.py's _joint_retrieve for every gas it retrieves)
+    gd_test.py's _joint_retrieve for every gas it retrieves)
     rather than assumed, since which gas(es) a pair produces depends on
     which bands are paired."""
     gases = set()
@@ -256,7 +256,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--fpas", type=str, default="0,2",
                     help="comma-separated list of >=2 FPA indices, matching "
-                         "the gd_joint_band_test.py run to analyze")
+                         "the gd_test.py run to analyze")
     args = ap.parse_args()
     fpas = [int(x) for x in args.fpas.split(",")]
 

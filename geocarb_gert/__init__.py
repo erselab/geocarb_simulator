@@ -17,7 +17,9 @@ __version__ = "0.0.1"
 
 from .instrument import GEOCARB_BANDS, build_geocarb_instrument
 from .radiometry import (GEOCARB_REF, base_noise_model, model_for,
-                         staring_sweep_models, etendue_factor_for_gsd)
+                         staring_sweep_models, etendue_factor_for_gsd,
+                         RADIOMETRIC_SPEC_BY_FPA, linear_shot_noise_params,
+                         geocarb_noise_model, geocarb_noise_model_multi)
 from .adapter import pixel_geometry, sample_geometries, gsd_km, scene_from_profile
 from .scene import reference_atmosphere, albedo_for, SCENE_TYPES, hires_spectra_for
 from .focalplane import (FocalPlaneModel, uniform_scene, edge_scene,
@@ -32,6 +34,8 @@ __all__ = [
     "GEOCARB_BANDS", "build_geocarb_instrument",
     "GEOCARB_REF", "base_noise_model", "model_for", "staring_sweep_models",
     "etendue_factor_for_gsd",
+    "RADIOMETRIC_SPEC_BY_FPA", "linear_shot_noise_params",
+    "geocarb_noise_model", "geocarb_noise_model_multi",
     "pixel_geometry", "sample_geometries", "gsd_km", "scene_from_profile",
     "reference_atmosphere", "albedo_for", "SCENE_TYPES", "hires_spectra_for",
     "FocalPlaneModel", "uniform_scene", "edge_scene", "random_scene", "barcode_scene",
