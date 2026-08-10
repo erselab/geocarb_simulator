@@ -2333,6 +2333,72 @@ superseded by this convention change) queued for a full rerun next,
 `--pipelines native,undistorted` (rectified is unaffected by this fix and
 not being rerun).
 
+### 11l. Residual capture added to the joint battery; full-scale confirmation and one prediction revised (2026-07-29/08-10)
+
+**Residual capture closed.** `gd_joint_band_test.py`'s `_joint_retrieve` now
+saves `_residuals`/`_nus` (one array per band) alongside the state vector,
+matching `gd_band_stress_test.py`'s convention (residuals saved per row
+since 2026-07-25) -- this was the exact gap §11's own memory-rule note
+described, and had persisted in the joint script specifically until now.
+`gd_joint_band_plot_residual_spectra.py` was simplified to read this
+directly instead of re-rendering + re-running ~36 retrievals per case (its
+own prior workaround for the missing data): **~1s per band pair now**,
+down from ~15-20 minutes each. Verified across all 18 pkls after a full
+rerun (all 3 band pairs, full 3-pipeline battery): 100% of converged rows
+carry `_residuals`/`_nus`, undistorted's dispersion terms confirmed present
+everywhere -- no gaps.
+
+**§11k's fix reconfirmed at full battery scale**, not just the earlier
+spot-checks: every uniform/no-noise case across all 3 band pairs now shows
+undistorted's bias std at machine precision (`0.000` in every printed
+summary stat, chi2 ~1e-10) -- the dispersion-order convolution artifact is
+fully collapsed everywhere, not just the FPA0+FPA3 case it was originally
+found in.
+
+**New, previously-masked signal now visible for realistic scenes.** With
+the numerical floor gone, undistorted's *mean* bias for the realistic
+scene is now consistently ~0 across all three pairs (e.g. FPA0+FPA3 CH4
+mean -0.002 ppb, FPA0+FPA1 CO2 mean +0.074 ppm), while native retains a
+small but real, systematic mean bias (FPA0+FPA3 CH4 mean -0.525 ppb,
+FPA0+FPA1 CO2 mean -0.298 ppm) at comparable scatter. This is a clean
+confirmation that native's residual bias is a genuine, small effect from
+real geometric distortion, not noise or a fitting artifact -- previously
+this signal was there but harder to isolate against the pre-fix floor.
+
+**Rectified remains the dominant bias source at every combination**,
+unchanged in kind from §9l/§9m/§11i -- CO2 mean bias -8 to -14 ppm, CH4
+mean bias -14 to -15 ppb, roughly an order of magnitude past native/
+undistorted, now reconfirmed against the complete, dispersion-fixed,
+residual-carrying dataset.
+
+**Barcode convergence-failure fractions, computed for the first time for
+all three pairs** (native pipeline, no noise, fraction of paired rows that
+failed to converge or were chi2-outliers):
+
+| pair | affected fraction |
+|---|---|
+| FPA0+FPA1 | 21.9% |
+| FPA0+FPA2 | 27.8% |
+| FPA0+FPA3 | 15.3% |
+
+FPA0+FPA2's number matches §11i's earlier ~28% estimate closely. **FPA0+FPA1's
+21.9%, however, contradicts §11i's own prediction** ("FPA0+FPA1's barcode
+case is expected to show an equal or higher affected-row fraction than
+FPA0+FPA2's ~28%, not less" -- based on FPA1's keystone-null and
+smile-slope-null rows nearly coinciding, §9i/§11i's table). Empirically
+FPA0+FPA1 is *less* affected, not more or equal. The null-row-coincidence
+reasoning that motivated the prediction isn't necessarily wrong, but this
+result shows it isn't sufficient on its own to predict barcode-mode
+convergence-failure rate across band pairs -- worth revisiting if the
+barcode-heterogeneity mechanism gets modeled more precisely later (e.g. as
+part of the bias-correction covariate work in the project-summary
+handoff's §6.3/§6.4).
+
+**Status:** joint battery (all 3 pairs, all 6 scene/noise combos, full 3
+pipelines) complete with residuals; all plots regenerated
+(`gd_joint_fpa0_fpa{1,2,3}_all_summary.pdf`,
+`gd_joint_fpa0_fpa{1,2,3}_all_residual_spectra.pdf`, plus per-case PNGs).
+
 ---
 
 ## 12. Plan: calibration-mismatch (imperfect keystone/smile knowledge) experiment (2026-07-27)

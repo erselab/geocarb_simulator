@@ -4,22 +4,22 @@ multi-band battery (gd_joint_band_test.py / KEYSTONE_SMILE_BIAS_PLAN.md
 Sec. 11h) -- the joint-retrieval counterpart of
 gd_band_stress_test_plot_residual_spectra.py.
 
-gd_joint_band_test.py's saved output only kept the scalar bias/chi2 per
-row, not the residual spectrum itself (an oversight found when this script
-was requested after the battery had already completed) -- so this script
-re-renders each case (same setup: fpas, scene, noise, snr, seed, all read
-back from the saved .pkl's own metadata) and re-runs the joint retrieval
-fresh, but ONLY for a small set of representative rows, not the full
-sweep: 12 positions selected via native's chi2 (best, worst, and 10
-spanning the slit among the remaining in-family rows), same method as the
-single-band script. Cheap -- a few dozen retrievals per case, not ~3000.
+Reads residuals directly from the saved .pkl (`_residuals`/`_nus`, one
+array per band, added 2026-07-29 to gd_joint_band_test.py's
+`_joint_retrieve` -- see KEYSTONE_SMILE_BIAS_PLAN.md's residual-capture
+note). Earlier versions of this script had to re-render each case and
+re-run ~36 retrievals from scratch because that data didn't exist yet;
+that workaround is gone now that the battery itself saves it, so this is
+pure pickle-read + matplotlib, same convention as
+gd_band_stress_test_plot_residual_spectra.py.
 
 Each figure panel shows all N bands' residuals side by side (they're on
 different wavenumber axes and can't be overlaid), for whichever of
 native/rectified/undistorted actually has an in-family fit at that row
 (rectified's own representative row is its nearest shared-`s_grid` index to
 the same along-slit position, since it isn't indexed the same way as
-native/undistorted's row tuples).
+native/undistorted's row tuples -- computed here from the saved geometry
+only, no rendering).
 
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_band_plot_residual_spectra.py --fpas 0,2
 Output: plots/gd_joint_<fpas_tag>[_uniform|_barcode][_noise]_residual_spectra.png (up to 6)
@@ -36,29 +36,15 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import pickle
 
-import geosat_geometry as gg
-from geocarb_gert import along_slit_scene as als, sample_geometries
+from geocarb_gert import along_slit_scene as als
 from geocarb_gert.cross_band import fpas_tag, real_s_of_row
 from geocarb_gert.gd_render import s_max
 
-import gert
-from gert.forward_model import ForwardModel
-from gert.instrument import ILS, SpectralWindow
-from gert.instrument_config import Instrument
-from gert.retrieval import GERTRetrieval, StateVector
-from gert.rt_solver import SingleScatterSolver
-
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gd_joint_band_test import (  # noqa: E402
-    _band_setup, _shared_s_grid, _native_row, _undistorted_row, _rectified_row,
-    WELL_MIXED_GASES, DEFAULT_SNR_BY_FPA,
-)
-from geocarb_gert import gd_render  # noqa: E402
+from gd_joint_band_test import _shared_s_grid  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-GERT_ROOT = Path("/scratch/scrowel3_lab/gert")
-PIPELINE_ORDER = {"native": 2, "rectified": 2, "undistorted": 2}  # undistorted floats dispersion too, since 2026-07-28 (Sec. 11k) -- a numerical workaround, not a physical correction
 PIPELINE_COLOR = {"native": "tab:blue", "rectified": "tab:orange", "undistorted": "tab:green"}
 
 SCENES = ("realistic", "uniform", "barcode")
@@ -136,38 +122,6 @@ def _select_representative(out, fpas, n_span=N_SPAN):
     return items
 
 
-def _joint_retrieve_with_residual(bands, atm_center, absco, geo, solar, snr, nus, ys, order):
-    n_bands = len(bands)
-    windows = [SpectralWindow(wn_min=b["wn_min"], wn_max=b["wn_max"],
-                              ils=ILS(type="gaussian", fwhm=b["fwhm_cm"]),
-                              molecules=b["mols"], label=b["label"], obs_grid=nu)
-              for b, nu in zip(bands, nus)]
-    inst = Instrument(windows=windows, snr=snr)
-    y_true = np.concatenate(ys)
-    sigma = np.concatenate([np.full(len(y), b["sigma_band"]) for y, b in zip(ys, bands)])
-    Sy_inv = np.diag(1.0 / sigma ** 2)
-    fm = ForwardModel(atm_center, absco, inst, geo, solver=SingleScatterSolver(), solar_spectrum=solar)
-    prior_albedo = np.array([b["albedo"] for b in bands])
-    gases = sorted({m for b in bands for m in b["mols"]
-                    if m != "h2o" and m not in WELL_MIXED_GASES}) + ["h2o"]
-    sv = StateVector.gas_scaling(prior_albedo=prior_albedo, prior_albedo_slope=np.zeros(n_bands),
-                                 gases=gases, gas_uncerts={"h2o": 0.60},
-                                 include_dispersion=(order > 0),
-                                 dispersion_order=max(order, 0), dispersion_uncert=2.0)
-    ret = GERTRetrieval(fm, y_true, Sy_inv, sv, prior_albedo=prior_albedo,
-                        prior_albedo_slope=np.zeros(n_bands), analytical_jacobians=True,
-                        max_iter=14, verbose=False, convergence_criterion="dx_norm", dx_tol=0.01)
-    try:
-        with np.errstate(over="ignore", invalid="ignore"):
-            res = ret.run()
-    except (ValueError, np.linalg.LinAlgError):
-        return None
-    resid = y_true - res.y_ret
-    lens = [len(y) for y in ys]
-    resids = np.split(resid, np.cumsum(lens)[:-1])
-    return dict(nus=list(nus), resids=resids, chi2=float(res.chisq_reduced), conv=bool(res.converged))
-
-
 def make_case_figure(fpas, scene: str, noise: bool):
     path = _result_path(fpas, scene, noise)
     if not path.exists():
@@ -176,30 +130,13 @@ def make_case_figure(fpas, scene: str, noise: bool):
     with open(path, "rb") as f:
         d = pickle.load(f)
     out = d["out"]
-    uniform, barcode = d["uniform"], d["barcode"]
-    barcode_bars = d.get("barcode_bars") or 32
-    noise_flag, noise_seed = d["noise"], d.get("noise_seed") or 0
-    snr = d["snr"]
 
     reps = _select_representative(out, fpas)
     if not reps:
         print(f"  no in-family native rows for {path.name}, skipping")
         return None
 
-    block = gg.geocarb_demo(verbose=False)["blocks"][0]
-    _, _, geo = sample_geometries(block, n=1, seed=0)[0]
-    absco = gert.ABSCOTable.load_all(str(GERT_ROOT / "input/absco/absco.h5"))
-    solar = gert.SolarSpectrum.load(str(GERT_ROOT / "input/solar/solar.h5"))
-    atm_center = als.atmosphere_at(0.0)
-
-    bands = [_band_setup(fpa, atm_center, absco, geo, solar, snr, 400, None,
-                        uniform, barcode, barcode_bars, noise_flag, noise_seed)
-            for fpa in fpas]
-
     s_grid_shared = _shared_s_grid(fpas)
-    Rimgs = [gd_render.rectify(fpa, b["A"], s_grid_shared, b["wn_grid"])
-            for fpa, b in zip(fpas, bands)]
-
     n_bands = len(fpas)
     n = len(reps)
     fig, axes = plt.subplots(n, n_bands, figsize=(5.5 * n_bands, 2.6 * n), squeeze=False)
@@ -207,35 +144,22 @@ def make_case_figure(fpas, scene: str, noise: bool):
     for row_i, (rows, label) in enumerate(reps):
         s_here = real_s_of_row(fpas[0], np.array([float(rows[0])]))[0]
         k_rect = int(np.argmin(np.abs(s_grid_shared - s_here)))
+        rect_rows = tuple(k_rect for _ in fpas)
 
         results = {}
-        nus, ys = zip(*[_native_row(b, r) for b, r in zip(bands, rows)])
-        r = _joint_retrieve_with_residual(bands, atm_center, absco, geo, solar, snr,
-                                          list(nus), list(ys), 2)
-        if r is not None:
-            results["native"] = r
-
-        nus, ys = zip(*[_undistorted_row(b, r) for b, r in zip(bands, rows)])
-        r = _joint_retrieve_with_residual(bands, atm_center, absco, geo, solar, snr,
-                                          list(nus), list(ys), 2)
-        if r is not None:
-            results["undistorted"] = r
-
-        pairs = [_rectified_row(b, Rimg, k_rect) for b, Rimg in zip(bands, Rimgs)]
-        if all(nu is not None for nu, _ in pairs):
-            nus_r, ys_r = zip(*pairs)
-            r = _joint_retrieve_with_residual(bands, atm_center, absco, geo, solar, snr,
-                                              list(nus_r), list(ys_r), 2)
-            if r is not None:
-                results["rectified"] = r
+        for pl, key_rows in (("native", rows), ("undistorted", rows), ("rectified", rect_rows)):
+            nl = out.get((pl, 2, key_rows))
+            if nl is None or not nl.get("_conv") or nl.get("_diverged") or nl.get("off_detector"):
+                continue
+            if not nl.get("_residuals"):
+                continue
+            results[pl] = nl
 
         any_data = False
-        for pl, r in results.items():
-            if not r["conv"]:
-                continue
+        for pl, nl in results.items():
             any_data = True
             for j in range(n_bands):
-                axes[row_i, j].plot(r["nus"][j], r["resids"][j], lw=0.6,
+                axes[row_i, j].plot(nl["_nus"][j], nl["_residuals"][j], lw=0.6,
                                     color=PIPELINE_COLOR[pl], label=pl, alpha=0.8)
         for j, fpa in enumerate(fpas):
             ax = axes[row_i, j]
@@ -250,7 +174,7 @@ def make_case_figure(fpas, scene: str, noise: bool):
                                 transform=axes[row_i, 0].transAxes, color="gray", fontsize=8)
 
     band_label = "+".join(f"FPA{f}" for f in fpas)
-    noise_label = "noise" if noise_flag else "no noise"
+    noise_label = "noise" if noise else "no noise"
     fig.suptitle(f"Joint {band_label} -- {scene}, {noise_label} "
                 f"(residual spectra by band: best/worst native chi2 + {N_SPAN} spanning rows)",
                 fontsize=11)
