@@ -29,7 +29,7 @@ from .gd_polynomials import (xy_to_wavelength_slit, wavelength_slit_to_xy, rows_
 from . import gd_render
 from . import along_slit_scene
 from . import cross_band
-from .robust_stats import median_mad, mad_outlier_mask, robust_mean_std
+from .robust_stats import median_mad, mad_outlier_mask, chi2_outlier_mask, robust_mean_std
 
 __all__ = [
     "GEOCARB_BANDS", "build_geocarb_instrument",
@@ -42,5 +42,5 @@ __all__ = [
     "FocalPlaneModel", "uniform_scene", "edge_scene", "random_scene", "barcode_scene",
     "xy_to_wavelength_slit", "wavelength_slit_to_xy", "rows_crossed", "gd_render",
     "along_slit_scene", "DISPERSION_ASCENDING",
-    "median_mad", "mad_outlier_mask", "robust_mean_std",
+    "median_mad", "mad_outlier_mask", "chi2_outlier_mask", "robust_mean_std",
 ]

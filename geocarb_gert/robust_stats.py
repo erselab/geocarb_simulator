@@ -93,6 +93,34 @@ def mad_outlier_mask(values, n_mad: float = 8.0, log: bool = False) -> np.ndarra
     return out
 
 
+def chi2_outlier_mask(chi2, n_mad: float = 8.0, min_chi2: float = 1.0) -> np.ndarray:
+    """`mad_outlier_mask(..., log=True)`, specialized for *reduced* chi2.
+
+    A plain log-MAD filter can over-flag legitimate rows when the "good"
+    population is itself bimodal at very different scales -- confirmed on
+    this project's own data: undistorted barcode-scene chi2 splits cleanly
+    into bright-bar rows at ~1e-9 (float-precision-perfect) and dark-bar
+    rows at ~1e-3 (still an excellent fit, just a different noise floor);
+    both are physically fine, but a plain 8-MAD-in-log10 filter flagged
+    roughly half of 1010 rows as "outliers" because the bright-bar mode's
+    near-zero spread makes even the small bright/dark gap look huge in
+    robust-sigma units.
+
+    Since `chi2` here is always *reduced* chi2 (chi2 per degree of
+    freedom), values <= ``min_chi2`` are never actually bad fits by
+    definition (a reduced chi2 of ~1 or less is the expected value for a
+    statistically consistent fit) -- so this ANDs the MAD flag with an
+    absolute floor: a row must be both a MAD outlier AND have
+    ``chi2 > min_chi2`` to be flagged. This is the version
+    ``gd_plot.py``/``gd_plot_grid.py``/``gd_summary_stats.py`` all use for
+    chi2 specifically; `mad_outlier_mask` itself stays generic (used
+    as-is for bias-like quantities, which have no such natural floor).
+    """
+    chi2 = np.asarray(chi2, dtype=float)
+    mad_flag = mad_outlier_mask(chi2, n_mad=n_mad, log=True)
+    return mad_flag & (chi2 > min_chi2)
+
+
 def robust_mean_std(values, n_mad: float = 8.0) -> dict:
     """Plain and MAD-outlier-trimmed mean/std of ``values``, side by side.
 

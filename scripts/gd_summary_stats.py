@@ -14,9 +14,18 @@ barcode, no noise: plain std ~132 ppb, largely a few-row artifact once
 those rows are down-weighted (see --n-mad to check how few).
 
 Two outlier layers, reported side by side per pipeline/quantity:
-  - chi2-filtered: same MAD-on-log10(chi2) filtering gd_plot.py/
+  - chi2-filtered: same MAD-on-log10(reduced chi2) filtering gd_plot.py/
     gd_plot_grid.py already apply before plotting (rows with a
-    catastrophic chi2 dropped first).
+    catastrophic chi2 dropped first), ANDed with an absolute chi2 > 1
+    floor -- a reduced chi2 at or below 1 is a statistically consistent
+    fit by definition and is never flagged, however far it sits from the
+    bulk in MAD terms. Without that floor this over-flags real bimodal
+    "good" populations: undistorted's own barcode-scene chi2 splits
+    cleanly into bright-bar rows near float precision (~1e-9) and
+    dark-bar rows at a still-tiny ~1e-3 -- both excellent fits, but a
+    plain log-MAD filter flagged roughly half of them as "outliers"
+    purely because the bright-bar mode's near-zero spread makes the
+    small bright/dark gap look huge in robust-sigma units.
   - value-robust: median and MAD-sigma of the quantity itself (not chi2),
     computed on the chi2-filtered set -- catches the different failure
     mode of a row with an unremarkable chi2 but a wildly biased gas/
@@ -36,7 +45,7 @@ from pathlib import Path
 
 import numpy as np
 
-from geocarb_gert import mad_outlier_mask, median_mad, robust_mean_std
+from geocarb_gert import chi2_outlier_mask, robust_mean_std
 from geocarb_gert.cross_band import fpas_tag
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -86,8 +95,8 @@ def _values_for(out: dict, pipeline: str, quantity: str, n_mad: float):
     vals = np.array(vals, dtype=float)
     if len(chi2s) == 0:
         return vals, 0
-    chi2_outlier = mad_outlier_mask(chi2s, n_mad=n_mad, log=True)
-    return vals[~chi2_outlier], int(chi2_outlier.sum())
+    outlier = chi2_outlier_mask(chi2s, n_mad=n_mad)
+    return vals[~outlier], int(outlier.sum())
 
 
 def compute_rows(fpas, scene: str, noise: bool, n_mad: float):

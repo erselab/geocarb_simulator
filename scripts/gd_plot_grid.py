@@ -50,7 +50,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 import pickle
 
 from geocarb_gert import along_slit_scene as als
-from geocarb_gert import mad_outlier_mask
+from geocarb_gert import chi2_outlier_mask
 from geocarb_gert.cross_band import fpas_tag
 from geocarb_gert.gd_polynomials import xy_to_wavelength_slit
 from geocarb_gert.gd_render import s_max
@@ -100,7 +100,7 @@ def _row0_to_xkm(pipeline, row0, x_km_native, x_km_rect):
 
 
 def _chi2_outlier_mask(chi2: np.ndarray) -> np.ndarray:
-    return mad_outlier_mask(chi2, n_mad=8.0, log=True)
+    return chi2_outlier_mask(chi2, n_mad=8.0)
 
 
 def _infer_gases(out: dict) -> list:

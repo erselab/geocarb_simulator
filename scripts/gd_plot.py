@@ -47,7 +47,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 import pickle
 
 from geocarb_gert import along_slit_scene as als
-from geocarb_gert import mad_outlier_mask, robust_mean_std
+from geocarb_gert import chi2_outlier_mask, robust_mean_std
 from geocarb_gert.cross_band import fpas_tag, real_s_of_row
 from geocarb_gert.gd_render import s_max
 
@@ -70,7 +70,7 @@ def _result_path(fpas, scene: str, noise: bool) -> Path:
 
 
 def _chi2_outlier_mask(chi2: np.ndarray) -> np.ndarray:
-    return mad_outlier_mask(chi2, n_mad=8.0, log=True)
+    return chi2_outlier_mask(chi2, n_mad=8.0)
 
 
 def _shared_s_grid(fpas, n: int = 1024) -> np.ndarray:
@@ -252,6 +252,43 @@ def make_case_figure(fpas, scene: str, noise: bool, pipelines_filter=ALL_PIPELIN
     return fig, series
 
 
+def _stats_table_lines(rows: list) -> list:
+    hdr = (f"{'scene':10s} {'noise':5s} {'quantity':10s} {'pipeline':11s} "
+          f"{'n':>5s} {'mean':>11s} {'std':>11s} {'median':>11s} {'MAD-sig':>11s} {'n_out':>6s}")
+    lines = [hdr, "-" * len(hdr)]
+    for r in rows:
+        lines.append(f"{r['scene']:10s} {str(int(r['noise'])):5s} {r['quantity']:10s} "
+                     f"{r['pipeline']:11s} {r['n']:5d} {r['mean']:+11.4g} {r['std']:11.4g} "
+                     f"{r['median']:+11.4g} {r['mad_sigma']:11.4g} {r['n_outliers']:6d}")
+    return lines
+
+
+def _add_stats_table_pages(pdf: "PdfPages", fpas, rows: list, pipelines_filter, lines_per_page: int = 46) -> None:
+    """Append one (or several, paginated) table page(s) to the already-open
+    PdfPages summarizing robust bias statistics across every scene/noise
+    combination in this fpas run -- the same numbers already printed to
+    the console per case, collected in one place. Table only (no PNG) --
+    scripts/gd_summary_stats.py is the place to get this as CSV/for an
+    arbitrary set of FPA combos."""
+    if not rows:
+        return
+    band_label = "+".join(f"FPA{f}" for f in fpas)
+    lines = _stats_table_lines(rows)
+    n_pages = max(1, -(-len(lines) // lines_per_page))  # ceil div
+    for p in range(n_pages):
+        chunk = lines[p * lines_per_page:(p + 1) * lines_per_page]
+        fig, ax = plt.subplots(figsize=(11, 8.5))
+        ax.axis("off")
+        title = f"{band_label} -- robust bias statistics across scenes/noise ({'/'.join(pipelines_filter)})"
+        if n_pages > 1:
+            title += f"  [page {p + 1}/{n_pages}]"
+        ax.set_title(title, fontsize=11, loc="left")
+        ax.text(0.01, 0.97, "\n".join(chunk), family="monospace", fontsize=7.5,
+                va="top", ha="left", transform=ax.transAxes)
+        pdf.savefig(fig)
+        plt.close(fig)
+
+
 def main() -> int:
     import argparse
     ap = argparse.ArgumentParser(description=__doc__)
@@ -273,6 +310,7 @@ def main() -> int:
     tag = fpas_tag(fpas)
     pdf_path = plots_dir / f"gd_joint_{tag}{pipe_suffix}_all_summary.pdf"
     n_saved = 0
+    stats_rows = []
     with PdfPages(pdf_path) as pdf:
         for scene in SCENES:
             for noise in NOISES:
@@ -301,7 +339,12 @@ def main() -> int:
                              f"std={np.std(s['p_surface']):.4f} (robust: median={rp['median']:+.4f} "
                              f"MAD-sigma={rp['mad_sigma']:.4f}, {rp['n_outliers']}/{rp['n']} flagged)  "
                              f"chi2 median={np.median(s['chi2']):.4g}", flush=True)
-    print(f"saved combined PDF ({n_saved} pages): {pdf_path}")
+                        for g in s["gases"]:
+                            r = robust_mean_std(s["gases"][g])
+                            stats_rows.append(dict(scene=scene, noise=noise, quantity=g, pipeline=pl, **r))
+                        stats_rows.append(dict(scene=scene, noise=noise, quantity="p_surface", pipeline=pl, **rp))
+        _add_stats_table_pages(pdf, fpas, stats_rows, pipelines_filter)
+    print(f"saved combined PDF ({n_saved} pages + stats table): {pdf_path}")
     return 0
 
 
