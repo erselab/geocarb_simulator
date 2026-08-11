@@ -11,6 +11,14 @@
 #
 # Run:  bash scripts/gd_plot_all.sh
 #   or: bash scripts/gd_plot_all.sh "0 1,2"     # only these configs
+#   or: bash scripts/gd_plot_all.sh "0 1,2" native,undistorted
+#       # drop rectified from gd_plot.py/gd_plot_grid.py/
+#       # gd_plot_residual_spectra.py's panels (axes autoscale to whatever's
+#       # left, no separate rescale step needed); gd_plot_scene_overview.py
+#       # has no pipeline comparison, so this arg doesn't apply to it and is
+#       # silently ignored there. Output filenames get a trailing
+#       # _<pipelines> tag whenever this isn't the full default set, so
+#       # filtered and unfiltered runs never collide.
 # Output: plots/gd_joint_<fpas_tag>*.png (+ combined *_all.pdf for
 # gd_plot.py/gd_plot_residual_spectra.py/gd_plot_grid.py)
 
@@ -21,20 +29,22 @@ PYTHON="/gpfs/fs1/home/scrowel3/miniforge3/envs/analysis/bin/python"
 export PYTHONPATH="$(pwd):/scratch/scrowel3_lab/gert"
 
 CONFIGS=(${1:-0 1 2 3 0,1 0,2 0,3 0,1,2})
+PIPELINES="${2:-native,rectified,undistorted}"
 
-SCRIPTS=(
+PIPE_SCRIPTS=(
     scripts/gd_plot.py
     scripts/gd_plot_residual_spectra.py
     scripts/gd_plot_grid.py
-    scripts/gd_plot_scene_overview.py
 )
 
 fail=0
 for fpas in "${CONFIGS[@]}"; do
-    for script in "${SCRIPTS[@]}"; do
-        echo "=== $script --fpas $fpas ==="
-        "$PYTHON" "$script" --fpas "$fpas" || { echo "  FAILED: $script --fpas $fpas"; fail=1; }
+    for script in "${PIPE_SCRIPTS[@]}"; do
+        echo "=== $script --fpas $fpas --pipelines $PIPELINES ==="
+        "$PYTHON" "$script" --fpas "$fpas" --pipelines "$PIPELINES" || { echo "  FAILED: $script --fpas $fpas"; fail=1; }
     done
+    echo "=== scripts/gd_plot_scene_overview.py --fpas $fpas ==="
+    "$PYTHON" scripts/gd_plot_scene_overview.py --fpas "$fpas" || { echo "  FAILED: scripts/gd_plot_scene_overview.py --fpas $fpas"; fail=1; }
 done
 
 echo

@@ -27,8 +27,16 @@ directly comparable) for a given N, but not across different N.
 
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_plot_grid.py --fpas 0
       PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_plot_grid.py --fpas 0,2
+      PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_plot_grid.py --fpas 0,2 \\
+        --pipelines native,undistorted
+      (drops rectified from every panel; axes autoscale to whatever's
+      actually plotted, so native/undistorted's own much smaller range is
+      no longer squashed by rectified's -- no separate rescale step needed)
 Output: plots/gd_joint_<fpas_tag>[_uniform|_barcode][_noise]_grid.png (up to 6)
         plots/gd_joint_<fpas_tag>_all_grid.pdf
+        (filenames get a trailing _<pipelines> tag whenever --pipelines is
+        not the full default set, so filtered and unfiltered runs never
+        collide)
 """
 from __future__ import annotations
 
@@ -42,6 +50,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 import pickle
 
 from geocarb_gert import along_slit_scene as als
+from geocarb_gert import mad_outlier_mask
 from geocarb_gert.cross_band import fpas_tag
 from geocarb_gert.gd_polynomials import xy_to_wavelength_slit
 from geocarb_gert.gd_render import s_max
@@ -53,6 +62,7 @@ from gd_test import _shared_s_grid  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PIPELINE_ORDER = {"native": 2, "rectified": 2, "undistorted": 2}
 PIPELINE_COLOR = {"native": "tab:blue", "rectified": "tab:orange", "undistorted": "tab:green"}
+ALL_PIPELINES = ("native", "rectified", "undistorted")
 
 SCENES = ("realistic", "uniform", "barcode")
 NOISES = (False, True)
@@ -90,15 +100,7 @@ def _row0_to_xkm(pipeline, row0, x_km_native, x_km_rect):
 
 
 def _chi2_outlier_mask(chi2: np.ndarray) -> np.ndarray:
-    chi2 = np.asarray(chi2, dtype=float)
-    if len(chi2) == 0:
-        return np.zeros(0, dtype=bool)
-    log_chi2 = np.log10(np.maximum(chi2, 1e-300))
-    med = np.median(log_chi2)
-    mad = np.median(np.abs(log_chi2 - med))
-    if mad < 1e-12:
-        return chi2 > 1e6
-    return log_chi2 > med + 8.0 * 1.4826 * mad
+    return mad_outlier_mask(chi2, n_mad=8.0, log=True)
 
 
 def _infer_gases(out: dict) -> list:
@@ -160,7 +162,7 @@ def _residual_rms_series(out, pipeline: str, x_km_native, x_km_rect):
     return np.array(xs)[order_idx], np.array(rms)[order_idx]
 
 
-def make_case_figure(fpas, scene: str, noise: bool):
+def make_case_figure(fpas, scene: str, noise: bool, pipelines_filter=ALL_PIPELINES):
     path = _result_path(fpas, scene, noise)
     if not path.exists():
         print(f"  MISSING: {path.name}")
@@ -198,14 +200,14 @@ def make_case_figure(fpas, scene: str, noise: bool):
     for ax, key, label in zip(axes, panel_keys, panel_labels):
         any_data = False
         if key == "residual_rms":
-            for pipeline in ("native", "rectified", "undistorted"):
+            for pipeline in pipelines_filter:
                 xs, rms = _residual_rms_series(out, pipeline, x_km_native, x_km_rect)
                 if len(xs):
                     any_data = True
                     ax.plot(xs, rms, ".", ms=2, color=PIPELINE_COLOR[pipeline], label=pipeline, alpha=0.6)
             ax.set_yscale("log")
         else:
-            for pipeline in ("native", "rectified", "undistorted"):
+            for pipeline in pipelines_filter:
                 xs, vals, sigmas = _state_value_series(out, pipeline, key, x_km_native, x_km_rect)
                 if len(xs):
                     any_data = True
@@ -237,24 +239,31 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--fpas", type=str, default="0,2",
                     help="comma-separated FPA indices, e.g. 0 for a single-band case or 0,2 for joint")
+    ap.add_argument("--pipelines", type=str, default=",".join(ALL_PIPELINES),
+                    help="comma-separated subset of native,rectified,undistorted "
+                         "to plot (default: all three). e.g. native,undistorted "
+                         "to drop rectified -- axes autoscale to the remaining "
+                         "data, no separate rescale step needed")
     args = ap.parse_args()
     fpas = [int(x) for x in args.fpas.split(",")]
+    pipelines_filter = [p.strip() for p in args.pipelines.split(",")]
+    pipe_suffix = "" if sorted(pipelines_filter) == sorted(ALL_PIPELINES) else "_" + "_".join(sorted(pipelines_filter))
 
     plots_dir = REPO_ROOT / "plots"
     plots_dir.mkdir(exist_ok=True)
     tag = fpas_tag(fpas)
-    pdf_path = plots_dir / f"gd_joint_{tag}_all_grid.pdf"
+    pdf_path = plots_dir / f"gd_joint_{tag}{pipe_suffix}_all_grid.pdf"
     n_saved = 0
     with PdfPages(pdf_path) as pdf:
         for scene in SCENES:
             for noise in NOISES:
                 label = f"{'+'.join(f'FPA{f}' for f in fpas)} {scene} noise={int(noise)}"
                 print(f"{label} ...", flush=True)
-                fig = make_case_figure(fpas, scene, noise)
+                fig = make_case_figure(fpas, scene, noise, pipelines_filter)
                 if fig is None:
                     continue
                 suffix = _mode_suffix(scene) + ("_noise" if noise else "")
-                png_path = plots_dir / f"gd_joint_{tag}{suffix}_grid.png"
+                png_path = plots_dir / f"gd_joint_{tag}{suffix}{pipe_suffix}_grid.png"
                 fig.savefig(png_path, dpi=120)
                 pdf.savefig(fig)
                 plt.close(fig)

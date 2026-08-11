@@ -23,10 +23,17 @@ Same chi2-outlier filtering as gd_band_stress_test_plot.py (robust
 MAD-based, excludes rows reporting converged=True over an exploded state).
 
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_plot.py --fpas 0,2
+      PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_plot.py --fpas 0,2 \\
+        --pipelines native,undistorted
+      (drops rectified from every panel; axes autoscale to whatever's
+      actually plotted, so native/undistorted's own much smaller range is
+      no longer squashed by rectified's -- no separate rescale step needed)
 Output: plots/gd_joint_<fpas_tag>[_uniform|_barcode][_noise]_summary.png (up to 6)
         plots/gd_joint_<fpas_tag>_all_summary.pdf (all available cases)
         (fpas_tag = "fpa0_fpa2", "fpa0_fpa1_fpa2_fpa3", etc. -- see
-        geocarb_gert.cross_band.fpas_tag)
+        geocarb_gert.cross_band.fpas_tag; filenames get a trailing
+        _<pipelines> tag whenever --pipelines is not the full default set,
+        so filtered and unfiltered runs never collide)
 """
 from __future__ import annotations
 
@@ -40,12 +47,14 @@ from matplotlib.backends.backend_pdf import PdfPages
 import pickle
 
 from geocarb_gert import along_slit_scene as als
+from geocarb_gert import mad_outlier_mask, robust_mean_std
 from geocarb_gert.cross_band import fpas_tag, real_s_of_row
 from geocarb_gert.gd_render import s_max
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PIPELINE_ORDER = {"native": 2, "rectified": 2, "undistorted": 2}  # undistorted floats dispersion too, since 2026-07-28 (Sec. 11k) -- a numerical workaround, not a physical correction
 PIPELINE_COLOR = {"native": "tab:blue", "rectified": "tab:orange", "undistorted": "tab:green"}
+ALL_PIPELINES = ("native", "rectified", "undistorted")
 
 SCENES = ("realistic", "uniform", "barcode")
 NOISES = (False, True)
@@ -61,15 +70,7 @@ def _result_path(fpas, scene: str, noise: bool) -> Path:
 
 
 def _chi2_outlier_mask(chi2: np.ndarray) -> np.ndarray:
-    chi2 = np.asarray(chi2, dtype=float)
-    if len(chi2) == 0:
-        return np.zeros(0, dtype=bool)
-    log_chi2 = np.log10(np.maximum(chi2, 1e-300))
-    med = np.median(log_chi2)
-    mad = np.median(np.abs(log_chi2 - med))
-    if mad < 1e-12:
-        return chi2 > 1e6
-    return log_chi2 > med + 8.0 * 1.4826 * mad
+    return mad_outlier_mask(chi2, n_mad=8.0, log=True)
 
 
 def _shared_s_grid(fpas, n: int = 1024) -> np.ndarray:
@@ -111,7 +112,7 @@ def _gas_unit(gas: str) -> str:
     return "ppb" if gas in ("ch4", "co") else "ppm"
 
 
-def make_case_figure(fpas, scene: str, noise: bool):
+def make_case_figure(fpas, scene: str, noise: bool, pipelines_filter=ALL_PIPELINES):
     path = _result_path(fpas, scene, noise)
     if not path.exists():
         print(f"  MISSING: {path.name}")
@@ -119,7 +120,7 @@ def make_case_figure(fpas, scene: str, noise: bool):
     with open(path, "rb") as f:
         d = pickle.load(f)
     out = d["out"]
-    pipelines = d.get("pipelines", ["native", "rectified", "undistorted"])
+    pipelines = [p for p in d.get("pipelines", list(ALL_PIPELINES)) if p in pipelines_filter]
     fpa_ref = fpas[0]
 
     s_grid_shared = _shared_s_grid(fpas)
@@ -246,7 +247,7 @@ def make_case_figure(fpas, scene: str, noise: bool):
     band_label = "+".join(f"FPA{f}" for f in fpas)
     noise_label = "noise" if noise else "no noise"
     fig.suptitle(f"Joint {band_label} -- {scene}, {noise_label} "
-                f"(native/rectified/undistorted)", fontsize=12)
+                f"({'/'.join(pipelines)})", fontsize=12)
     fig.tight_layout(rect=[0, 0, 0.88, 0.95])
     return fig, series
 
@@ -257,25 +258,32 @@ def main() -> int:
     ap.add_argument("--fpas", type=str, default="0,2",
                     help="comma-separated list of >=2 FPA indices, matching "
                          "the gd_test.py run to analyze")
+    ap.add_argument("--pipelines", type=str, default=",".join(ALL_PIPELINES),
+                    help="comma-separated subset of native,rectified,undistorted "
+                         "to plot (default: all three). e.g. native,undistorted "
+                         "to drop rectified -- axes autoscale to the remaining "
+                         "data, no separate rescale step needed")
     args = ap.parse_args()
     fpas = [int(x) for x in args.fpas.split(",")]
+    pipelines_filter = [p.strip() for p in args.pipelines.split(",")]
+    pipe_suffix = "" if sorted(pipelines_filter) == sorted(ALL_PIPELINES) else "_" + "_".join(sorted(pipelines_filter))
 
     plots_dir = REPO_ROOT / "plots"
     plots_dir.mkdir(exist_ok=True)
     tag = fpas_tag(fpas)
-    pdf_path = plots_dir / f"gd_joint_{tag}_all_summary.pdf"
+    pdf_path = plots_dir / f"gd_joint_{tag}{pipe_suffix}_all_summary.pdf"
     n_saved = 0
     with PdfPages(pdf_path) as pdf:
         for scene in SCENES:
             for noise in NOISES:
                 label = f"{'+'.join(f'FPA{f}' for f in fpas)} {scene} noise={int(noise)}"
                 print(f"{label} ...", flush=True)
-                result = make_case_figure(fpas, scene, noise)
+                result = make_case_figure(fpas, scene, noise, pipelines_filter)
                 if result is None:
                     continue
                 fig, series = result
                 suffix = _mode_suffix(scene) + ("_noise" if noise else "")
-                png_path = plots_dir / f"gd_joint_{tag}{suffix}_summary.png"
+                png_path = plots_dir / f"gd_joint_{tag}{suffix}{pipe_suffix}_summary.png"
                 fig.savefig(png_path, dpi=120)
                 pdf.savefig(fig)
                 plt.close(fig)
@@ -283,10 +291,16 @@ def main() -> int:
                 print(f"  saved {png_path.name}", flush=True)
                 for pl, s in series.items():
                     if len(s["xs"]):
-                        gas_str = "  ".join(f"{g} mean={np.mean(s['gases'][g]):+.3f} "
-                                            f"std={np.std(s['gases'][g]):.3f}" for g in s["gases"])
+                        gas_str = "  ".join(
+                            f"{g} mean={np.mean(s['gases'][g]):+.3f} std={np.std(s['gases'][g]):.3f} "
+                            f"(robust: median={(r := robust_mean_std(s['gases'][g]))['median']:+.3f} "
+                            f"MAD-sigma={r['mad_sigma']:.3f}, {r['n_outliers']}/{r['n']} flagged)"
+                            for g in s["gases"])
+                        rp = robust_mean_std(s["p_surface"])
                         print(f"    {pl}: n={len(s['xs'])}  {gas_str}  p_surf mean={np.mean(s['p_surface']):+.4f} "
-                             f"std={np.std(s['p_surface']):.4f}  chi2 median={np.median(s['chi2']):.4g}", flush=True)
+                             f"std={np.std(s['p_surface']):.4f} (robust: median={rp['median']:+.4f} "
+                             f"MAD-sigma={rp['mad_sigma']:.4f}, {rp['n_outliers']}/{rp['n']} flagged)  "
+                             f"chi2 median={np.median(s['chi2']):.4g}", flush=True)
     print(f"saved combined PDF ({n_saved} pages): {pdf_path}")
     return 0
 

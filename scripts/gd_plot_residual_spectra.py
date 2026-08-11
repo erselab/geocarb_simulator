@@ -22,8 +22,17 @@ native/undistorted's row tuples -- computed here from the saved geometry
 only, no rendering).
 
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_plot_residual_spectra.py --fpas 0,2
+      PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_plot_residual_spectra.py --fpas 0,2 \\
+        --pipelines native,undistorted
+      (drops rectified from every panel; axes autoscale to whatever's
+      actually plotted, so native/undistorted's own much smaller residual
+      amplitude is no longer squashed by rectified's -- no separate
+      rescale step needed)
 Output: plots/gd_joint_<fpas_tag>[_uniform|_barcode][_noise]_residual_spectra.png (up to 6)
         plots/gd_joint_<fpas_tag>_all_residual_spectra.pdf
+        (filenames get a trailing _<pipelines> tag whenever --pipelines is
+        not the full default set, so filtered and unfiltered runs never
+        collide)
 """
 from __future__ import annotations
 
@@ -46,6 +55,7 @@ from gd_test import _shared_s_grid  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PIPELINE_COLOR = {"native": "tab:blue", "rectified": "tab:orange", "undistorted": "tab:green"}
+ALL_PIPELINES = ("native", "rectified", "undistorted")
 
 SCENES = ("realistic", "uniform", "barcode")
 NOISES = (False, True)
@@ -122,7 +132,7 @@ def _select_representative(out, fpas, n_span=N_SPAN):
     return items
 
 
-def make_case_figure(fpas, scene: str, noise: bool):
+def make_case_figure(fpas, scene: str, noise: bool, pipelines_filter=ALL_PIPELINES):
     path = _result_path(fpas, scene, noise)
     if not path.exists():
         print(f"  MISSING: {path.name}")
@@ -146,8 +156,10 @@ def make_case_figure(fpas, scene: str, noise: bool):
         k_rect = int(np.argmin(np.abs(s_grid_shared - s_here)))
         rect_rows = tuple(k_rect for _ in fpas)
 
+        candidates = {"native": rows, "undistorted": rows, "rectified": rect_rows}
         results = {}
-        for pl, key_rows in (("native", rows), ("undistorted", rows), ("rectified", rect_rows)):
+        for pl in pipelines_filter:
+            key_rows = candidates[pl]
             nl = out.get((pl, 2, key_rows))
             if nl is None or not nl.get("_conv") or nl.get("_diverged") or nl.get("off_detector"):
                 continue
@@ -188,24 +200,31 @@ def main() -> int:
     ap.add_argument("--fpas", type=str, default="0,2",
                     help="comma-separated list of >=2 FPA indices, matching "
                          "the gd_test.py run to analyze")
+    ap.add_argument("--pipelines", type=str, default=",".join(ALL_PIPELINES),
+                    help="comma-separated subset of native,rectified,undistorted "
+                         "to plot (default: all three). e.g. native,undistorted "
+                         "to drop rectified -- axes autoscale to the remaining "
+                         "data, no separate rescale step needed")
     args = ap.parse_args()
     fpas = [int(x) for x in args.fpas.split(",")]
+    pipelines_filter = [p.strip() for p in args.pipelines.split(",")]
+    pipe_suffix = "" if sorted(pipelines_filter) == sorted(ALL_PIPELINES) else "_" + "_".join(sorted(pipelines_filter))
 
     plots_dir = REPO_ROOT / "plots"
     plots_dir.mkdir(exist_ok=True)
     tag = fpas_tag(fpas)
-    pdf_path = plots_dir / f"gd_joint_{tag}_all_residual_spectra.pdf"
+    pdf_path = plots_dir / f"gd_joint_{tag}{pipe_suffix}_all_residual_spectra.pdf"
     n_saved = 0
     with PdfPages(pdf_path) as pdf:
         for scene in SCENES:
             for noise in NOISES:
                 label = f"{'+'.join(f'FPA{f}' for f in fpas)} {scene} noise={int(noise)}"
                 print(f"{label} ...", flush=True)
-                fig = make_case_figure(fpas, scene, noise)
+                fig = make_case_figure(fpas, scene, noise, pipelines_filter)
                 if fig is None:
                     continue
                 suffix = _mode_suffix(scene) + ("_noise" if noise else "")
-                png_path = plots_dir / f"gd_joint_{tag}{suffix}_residual_spectra.png"
+                png_path = plots_dir / f"gd_joint_{tag}{suffix}{pipe_suffix}_residual_spectra.png"
                 fig.savefig(png_path, dpi=120)
                 pdf.savefig(fig)
                 plt.close(fig)
