@@ -25,8 +25,12 @@
 #     reference used for row-pairing and plots (a no-op for a single FPA)
 #   UNIFORM=1                  -- flat truth composition (null test)
 #   BARCODE=1                  -- diffuser-style barcode illumination
-#     (mutually exclusive with UNIFORM=1)
-#   BARCODE_BARS=<int>         -- bar count for BARCODE=1 (default 32)
+#     (mutually exclusive with UNIFORM=1 and REALISTIC_BARCODE=1)
+#   REALISTIC_BARCODE=1        -- realistic along-slit truth (genuine
+#     gas/pressure variation) modulated by a barcode brightness pattern
+#     (mutually exclusive with UNIFORM=1 and BARCODE=1)
+#   BARCODE_BARS=<int>         -- bar count for BARCODE=1/REALISTIC_BARCODE=1
+#     (default 32)
 #   NOISE=1                    -- add SNR-based Gaussian noise to every
 #     band's raw rendered image (shared across pipelines within each band)
 #   SNR=<float>                -- override every band's SNR (default: the
@@ -73,6 +77,9 @@ if [[ "${UNIFORM:-0}" == "1" ]]; then
 fi
 if [[ "${BARCODE:-0}" == "1" ]]; then
     SCENE_FLAGS+=(--barcode)
+fi
+if [[ "${REALISTIC_BARCODE:-0}" == "1" ]]; then
+    SCENE_FLAGS+=(--realistic-barcode)
 fi
 if [[ -n "${BARCODE_BARS:-}" ]]; then
     SCENE_FLAGS+=(--barcode-bars "${BARCODE_BARS}")

@@ -2399,6 +2399,254 @@ pipelines) complete with residuals; all plots regenerated
 (`gd_joint_fpa0_fpa{1,2,3}_all_summary.pdf`,
 `gd_joint_fpa0_fpa{1,2,3}_all_residual_spectra.pdf`, plus per-case PNGs).
 
+### 11m. Session housekeeping — local artifact copy, robust-stats table in the summary PDFs, plot-directory cleanup (2026-08-12)
+
+A local, non-scratchpad copy of the published artifact was added at the repo
+root (`NATIVE_VS_UNDISTORTED_ARTIFACT.html`) for offline reference alongside
+the code that generated it.
+
+**`gd_plot.py`'s combined summary PDFs now carry the robust-statistics
+table**, previously console-only output from §9v's `robust_mean_std` across
+every scene/noise/pipeline combination. New `_stats_table_lines()` (formats
+a monospace scene/noise/quantity/pipeline/n/mean/std/median/MAD-sigma/n_out
+table) and `_add_stats_table_pages()` (paginates it into extra
+`PdfPages`-appended pages, ~46 rows/page) are called at the end of `main()`.
+Verified: the FPA0+FPA2 combined PDF grew from 6 to 8 pages (6 case figures
++ 2 stats-table pages), content cross-checked against the console printout
+via `pdftoppm` rendering (no `pypdf` available in this env).
+
+**`plots/` cleanup**: 25 files using the pre-`gd_joint_*` naming convention
+were removed (`git rm`) after confirming via `grep -l` across every current
+`.py` file that nothing still generates or references them (e.g.
+`alongslit_fpa2_uniform.png`, `barcode_chi2_grid_all_fpas.png`,
+`gd_barcode_realistic_comparison.png` — full list in the commit).
+`gd_along_slit_atm_profiles_fpa2.png` was kept since its generating script
+(`scripts/gd_along_slit_atm_profiles.py`) is still live.
+**Caution logged for next time**: an overly broad `rm -f
+plots/gd_joint_fpa0_fpa2_*_summary.png` cleanup glob during this same
+session briefly deleted files that were part of the user's own independent
+commits (`637ffd8`, `908fe65`) made mid-session outside the assistant's
+visibility — `plots/` is actively written to by the user directly, not only
+by generating scripts, so cleanup globs there need to be scoped to exact,
+known-generated filenames, never a wildcard broad enough to catch
+externally-committed output. Fully restored via `git checkout HEAD --
+plots/`; no data lost.
+
+### 11n. Toy walkthrough of the native pipeline mechanism, for the write-up (2026-08-12)
+
+`scripts/gd_toy_native_row_demo.py` — a single-row, code-faithful walkthrough
+of exactly how one native detector row is built and retrieved (reusing the
+real `xy_to_wavelength_slit`, `gd_render._diagonal_ils_convolve`,
+`gaussian_blur_rows`, `ForwardModel.run()`, and `gd_test._joint_retrieve`
+directly, not a simplified stand-in), built to support the along-slit
+write-up's methodology section:
+
+- **Panel A** — the target row's true per-column wavenumber vs. a reference
+  row's, showing how a fixed column samples a different wavenumber (and,
+  via keystone, a different true along-slit position) row to row.
+- **Panel B** — neighbouring rows' hi-res spectra *relative to the target
+  row's* (a difference view). The first attempt overlaid raw spectra at
+  ±K, ±2K rows and found them visually indistinguishable even at ±60 rows,
+  since the full dynamic range swamps the subtle depth differences that
+  matter; switching to `S_show[i] - S_show[target]` immediately revealed
+  real, line-shape-correlated structure.
+- **Panel C** — a small local-neighbourhood render, pre- vs. post- along-slit
+  PSF blur (`gaussian_blur_rows`, 1.5 px FWHM) — the one genuine cross-row
+  physical mixing step in native rendering.
+- **Panel D** — forward-model-at-prior vs. the measured row, plus pre-fit
+  vs. actual post-fit residual (from a real `_joint_retrieve` call on that
+  one row).
+
+Output: `plots/gd_toy_native_row_demo_fpa2_row200.png`, generated and
+visually verified for FPA2/row 200.
+
+**Known follow-up, not yet applied**: Panel A used row 512 ("slit-centre
+reference") as an implicit low-distortion comparison row, but
+`geocarb_gert.gd_polynomials.rows_crossed(fpa=2, row=512) ≈ 5.24` is
+actually the *largest* keystone value in the band, not the smallest — the
+true FPA2 keystone-null row is row 25 (`rows_crossed(2,25) ≈ 0.005`). Row
+512 should be swapped for row 25 before this figure is used in the write-up.
+
+### 11o. Along-slit autocorrelation / effective native spatial resolution — a flawed test caught and corrected, then answered with a new scene (2026-08-12)
+
+**Motivation.** The user raised a specific methodological concern about
+§11's whole native-pipeline approach: retrieving each detector row
+independently, when keystone+PSF genuinely mix multiple rows' true content
+into each row's rendered spectrum, could make native retrievals *look* more
+spatially resolved than the instrument actually delivers — i.e. adjacent
+independent retrievals could be spuriously correlated by the shared
+rendering mechanism, understating the real resolution loss.
+
+**First attempt (flawed).** Built `scripts/gd_toy_row_autocorrelation.py`:
+lag-0..60 Pearson autocorrelation of native's retrieval bias, computed on
+the **uniform** scene, with a degree-6 polynomial detrend to remove the
+smooth slit-wide distortion floor first. Found the ACF decaying to a noise
+floor by lag 2-3 rows, with FPA2 showing a real lag-1 excess (~0.1-0.2 over
+undistorted); reported to the user as "effective along-slit resolution
+~2-3 rows (~5-8 km)."
+
+**Why it was wrong** (caught directly by the user: *"this is not the
+correct test because it doesn't account for state vector variations along
+the slit"*): on a uniform scene, `radiance(eta)` doesn't depend on `eta` at
+all — every column sees an identical spectrum regardless of which true
+slit position keystone nominally assigns it, so there is *nothing* for
+keystone to blend. A uniform-scene ACF can only capture pure
+wavelength-registration (smile) correlation; it is structurally incapable
+of showing keystone-driven spectral (absorption-depth/continuum) blending,
+which needs truth that genuinely varies with position.
+
+**Corrected methodology.** Rewrote the script to default to the (already
+existing, §11's own) realistic along-slit scene; added `--scene
+{realistic,uniform,barcode,realistic_barcode}`; replaced the polynomial
+detrend with a raw/undetrended ACF over a longer lag range (150 rows, vs.
+60) so both a short-range (PSF/keystone) regime and a long-range (shared
+real-atmosphere) regime are visible and separable by eye — detrending a
+scene with real spatial structure risks removing the very short-range
+correlation being measured, not just a nuisance trend; and added an
+explicit `excess = acf_native − acf_undistorted` curve, isolating what
+native's own rendering (keystone+PSF) contributes beyond whatever
+correlation the real, shared atmospheric truth already produces in *both*
+pipelines.
+
+**Result 1 — realistic scene.** Excess is tiny (|excess| ≤ 0.008, peaking
+near lag 7-9 rows) and slightly **negative** — native decorrelates
+marginally *faster* than undistorted at short range, not slower. Both raw
+ACF curves are dominated (0.99 → ~0 over ~140 rows / ~400 km) by the real
+atmosphere's own along-slit spatial correlation, which both pipelines carry
+equally since both see the same underlying scene. **No evidence that native
+manufactures extra, artifactual spatial correlation** beyond what the real
+shared truth already produces — the "artificially inflated resolution"
+concern doesn't materialize against a smoothly-varying truth.
+
+**New scene added to answer the follow-up ask** ("do the same analysis for
+a scene where the realistic scenes are modulated by the barcode pattern").
+`gd_test.py` gained a new mode, `--realistic-barcode` (mutually exclusive
+with `--uniform`/`--barcode`; `_band_setup()` gained a matching
+`realistic_barcode` branch), combining the realistic scene's genuine
+along-slit atmospheric variation with a 32-bar barcode brightness gain
+multiplied on top — unlike the existing `--barcode` mode (which fixes the
+atmosphere at its *center* value and only varies brightness, i.e.
+`xtrue_x_km` forced to zero), this one keeps `xtrue_x_km = x_km_of_row` so
+the underlying truth genuinely varies with position, same as the plain
+realistic scene. Implementation reuses
+`geocarb_gert.focalplane.barcode_scene`'s own η→gain bar/boundary math by
+applying it to an all-ones "spectrum" (broadcasting one shared gain across
+every hi-res bin) and multiplying that elementwise onto the real per-η
+radiance from `als.build_lookup_radiance(..., uniform=False)`, rather than
+duplicating the bar-boundary logic. `gd_test.slurm` gained a matching
+`REALISTIC_BARCODE=1` env var. Smoke-tested on a 6-row FPA2 subsample
+before committing to the full run.
+
+Full run: FPA0-3, single-band, no noise, `realistic_barcode` scene, via
+SLURM (`FPAS=<n> REALISTIC_BARCODE=1 sbatch scripts/gd_test.slurm`, jobs
+1707625-1707628, ~40 min each on 32 CPUs). Native convergence dropped to
+849-893/1024 (83-87%) vs. undistorted's 1023-1024/1024 (>99.9%) — some
+native rows near a bar edge fail to converge outright, itself a signal that
+real geometric mixing across a sharp brightness discontinuity is happening.
+
+**Result 2 — realistic_barcode scene.** Starkly different from the smooth
+case. Native's raw ACF **collapses from 1.0 at lag 0 to ~0.08 by lag 1**
+and stays near zero (noisy, roughly ±0.1) out to lag 150, punctuated by
+sharp re-correlation spikes at lag ≈ 32, 65, 97, 130 — exact multiples of
+the 32-row barcode bar period (1024 rows / 32 bars). Undistorted keeps the
+same smooth ~140-row decay it has in the plain realistic scene (insensitive
+to the brightness pattern — it evaluates truth directly, no rendering, no
+noise here). Excess is strongly **negative**, ~−0.92 to −1.10 by lag 1-10.
+
+**Interpretation.** Keystone+PSF's effect on along-slit correlation is
+strongly scene-dependent: negligible against a smooth truth (swamped by the
+real atmosphere's own broad correlation), but produces large,
+sharply-localized **de**correlation exactly where the truth has real
+fine-scale (few-row to few-tens-of-row) structure for keystone+PSF to
+genuinely mix — precisely the regime a "spatial resolution" claim is
+actually about. This is the opposite of "artificially inflated resolution":
+near real fine structure, native retrievals become *more* independent
+(noisier row-to-row) than the underlying truth, not falsely smoothed
+together. This directly answers and resolves the user's concern from
+earlier in this thread.
+
+**Status**: three figures
+(`plots/gd_toy_row_autocorrelation_{uniform,realistic,realistic_barcode}.png`),
+`gd_test.py`/`gd_test.slurm`/`gd_toy_row_autocorrelation.py` updated and
+staged (not committed). New `results/gd_joint_fpa{0,1,2,3}_realistic_barcode.pkl`
+(no-noise, single-band each) are gitignored, not committed — regenerate via
+the SLURM command above. The old, un-suffixed `plots/gd_toy_row_autocorrelation.png`
+from the flawed uniform-only version was removed (`git rm --cached` + delete)
+in favor of the three scene-suffixed files. **Not yet done**: rerun any of
+the three scenes with noise on; sweep the barcode bar count to see how the
+native decorrelation length scales with bar width; apply §11n's row-25 fix
+to the toy demo.
+
+### 11p. A sharper thought experiment answered directly: does a real, single-footprint point source survive native retrieval near the high-keystone end of the slit? (2026-08-12)
+
+The user pushed §11o's question further with a precise thought experiment:
+near the end of the slit, a native row is built end-to-end from ~10
+contiguous spatial regions' spectral contributions (modulo PSF). If a
+single one of those footprints carries a strong, localized anomaly (a real
+point-source plume, or a strong albedo gradient), the row's spectrum is
+effectively ~90% one atmosphere and ~10% a totally different one — a
+sharper, more directly diagnostic question than §11o's aggregate
+autocorrelation statistics, and not the same thing as "correlation between
+neighboring samples."
+
+**This is exactly what `gd_render.image()` does, confirmed by code, not
+just by the earlier docstring citation**: `rows_crossed(fpa, row)` (§11's
+own keystone amplitude metric) IS the number of contiguous footprints a
+row's own column range splices together, since keystone is precisely the
+shift in true ground position as column/wavelength varies within a fixed
+row. For FPA2 this grows from ~0.005 rows (the null row, 25) to **10.4
+rows at row 1023** — confirmed by direct computation, not estimated. The
+user's "10 contiguous regions" is not a hypothetical; it's very close to
+the real number at the high-row end of this band.
+
+**Directly testable with data that already exists.** `along_slit_scene.py`
+already has real, ~9 km-wide Gaussian CO2 point sources built in
+(`HOTSPOTS_CO2`) specifically for this purpose (see its own docstring —
+"stress-test whether keystone/smile row-crossing preserves or smears a
+genuinely localized source"), and one of the two happens to sit almost
+exactly on FPA2's highest-keystone rows. Pulled straight from the existing
+`results/gd_joint_fpa2.pkl` (plain realistic scene, no noise, no new
+retrieval run needed) via new `scripts/gd_toy_hotspot_dilution.py`:
+
+| location | keystone (rows crossed) | true peak enhancement | native captures | undistorted captures |
+|---|---|---|---|---|
+| row ~112 (near slit start), x0=−1100 km | 1.0 | +5.4 ppm | 90% | 91% |
+| row ~910 (near slit end), x0=+1050 km | 9.3 | +4.0 ppm | **44%** | 99% |
+
+Undistorted (no splicing, one true position per row) recovers the point
+source almost completely at *both* locations. Native tracks it almost as
+well at low keystone (90% vs. undistorted's 91% — both dominated by
+ordinary retrieval scatter, not splicing) but **loses more than half the
+true peak amplitude at high keystone** — and the recovered bump in
+`plots/gd_toy_hotspot_dilution_fpa2.png` is visibly wider than the true
+one, spread over roughly the same ~9-row span keystone predicts.
+
+**This is a materially different, and more directly relevant, finding than
+§11o's autocorrelation work.** §11o measured how correlated retrieval
+*bias* is between neighboring rows (answering "how independent are two
+adjacent samples"); this measures how much of a real, localized *signal*
+a single native retrieval fails to see at all, because of the same
+splicing mechanism, quantified in the physical units (ppm peak amplitude)
+that actually matter for a source-detection or source-attribution claim.
+Together with §11o's realistic_barcode result (native decorrelating
+sharply near real fine-scale structure, not smoothing it away), this gives
+a coherent, two-part answer: native doesn't inflate apparent resolution by
+falsely smoothing independent ground truths together — but near real
+fine-scale structure (a point source, an albedo edge) at high keystone, it
+can substantially **under-recover** the true signal's amplitude, which is
+its own, different, and arguably more operationally important limitation
+to flag for the write-up.
+
+**Status**: `scripts/gd_toy_hotspot_dilution.py` and
+`plots/gd_toy_hotspot_dilution_fpa2.png` added and staged. Uses the
+existing `results/gd_joint_fpa2.pkl`; no new SLURM run needed. **Not yet
+done**: repeat for the other three FPAs' own hot spots (CH4/CO on FPA1/
+FPA3) and for a sweep of keystone amplitude in between the two cases shown
+(to map out capture-fraction vs. rows-crossed as a continuous curve rather
+than two points); check whether the effect is source-width-dependent (the
+current hot spots are ~9 km, close to one footprint — a narrower or wider
+source would presumably dilute less or more).
+
 ---
 
 ## 12. Plan: calibration-mismatch (imperfect keystone/smile knowledge) experiment (2026-07-27)

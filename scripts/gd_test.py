@@ -128,7 +128,7 @@ _G = {}
 
 def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_samples: int,
                 n_workers, uniform: bool, barcode: bool, barcode_bars: int,
-                noise: bool, noise_seed: int):
+                noise: bool, noise_seed: int, realistic_barcode: bool = False):
     """Render one band's raw detector image plus everything needed for all
     three pipelines: `A` (native/rectified source), `wn_hires`/`radiance`
     (undistorted source, and the barcode/lookup truth), the nominal per-band
@@ -154,6 +154,26 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
         brightness = np.resize([1.0, 0.2], barcode_bars)
         radiance = barcode_scene(S_center, brightness=brightness, widths=None, softness=0.0)
         wn_hires = wide_win.wn_hires
+    elif realistic_barcode:
+        # Realistic along-slit truth (genuine per-eta gas/pressure variation,
+        # same as the plain realistic scene) with a barcode brightness gain
+        # multiplied on top -- combines continuous state-vector variation
+        # with a sharp, high-spatial-frequency reflectance pattern, unlike
+        # plain --barcode above (which fixes the atmosphere at its center
+        # value and only varies brightness). Reuses barcode_scene's own
+        # eta->gain bar/boundary math by applying it to a unit "spectrum" (an
+        # all-ones array), which broadcasts one shared scalar gain across
+        # every hi-res bin; multiplying that gain elementwise onto the real
+        # per-eta radiance gives the desired "realistic scene x barcode" scene.
+        from geocarb_gert.focalplane import barcode_scene
+        wn_hires, radiance_real = als.build_lookup_radiance(
+            absco, wide_inst, geo, solar, np.array([albedo]),
+            n_samples=n_lookup_samples, n_workers=n_workers, uniform=False)
+        brightness = np.resize([1.0, 0.2], barcode_bars)
+        gain_of_eta = barcode_scene(np.ones_like(wn_hires), brightness=brightness, widths=None, softness=0.0)
+
+        def radiance(eta, _gain=gain_of_eta, _real=radiance_real):
+            return _gain(eta) * _real(eta)
     else:
         wn_hires, radiance = als.build_lookup_radiance(
             absco, wide_inst, geo, solar, np.array([albedo]),
@@ -408,6 +428,11 @@ def main() -> int:
     ap.add_argument("--out-tag", type=str, default=None)
     ap.add_argument("--uniform", action="store_true")
     ap.add_argument("--barcode", action="store_true")
+    ap.add_argument("--realistic-barcode", action="store_true",
+                    help="realistic along-slit truth (genuine gas/pressure "
+                         "variation) modulated by a barcode brightness "
+                         "pattern -- unlike --barcode, which fixes the "
+                         "atmosphere at its center value")
     ap.add_argument("--barcode-bars", type=int, default=32)
     ap.add_argument("--snr", type=float, default=None,
                     help="override every band's SNR (default: the min across "
@@ -418,8 +443,8 @@ def main() -> int:
     ap.add_argument("--pipelines", type=str, default="native,rectified,undistorted",
                     help="comma-separated subset of native,rectified,undistorted")
     args = ap.parse_args()
-    if args.uniform and args.barcode:
-        ap.error("--uniform and --barcode are mutually exclusive")
+    if sum([args.uniform, args.barcode, args.realistic_barcode]) > 1:
+        ap.error("--uniform, --barcode, and --realistic-barcode are mutually exclusive")
     pipelines = args.pipelines.split(",")
 
     FPAS = [int(x) for x in args.fpas.split(",")]
@@ -440,13 +465,14 @@ def main() -> int:
     atm_center = als.atmosphere_at(0.0)
 
     t0 = time.time()
-    scene_label = 'barcode' if args.barcode else 'uniform' if args.uniform else 'realistic'
+    scene_label = ('realistic_barcode' if args.realistic_barcode else
+                  'barcode' if args.barcode else 'uniform' if args.uniform else 'realistic')
     bands = []
     for fpa in FPAS:
         print(f"rendering FPA{fpa} ({scene_label}{', noise' if args.noise else ''})...", flush=True)
         b = _band_setup(fpa, atm_center, absco, geo, solar, snr, args.n_lookup_samples,
                         args.n_workers, args.uniform, args.barcode, args.barcode_bars,
-                        args.noise, args.noise_seed)
+                        args.noise, args.noise_seed, args.realistic_barcode)
         print(f"  done ({time.time()-t0:.0f}s)", flush=True)
         bands.append(b)
 
@@ -505,15 +531,18 @@ def main() -> int:
         print(f"  {pl}: converged {n_conv}/{len(keys)}", flush=True)
 
     tag = fpas_tag(FPAS)
-    mode_suffix = "_uniform" if args.uniform else ("_barcode" if args.barcode else "")
+    mode_suffix = ("_realistic_barcode" if args.realistic_barcode else
+                  "_uniform" if args.uniform else ("_barcode" if args.barcode else ""))
     noise_suffix = "_noise" if args.noise else ""
     tag_suffix = f"_{args.out_tag}" if args.out_tag else ""
     out_path = (REPO_ROOT / "results" /
                f"gd_joint_{tag}{mode_suffix}{noise_suffix}{tag_suffix}.pkl")
     out_path.parent.mkdir(exist_ok=True)
+    any_barcode = args.barcode or args.realistic_barcode
     with open(out_path, "wb") as f:
         pickle.dump({"out": out, "fpas": FPAS, "uniform": args.uniform,
-                    "barcode": args.barcode, "barcode_bars": args.barcode_bars if args.barcode else None,
+                    "barcode": args.barcode, "realistic_barcode": args.realistic_barcode,
+                    "barcode_bars": args.barcode_bars if any_barcode else None,
                     "noise": args.noise, "noise_seed": args.noise_seed if args.noise else None,
                     "snr": snr, "pipelines": pipelines}, f)
     print(f"saved {out_path}")
