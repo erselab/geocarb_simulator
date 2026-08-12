@@ -29,7 +29,7 @@ PYTHON="/gpfs/fs1/home/scrowel3/miniforge3/envs/analysis/bin/python"
 export PYTHONPATH="$(pwd):/scratch/scrowel3_lab/gert"
 
 CONFIGS=(${1:-0 1 2 3 0,1 0,2 0,3 0,1,2})
-PIPELINES="${2:-native,rectified,undistorted}"
+PIPELINES="${2:-rectified,undistorted}"
 
 PIPE_SCRIPTS=(
     scripts/gd_plot.py

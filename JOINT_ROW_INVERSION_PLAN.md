@@ -114,32 +114,134 @@ own Phase 0, §4) — it never extends it. Success or failure here is
 informative regardless of whether the bigger build is ever attempted, and
 it's a much smaller thing to build.
 
-### 0a. Go/no-go test
+### 0a. Go/no-go test — built and run, 2026-08-12: **go**
 
-- `scripts/gd_toy_trace_pixels.py` already builds the core piece: given
-  `eta0` and a row window, it returns every `(row, column)` pixel within
-  `--tolerance-km` of `eta0` (real, code-verified, not the original
-  nearest-column-only sketch). Extend it to return `(ν, real pixel value)`
-  pairs instead of just plotting them.
-- Feed those pairs directly into the existing `GERTRetrieval`/
-  `ForwardModel` call exactly as `_native_row` does today, just with this
-  scattered, multi-row, multi-pixel-per-row `obs_grid` in place of one
-  row's own 1024 columns. Use row 910 (§11p's hot-spot row) as the first
-  target, tolerance=0.2 km, matching the table above (~150 pixels
-  expected).
-- **Go/no-go criterion**: does it converge at all (checking specifically
-  whether dispersion/nuisance terms are well-constrained, per the risk
-  above), and does its recovered peak amplitude beat native's 44% capture
-  at row 910 from §11p? If yes, this is very likely sufficient on its own,
-  and the much bigger joint-block build (§1-§4) may not be needed at all,
-  except for the resolution/averaging-kernel rigor it uniquely offers
-  (§3).
-- If it fails to converge, or badly underperforms despite ~150 real
-  pixels, that's itself a fast, cheap, informative result: it means the
-  extra machinery in the joint block — which uses *all* pixels, not just
-  high-overlap ones, optimally weighted rather than binarily
-  included/excluded — is doing real, necessary work, not just added
-  complexity. Worth knowing before building it.
+Built `scripts/gd_toy_trace_retrieve.py`. `traced_obs()` reuses
+`gd_toy_trace_pixels.py`'s per-pixel evaluation to collect every real
+`(row, column)` pixel within `--tolerance-km` of a target `eta0`, pulls
+each one's real, unmodified value straight from `band["A"]` (rendered by
+`gd_test.py`'s own `_band_setup`, unchanged), and hands the resulting
+`(ν, y)` pairs to `gd_test._joint_retrieve()` exactly as `_native_row`
+does today — same `GERTRetrieval`/`ForwardModel` call, no new solver, just
+a different `obs_grid`. Ran §11p's exact row-910/row-880 hot-spot case,
+FPA2, realistic scene, no noise, dispersion order 2, `--tolerance-km 0.5`:
+
+| | pixels used | rows spanned | converged | χ²ᵣ | CO2 bias |
+|---|---|---|---|---|---|
+| peak (row 910) | 393 | 906–915 (10) | **yes** | 0.068 | −4.30 ppm |
+| background (row 880) | 392 | 876–885 (10) | **yes** | 0.067 | −3.70 ppm |
+
+True rise +3.97 ppm; trace-and-select retrieved rise +3.37 ppm —
+**84.9% of the true peak enhancement captured**, against native's 44% and
+undistorted's 99% (§11p). Both fits converged cleanly (good χ²ᵣ, no
+dispersion/nuisance-parameter fragility despite only ~390 real pixels)
+using ~40% of native's 1024-column data.
+
+**Go/no-go verdict: go.** Trace-and-select nearly doubles native's
+recovered signal without any new solver, Jacobian-gather structure, or
+`G`-atmosphere state — just a different, real, un-interpolated pixel
+selection fed into existing retrieval code. It doesn't fully close the gap
+to undistorted (84.9% vs. 99%), consistent with the fact that
+trace-and-select still admits up to 0.5 km of real position error per
+pixel while undistorted has none at all — a real, expected, bounded
+residual, not a red flag.
+
+### 0b. Whole-slit sweep — built and run, 2026-08-12: real improvement on average, with a real, specific, predictable failure mode
+
+The two-row go/no-go test in §0a can't show whether 84.9% generalizes or
+is a property of that one hot spot. Built `scripts/gd_trace_retrieve_sweep.py`
+(parallelized the same way `gd_test.py` parallelizes its own row
+batteries — `mp.get_context("fork")` + `Pool.imap_unordered`, no new
+solver) and ran all 1024 rows, FPA2 realistic scene, no noise,
+`--tolerance-km 0.5`: **1024/1024 converged**, 162s wall-clock on 16
+workers (~0.16 s/row). Compared against native/undistorted's existing
+`results/gd_joint_fpa2.pkl` via `scripts/gd_trace_retrieve_plot.py`
+(`plots/gd_trace_vs_native_fpa2.png`).
+
+**Whole-slit robust stats, CO2 bias [ppm]:**
+
+| pipeline | mean | std | median | MAD-σ |
+|---|---|---|---|---|
+| native | −2.22 | 2.25 | −2.85 | 0.88 |
+| undistorted | −0.85 | 1.79 | −1.28 | 1.16 |
+| trace-and-select (0.5 km) | **−1.72** | **2.75** | −2.55 | **1.72** |
+
+On average the systematic bias (mean, median) sits between native and
+undistorted, consistent with §0a — but scatter is **higher** than both
+(std 2.75 vs. native's 2.25; MAD-σ 1.72 vs. native's 0.88). The two-row
+test couldn't see this; it's a real cost, not noise in the estimate.
+
+**Where it goes wrong, diagnosed concretely.** The comparison plot shows
+a second, broader CO2 feature near row ~400 (a different plume than
+§11p's point source) where trace-and-select *overshoots*: row 394 hits
+**+9.03 ppm** bias vs. native's +4.21 and undistorted's +3.28, against a
+true rise of only ~+4 ppm — worse than native, not better. Checked why:
+only **4 distinct rows** contribute pixels there (`rows_crossed≈4.0` at
+that row gives a much narrower reach than row 910's ~9.3), and true CO2
+barely varies across those 4 rows (416.87–416.94 ppm, 0.07 ppm total) —
+so it is *not* a mixing-genuinely-different-truths problem. It matches
+the dispersion/nuisance-parameter risk flagged in §0 directly: too few
+distinct rows means too little spectral coverage across the band to
+constrain the fit properly, even though χ² still looks fine (a real,
+underdetermined-fit failure mode, not a divergence one).
+
+**Quantified across the whole sweep**: 230/1024 rows are meaningfully
+worse than native (|bias| higher by >0.5 ppm), 353/1024 meaningfully
+better, the rest comparable. Of the 230 worse rows, **224 have ≤6
+distinct contributing rows** (the sweep's own median is 6) — the failure
+mode is real but specific and predictable, not scattered randomly across
+the slit. It shows up exactly where the theory said it would.
+
+**Revised verdict**: still a genuine net positive (353 better vs. 230
+worse, and the mean bias improves), but not a clean win everywhere —
+trace-and-select needs a minimum-contributing-rows floor (widen the
+tolerance or window adaptively when too few rows would otherwise
+contribute, rather than accepting a narrow, poorly-covering trace) before
+it's a safe drop-in replacement for native. `results/gd_trace_fpa2_tol0.5.pkl`
+(gitignored) and `plots/gd_trace_vs_native_fpa2_tol0.5.png` have the full
+data; `plots/gd_trace_all_pipelines_fpa2_tol0.5.png`
+(`scripts/gd_trace_all_pipelines_plot.py`) adds rectified for the full
+four-pipeline picture (own panel/scale — its bias here is ~28x native's
+magnitude, §9l/§9m's already-known interpolation artifact, unrelated to
+this experiment).
+
+**0.2 km tolerance, run and compared the same way, 2026-08-12**: also
+1024/1024 converged (73s, even faster than 0.5 km — fewer pixels per row
+on average). Tightening tolerance made things *worse*, not better —
+confirms the mechanism directly rather than just plausibly explaining it:
+
+| tolerance | mean | std | median | MAD-σ |
+|---|---|---|---|---|
+| 0.5 km | −1.72 | 2.75 | −2.55 | 1.72 |
+| 0.2 km | −1.76 | **3.33** | −2.46 | **2.20** |
+
+Same mean (no systematic change), but materially higher scatter. The
+row~400 overshoot gets worse (+12.5 ppm vs. 0.5 km's +9.0 ppm), and a new
+large excursion appears near rows 130-220 (down to −7.5 ppm) that wasn't
+prominent at 0.5 km. Consistent with the diagnosis above: a tighter
+tolerance means fewer rows clear it on average, which means more
+underdetermined fits, not more accurate ones — tightening the position
+constraint without also ensuring enough rows contribute makes the failure
+mode more common, it doesn't fix it. `results/gd_trace_fpa2_tol0.2.pkl`,
+`plots/gd_trace_vs_native_fpa2_tol0.2.png`,
+`plots/gd_trace_all_pipelines_fpa2_tol0.2.png`.
+
+**Housekeeping note**: the first pass of these two plotting scripts wrote
+to a fixed filename regardless of `--tolerance-km`, so rerunning at 0.2 km
+silently overwrote the 0.5 km figures (caught immediately — git still had
+the 0.5 km version staged, nothing was actually lost, but it's exactly
+the kind of un-parameterized-output-filename bug this project has hit
+before, e.g. the autocorrelation script in §11o of
+`KEYSTONE_SMILE_BIAS_PLAN.md`). Both scripts now suffix their output with
+`_tol{tolerance_km}`, matching `gd_trace_retrieve_sweep.py`'s own
+`.pkl` naming, which already did this correctly.
+
+**Not yet done**: implement the minimum-row floor and rerun; check
+whether the joint block (§1-§4) — which uses *all* pixels with proper
+weighting rather than a binary include/exclude threshold — avoids this
+specific failure mode by construction, which would be a concrete,
+evidence-backed reason to still build it rather than stop at
+trace-and-select.
 
 ## 1. Why this is a solvable classical problem, not a black box
 
