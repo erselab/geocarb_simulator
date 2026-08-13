@@ -252,6 +252,43 @@ def edge_scene(S_left: np.ndarray, S_right: np.ndarray,
     return radiance
 
 
+def nearest_bin_scene(bin_centers: np.ndarray,
+                      spectra: list) -> Callable[[float], np.ndarray]:
+    """``G``-way generalization of :func:`edge_scene` for the joint
+    multi-atmosphere block (`JOINT_ROW_INVERSION_PLAN.md` §2/§4).
+
+    Each pixel's ``η`` is assigned to its single nearest bin center and
+    returns that bin's own hi-res spectrum unchanged -- **hard assignment,
+    no interpolation of spectra**. This is the "simpler and safer default"
+    §2 calls for: every pixel's prediction comes from exactly one bin's own
+    RT output, never a blend of two bins' already-computed spectra (that
+    blend is exactly the operation §9l/§9m found to be the dominant bias
+    source in `rectify()`). If a smoother forward map is ever wanted, the
+    correct place to interpolate is the *state* (CO2 ppm) between bins,
+    followed by a fresh RT run -- not this function.
+
+    Parameters
+    ----------
+    bin_centers : ndarray, shape (G,)
+        Sorted ``η`` bin centers.
+    spectra : sequence of ndarray, length ``G``
+        Each entry the hi-res spectrum (shape ``(n_hires,)``) for that bin.
+    """
+    bin_centers = np.asarray(bin_centers, dtype=float)
+    spectra_arr = np.asarray(spectra, dtype=float)   # (G, n_hires)
+    # midpoints between consecutive sorted centers -> searchsorted gives
+    # the nearest-center index directly (ties go to the right bin).
+    edges = 0.5 * (bin_centers[:-1] + bin_centers[1:])
+
+    def radiance(eta: float) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        idx = np.searchsorted(edges, eta)
+        return spectra_arr[idx]
+
+    radiance.bin_centers = bin_centers
+    return radiance
+
+
 def gaussian_blur_rows(A: np.ndarray, fwhm_px: float) -> np.ndarray:
     """Blur ``A`` along axis 0 (rows) by a normalized Gaussian of FWHM ``fwhm_px``.
 

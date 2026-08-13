@@ -23,7 +23,7 @@ from .radiometry import (GEOCARB_REF, base_noise_model, model_for,
 from .adapter import pixel_geometry, sample_geometries, gsd_km, scene_from_profile
 from .scene import reference_atmosphere, albedo_for, SCENE_TYPES, hires_spectra_for
 from .focalplane import (FocalPlaneModel, uniform_scene, edge_scene,
-                         random_scene, barcode_scene)
+                         random_scene, barcode_scene, nearest_bin_scene)
 from .gd_polynomials import (xy_to_wavelength_slit, wavelength_slit_to_xy, rows_crossed,
                              DISPERSION_ASCENDING)
 from . import gd_render
@@ -40,6 +40,7 @@ __all__ = [
     "pixel_geometry", "sample_geometries", "gsd_km", "scene_from_profile",
     "reference_atmosphere", "albedo_for", "SCENE_TYPES", "hires_spectra_for",
     "FocalPlaneModel", "uniform_scene", "edge_scene", "random_scene", "barcode_scene",
+    "nearest_bin_scene",
     "xy_to_wavelength_slit", "wavelength_slit_to_xy", "rows_crossed", "gd_render",
     "along_slit_scene", "DISPERSION_ASCENDING",
     "median_mad", "mad_outlier_mask", "chi2_outlier_mask", "robust_mean_std",

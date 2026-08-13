@@ -219,6 +219,61 @@ def image(
     return gaussian_blur_rows(A, spatial_psf_fwhm_px)
 
 
+def predict_neighborhood(
+    fpa: int,
+    rows: np.ndarray,
+    wn_hires: np.ndarray,
+    radiance: Callable[[float], np.ndarray],
+    ils: ILS,
+    spatial_psf_fwhm_px: float = 1.5,
+    pad: int = 4,
+) -> np.ndarray:
+    """:func:`image`'s own per-row loop, restricted to a small row window --
+    the forward operator for the joint multi-atmosphere block
+    (`JOINT_ROW_INVERSION_PLAN.md` §4, Phase 1's ``predict_neighborhood``).
+
+    Renders a padded window around ``rows`` (needed because
+    ``gaussian_blur_rows`` mixes across rows, so pixels just outside the
+    requested window still influence it) and returns only the requested,
+    unpadded rows -- otherwise identical to :func:`image`: every pixel is
+    still evaluated at its own true ``(eta, nu)``, no cross-row borrowing
+    before the final PSF blur.
+
+    Parameters
+    ----------
+    rows : ndarray of int
+        Detector rows to return, any subset/order (need not be contiguous
+        or sorted, though a contiguous block is the intended use).
+    pad : int
+        Extra rows rendered on each side of ``[rows.min(), rows.max()]``
+        solely for correct PSF-blur edge handling, then discarded. Should
+        be a few multiples of ``spatial_psf_fwhm_px``; the default (4)
+        matches ``gaussian_blur_rows``'s own edge-extension half-width for
+        FWHM~1.5px.
+
+    Returns
+    -------
+    ndarray, shape (len(rows), 1024)
+    """
+    rows = np.asarray(rows, dtype=int)
+    row_lo, row_hi = int(rows.min()) - pad, int(rows.max()) + pad
+    rows_padded = np.arange(max(0, row_lo), min(N_PX, row_hi + 1))
+    cols = np.arange(N_PX, dtype=float)
+    sm = s_max(fpa)
+
+    A_pad = np.empty((len(rows_padded), N_PX), dtype=float)
+    for k, i in enumerate(rows_padded):
+        lam_row, s_row = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i)))
+        nu_row = 1.0e4 / lam_row
+        eta_row_true = s_row / sm
+        S_row = np.asarray(radiance(eta_row_true), dtype=float)
+        A_pad[k] = _diagonal_ils_convolve(wn_hires, S_row, nu_row, ils)
+
+    A_pad = gaussian_blur_rows(A_pad, spatial_psf_fwhm_px)
+    idx = np.searchsorted(rows_padded, rows)
+    return A_pad[idx]
+
+
 def rectify(fpa: int, A: np.ndarray, s_grid: np.ndarray, wn_grid: np.ndarray,
            order: int = 1) -> np.ndarray:
     """Rectify a raw detector image onto a regular (slit, wavenumber) grid.

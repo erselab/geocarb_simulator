@@ -413,6 +413,98 @@ larger investment:
   alongside it" — which determines whether everything below is a moderate
   extension (days) or a separate solver build (much more).
 
+**GERT inspection, 2026-08-12 — Phase 0's own question answered directly
+from the source, without needing to build and run it first.** Read
+`gert/retrieval.py` (`StateVector`, `GERTRetrieval`, `DecoupledGERTRetrieval`)
+rather than guess:
+
+- `StateVector.apply(prior_atm, prior_albedo, prior_albedo_slope)` maps
+  the flat state array onto exactly **one** `AtmosphericProfile` — every
+  transform (`{mol}_scale`, `p_scale`, `albedo_{b}`, ...) is a scalar
+  multiplier/offset on that one profile. No indexing, no per-location
+  structure, anywhere in the class (~1300 lines).
+- `GERTRetrieval.__init__` takes exactly one `fm_prior: ForwardModel` and
+  one `state_vector: StateVector`. A large, mature single-location engine
+  (backtracking, per-transform analytical Jacobians, aerosol, EOF
+  empirical corrections) — built around one atmosphere throughout.
+- `DecoupledGERTRetrieval` (name looked promising) turned out to be a
+  *different* decoupling axis — atmosphere-vs-BRDF-surface for
+  reflectance imaging (EMIT/AVIRIS-style, cached path terms reused across
+  surface-only iterations), same theme as `decoupled_forward_model.py`.
+  Not applicable to multi-location.
+- Checked whether the Gauss-Newton step is factored out separately from
+  the single-atmosphere plumbing (`_forward`, `_jacobian_fd`,
+  `_jacobian_mixed`, `run()`): it isn't. The GN math lives directly inside
+  `run()`'s iteration loop, tightly coupled to `self.sv`/`self.fm_prior`.
+  No standalone "step given `(K, y, Sy_inv, Sa)`" utility to lift out.
+
+**Answer: no in-place extension.** `GERTRetrieval` does not generalize to
+a multi-atmosphere state, and subclassing/monkey-patching its internals to
+fake one would be invasive and fragile against future GERT changes. What
+*is* cleanly reusable, unchanged, called once per bin: `ForwardModel`
+(atmosphere-agnostic at construction) and `StateVector.gas_scaling()` +
+`.apply()` — exactly what `_joint_retrieve` already calls per row today.
+
+**Revised first step** (supersedes "build and run Phase 0 to find out"):
+write a small, standalone Gauss-Newton/optimal-estimation loop — new code
+in `geocarb_gert`/`scripts`, **not** a `gert` modification — that builds
+`G` independent `(ForwardModel, StateVector)` pairs, assembles the
+block-sparse Jacobian/residual across all real pixels by hand (the
+pixel→bin gather from §2), and does its own Rodgers-form update
+`dx = (KᵀSy⁻¹K + Sa⁻¹)⁻¹(KᵀSy⁻¹·resid − Sa⁻¹·(x−x_a))` — standard,
+well-understood linear algebra, not a re-derivation of anything GERT
+doesn't already provide per-bin. Phase 0's `G=2` synthetic test (below)
+is still the right first thing to build and run — it now has a known
+answer for *how* to build it, not just *whether* it's buildable.
+
+**Phase 0 result, 2026-08-12 — built and run: pass.**
+`scripts/gd_toy_joint_g2_test.py` implements exactly the revised design
+above: a standalone finite-difference Gauss-Newton loop (no `gert`
+modification, `GERTRetrieval` not involved) built around two reusable,
+unmodified pieces — `StateVector.gas_scaling()`+`.apply()` to turn a
+scalar `co2_scale` into a modified `AtmosphericProfile`, and a fresh
+`ForwardModel(...).run()` per evaluation, exactly `GERTRetrieval.
+_forward()`'s own recipe. A `local_render()` helper replicates `gd_render.
+image()`'s per-row loop (`xy_to_wavelength_slit` → per-row ILS convolution
+→ `gaussian_blur_rows`) restricted to a padded window, serving as a
+working draft of Phase 1's own `predict_neighborhood()`.
+
+Setup: FPA2, row 512 ± 2 (5 core rows, padded ±4 rows for correct PSF-blur
+edge handling), a synthetic hard truth edge at `η(row=512, col=512)`
+(`geocarb_gert.focalplane.edge_scene`, `softness=0` — all edge blur in the
+rendered image comes from the real 1.5-px spatial PSF, not the synthetic
+scene), true `co2_scale` = 0.95 (A, η<edge) and 1.05 (B, η>edge) against
+the shared prior, no noise. This window genuinely exercises joint/coupled
+machinery rather than trivially decomposing into two independent
+single-bin fits: at row 512, `rows_crossed≈5.24` is comparable to the
+window width, so individual rows' own column ranges straddle the eta_edge
+boundary (within-row keystone splicing), and the real PSF blur further
+mixes rows on both sides of the boundary.
+
+Results:
+- **G=2** (joint fit of `co2_scale_A`, `co2_scale_B`): converged in 2
+  Gauss-Newton iterations, recovered `co2_scale_A=0.95000` (true 0.95,
+  error 0.00000) and `co2_scale_B=1.05000` (true 1.05, error -0.00000) —
+  essentially exact recovery (residual rms → 8e-8 by the final iterate,
+  floating-point noise floor for a noise-free synthetic test).
+- **G=1 control** (single shared `co2_scale` fit to the identical
+  pixels): converged to `co2_scale=1.00559` — near the pixel-fraction-
+  weighted dilution expectation (~0.999, from the core window's 49.0% of
+  pixels falling on the B side of the edge), far from *both* true values
+  (0.95 and 1.05) and nowhere near either endpoint. This is the same
+  structural failure mode native's per-row-independent retrieval already
+  exhibits at real hot spots (§11p) — confirmed here in a controlled,
+  closed-form setting.
+- **Verdict: both success criteria met.** `G=2` recovers both true states
+  to well within ordinary retrieval noise; `G=1` on the same data degrades
+  to a diluted value, confirming `G=2` is doing something native/G=1
+  structurally cannot, not just a reparameterization of the same fit.
+
+This closes Phase 0. The standalone GN-loop approach (not a `GERTRetrieval`
+extension) is validated as buildable and correct on the simplest possible
+case; Phase 1's `predict_neighborhood()` + real Jacobian assembly can now
+proceed with confidence in the underlying mechanism.
+
 Only once Phase 0 passes:
 
 1. **Forward-operator function**: `predict_neighborhood(fpa, rows, states)`
@@ -423,10 +515,12 @@ Only once Phase 0 passes:
    check: with `G=1` state covering the whole neighborhood's `η` range,
    this should reduce close to (not identical to, since real `η` varies
    continuously) native's own per-row rendering.
-2. **Jacobian assembly**: finite-difference or reuse GERT's existing
-   per-atmosphere analytic Jacobian, replicated per `η`-bin and gathered
-   through the known `η(i,j)` weights — generalizing Phase 0's `G=2` proof
-   to real `G`.
+2. **Jacobian assembly**: finite-difference (simplest, always available)
+   or reuse GERT's own per-atmosphere analytic Jacobian machinery
+   *per bin* (each bin's own `GERTRetrieval`-style Jacobian column block,
+   computed independently) — replicated per `η`-bin and gathered through
+   the known `η(i,j)` weights into the combined block-sparse `K`, then fed
+   to the standalone GN loop above, not to `GERTRetrieval` itself.
 3. **Realistic diagnostic solve**: re-run exactly §11p's row-910 hot-spot
    case (FPA2, `results/gd_joint_fpa2.pkl`'s underlying scene), this time
    solving jointly for `G≈10-20` `η`-bin atmospheres across rows ~890-935
@@ -441,6 +535,143 @@ Only once Phase 0 passes:
    autocorrelation-based resolution question.
 5. Only after 0-4 exist and are validated: consider ML, scoped narrowly
    (§5).
+
+**Phase 1-3 result, 2026-08-12 — built and run: real, substantial
+improvement, comparable to trace-and-select.**
+
+Implementation, split at the same architecture boundary the rest of this
+codebase already uses (`geocarb_gert` = rendering/geometry, `gert` =
+untouched, `scripts/` = retrieval logic):
+
+- `geocarb_gert.nearest_bin_scene(bin_centers, spectra)` — added to
+  `focalplane.py` alongside `edge_scene`/`barcode_scene`. `G`-way
+  generalization of `edge_scene`: hard nearest-bin assignment, never a
+  blend of two bins' spectra (the §9l/§9m trap §2 already warned about).
+- `geocarb_gert.gd_render.predict_neighborhood(fpa, rows, wn_hires,
+  radiance, ils, pad=4)` — added to `gd_render.py` alongside `image()`.
+  Item 1's own forward operator, exactly `image()`'s per-row loop
+  restricted to a padded row window. **Sanity check passed exactly**: on
+  a uniform scene, `predict_neighborhood(rows=505..520)` matches
+  `image()`'s own output for those rows to `0.000e+00` max abs
+  difference (bit-identical) — `pad=4` is more than sufficient for the
+  1.5-px PSF's kernel half-width.
+- `scripts/gd_joint_block_retrieve.py` — items 2-3, the standalone GN/OE
+  loop (not `GERTRetrieval`), reusing `StateVector.gas_scaling()`+
+  `.apply()` and `ForwardModel` per bin exactly as Phase 0 validated, now
+  with `G` bins and a first-difference Tikhonov smoothness prior on
+  adjacent bins' `co2_scale` (`Sa⁻¹ = γ·LᵀL + I/σ_abs²`, §3's own
+  regularization, needed because `G` bins this large is underdetermined
+  by construction).
+
+**A real bug caught and fixed before the first realistic result.** The
+first attempt held every bin at one *shared* prior atmosphere
+(`atm_center = atmosphere_at(0.0)`, Phase 0's own convention) with only
+`co2_scale` free. On the real scene this failed badly: a small 5-bin/
+11-row trial converged to a >1000% "peak-enhancement captured" number —
+obviously unphysical, and the residual stalled around 0.5-0.7 (barely
+better than the `x=1` starting guess) regardless of `G=1` vs `G=5`. Cause:
+unlike Phase 0's synthetic scene, the *real* along-slit truth
+(`als.atmosphere_at(x_km)`) varies CH4/H2O/CO/surface-pressure
+continuously too, not just CO2 — holding those at one shared reference
+value left the fit no way to explain that real variation except by
+distorting CO2 instead. **Fix**: give each bin its own local *true*
+nuisance-gas atmosphere, `als.atmosphere_at(x_km_bin)` — the same
+function that generated the real image's per-row truth — with only that
+bin's `co2_scale` retrieved relative to it. This isolates exactly the
+question this test asks (does bin-splicing recover CO2's keystone-diluted
+gradient) from a separate, larger question (jointly retrieving nuisance
+gases too, deferred). After the fix, residuals converge properly (rms
+~0.001, not stuck at 0.5) and results are physically sensible. Documented
+in the script's own docstring, not just here.
+
+**Result, rows 890-935 (46 rows), `G=15` bins, `γ=3.0`:**
+
+| | peak-enhancement captured |
+|---|---|
+| native (§11p) | 44% |
+| joint block, `G=15` | **81.7%** |
+| trace-and-select, tol=0.5km (§0a) | 84.9% |
+| undistorted (§11p) | 99% |
+
+Converged in **2 Gauss-Newton iterations**, ~81s wall time. Per-bin
+recovered CO2 matched local truth to <0.1 ppm at every one of the 15
+bins except right at the hot spot itself, where the discrete `G=15`
+grid under-resolves the peak's own narrow width (true rise +3.973 ppm,
+retrieved rise +3.245 ppm — the residual gap from 100%). The `G=1`
+control on the identical pixels recovered 413.77 ppm — diluted, far
+below the true peak (416.98 ppm), the same structural failure native
+exhibits, reproduced here as the requested control.
+
+**Regularization-strength check**: reran at `γ=0.3` and `γ=30` (100x
+range) — captured fraction unchanged at 81.7-81.8% either way. In this
+noise-free test, `G=15` over a 46-row/47k-pixel window is apparently not
+close enough to the underdetermined regime for the smoothness prior to
+matter much — the real pixel count (even after accounting for
+correlation) is ample at zero noise. §3's warned-about degeneracy would
+likely need either realistic noise added or `G` pushed substantially
+higher to actually bite; not yet tested.
+
+**Verdict**: the joint block is a real, working improvement over
+native's own per-row retrieval, closing most of the gap to undistorted
+and landing close to trace-and-select's own already-validated number —
+on this specific hot spot, at comparable cost (2 GN iterations, ~81s, vs.
+trace-and-select's near-instant per-row solve). It does *not* yet clearly
+beat trace-and-select (81.7% vs 84.9%) enough to justify the much larger
+engineering investment of a fully free per-bin nuisance state and a
+whole-slit sweep — that comparison is the natural next step before
+investing further here (§6 already lists "trace-and-select vs. joint
+block, head to head" as an open question; this is now partially
+answered, at one hot spot, with nuisance parameters idealized away on
+the joint-block side).
+
+**Not yet done**: whole-slit sweep (only one hot spot tested so far);
+realistic-noise version (this and everything above is still the
+noise-free convention this whole study has used); jointly-retrieved
+nuisance gases (currently idealized to local truth); averaging-kernel
+characterization (item 4 above); `G` sweep to find where regularization
+starts to matter.
+
+**Diagnostics, 2026-08-12 — built `scripts/gd_joint_block_diagnostics.py`,
+requested before running the whole-slit sweep.** Two additions:
+
+- **Spectral-residual inspection**: reshape `resid = y_true - forward(x)`
+  back to `(rows, cols)` image space and look at its structure directly,
+  plus a per-bin reduced chi-square (grouping real pixels by their own
+  nearest-bin assignment, same convention as `_chi2`/`chi2_outlier_mask`
+  elsewhere in this codebase). This is the diagnostic that survives once
+  real, noisy, truth-unknown data eventually replaces this synthetic
+  scene — unlike the capture-fraction number, which needs known truth and
+  won't be available then. On the row 890-935/`G=15` case: no sharp
+  staircase pattern at bin boundaries (the quantization-error signature
+  originally hypothesized) — residuals show a smooth diagonal band
+  instead, more consistent with a line-shape/dispersion residual than
+  under-resolved `G`.
+- **Bin placement**: the original `np.linspace`-in-eta uniform grid was
+  replaced with bin centers placed at quantiles of the *actual per-pixel
+  eta distribution* in the window (`pixel_density_bin_centers`) — not a
+  `rows_crossed`-based proxy (an earlier version of this function used
+  one, routed through each row's own center-column eta; it needed an
+  extra floor to handle a near-null row's real internal wiggle reading as
+  zero keystone, and only approximated what's already directly
+  available). Wherever keystone is large, more rows' column ranges
+  overlap a given eta interval, so real pixel density is genuinely
+  higher there — quantile spacing on the real per-pixel data reflects
+  this directly, no proxy needed.
+
+**Result on the same row 890-935/`G=15` case**: pixel-density bins beat
+uniform on every metric — capture 90.9% vs 81.7%, mean per-bin chi2
+1.87e-8 vs 2.58e-8 (lower/better), minimum pixel count per bin 890 vs 269
+(much better-conditioned). But the two schemes' bin *placements* are
+nearly indistinguishable in this window (visible in the diagnostic
+figure) — because `rows_crossed` only spans 9.09→9.55 across these 46
+rows, i.e. this window sits entirely in FPA2's high-keystone regime with
+no real keystone *contrast* for density-weighting to respond to. The
+scheme is working (better chi2/conditioning even from a small placement
+shift), but this window is not a real test of the "few bins near-null,
+many bins high-keystone" hypothesis — that needs a window (or the
+whole-slit sweep itself) spanning both regimes. Not yet run.
+
+Figure: `plots/gd_joint_block_diagnostics_fpa2_row890-935_G15.png`.
 
 ## 5. Where ML could still help, and how to keep it honest
 
