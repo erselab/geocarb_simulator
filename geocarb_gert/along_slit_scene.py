@@ -106,7 +106,17 @@ def p_surface_hpa(x_km):
 
 
 def atmosphere_at(x_km: float, h2o_scale_height_km: float = 2.0) -> AtmosphericProfile:
-    """The true ``AtmosphericProfile`` at one along-slit position [km].
+    """The true ``AtmosphericProfile`` at one along-slit position [km] --
+    i.e. this function *is* "the scene," in the physical sense
+    (``geocarb_gert.focalplane``'s module docstring has the full
+    terminology note: "scene" here means atmospheric state, not radiance).
+
+    To get radiance from a state returned here, run it through
+    ``gert.forward_model.ForwardModel`` -- radiance(x_km) = RT(atmosphere_at(x_km)).
+    See ``scripts/gd_joint_block_retrieve.py``'s ``spectrum_for`` or
+    ``scripts/gd_test.py``'s ``_band_setup`` for the concrete pattern. No
+    function in this module performs that RT step itself; it only ever
+    returns the state.
 
     Generalizes ``geocarb_gert.scene.reference_atmosphere`` to also vary
     CH4, CO, and surface pressure (that function only overrides CO2/H2O).

@@ -47,6 +47,33 @@ and the **spatial (N/S)** blur is a Gaussian PSF (``spatial_psf_fwhm_px``, GeoCa
 ≈ 1.5 px) applied along the slit after rendering.  Scenes are therefore *sharp
 truth* — a 25 % albedo step between neighbouring surfaces images with the true
 ~1.5-px PSF ramp, not an arbitrary blend width.
+
+Terminology note (2026-08-13): "scene," in the physical sense, means the true
+*atmospheric state* along the slit — ``state(η) -> AtmosphericProfile`` (see
+:func:`geocarb_gert.along_slit_scene.atmosphere_at`). Radiance is a *derived*
+quantity, ``radiance(η) = RT(state(η))``, computed by running that state
+through ``gert.forward_model.ForwardModel`` (e.g. the ``spectrum_for`` pattern
+in ``scripts/gd_joint_block_retrieve.py`` and ``scripts/gd_test.py``'s own
+``_band_setup``). The ``η ↔ x_km`` mapping is a fixed bijection
+(``x_km = η · SLIT_HALF_KM``), so state can equivalently be indexed by either.
+
+The "scene" *functions* in **this** module (:func:`edge_scene`,
+:func:`uniform_scene`, :func:`barcode_scene`, :func:`nearest_bin_scene`,
+:func:`random_scene`) do not operate at the state level — they take
+already-RT-computed spectra as input and return ``radiance(eta)`` callables, a
+computational shortcut for building simple synthetic test truths without
+re-running RT per query. They are radiance-space scene *assemblers*, not
+state-space scene *generators*. Where one selects rather than blends among
+precomputed spectra per query η (:func:`nearest_bin_scene`'s hard nearest-bin
+assignment), that stays within the state-space-only rule the joint bin
+retrieval depends on (JOINT_ROW_INVERSION_PLAN.md §2,
+docs/JOINT_BIN_RETRIEVAL_ATBD.html §4) — each returned spectrum is still
+exactly one atmosphere's own RT output. Where one blends
+(:func:`edge_scene`/:func:`barcode_scene` with ``softness > 0``), that is a
+deliberate synthetic-scene construction choice for testing, not a claim that
+blending real spectra is generally valid; the retrieval forward model itself
+never does this; it always re-runs ``ForwardModel`` on a bin's own live state
+(see ``gd_joint_block_retrieve.make_spectrum_fn``).
 """
 from __future__ import annotations
 
