@@ -97,6 +97,7 @@ def _solve_window(row_lo: int, row_hi: int):
     absco, wide_inst, geo, solar, albedo = (_SWEEP["absco"], _SWEEP["wide_inst"],
                                             _SWEEP["geo"], _SWEEP["solar"], _SWEEP["albedo"])
     wn_hires, ils, gamma, sigma_abs = _SWEEP["wn_hires"], _SWEEP["ils"], _SWEEP["gamma"], _SWEEP["sigma_abs"]
+    uniform, atm_center = _SWEEP["uniform"], _SWEEP["atm_center"]
 
     rows_win = np.arange(row_lo, row_hi + 1)
     width = len(rows_win)
@@ -104,9 +105,18 @@ def _solve_window(row_lo: int, row_hi: int):
     cols = np.arange(1024.0)
     eta_all = np.stack([_eta_of(FPA, cols, np.full(1024, float(i))) for i in rows_win])
     bin_centers = pixel_density_bin_centers(eta_all.ravel(), G)
-    x_km_bins = bin_centers * als.SLIT_HALF_KM
-    prior_atms = [als.atmosphere_at(float(xk)) for xk in x_km_bins]
-    prior_co2_ppm_bins = np.array([float(als.xco2_ppm(xk)) for xk in x_km_bins])
+    if uniform:
+        # true scene really is constant everywhere -- every bin's own
+        # "local truth" prior is the SAME shared atm_center, not a
+        # position-dependent one, so there is no legitimate resolution-
+        # floor/quantization effect possible: any nonzero bias below is
+        # unambiguously a bug, not a real physical ceiling.
+        prior_atms = [atm_center] * G
+        prior_co2_ppm_bins = np.full(G, float(als.xco2_ppm(0.0)))
+    else:
+        x_km_bins = bin_centers * als.SLIT_HALF_KM
+        prior_atms = [als.atmosphere_at(float(xk)) for xk in x_km_bins]
+        prior_co2_ppm_bins = np.array([float(als.xco2_ppm(xk)) for xk in x_km_bins])
 
     spectrum_for = make_spectrum_fn(absco, wide_inst, geo, solar, albedo)
     y_true = band["A"][rows_win, :].ravel()
@@ -128,7 +138,8 @@ def _solve_window(row_lo: int, row_hi: int):
     anchor_rows = np.arange(max(0, row_lo - PAD), min(ROW_MAX_IDX, row_hi + PAD) + 1)
     t0 = time.time()
     forward_hires, anchor_etas = build_forward_hires(FPA, rows_win, anchor_rows, bin_centers,
-                                                      spectrum_for, wn_hires, ils, pad=PAD)
+                                                      spectrum_for, wn_hires, ils, pad=PAD,
+                                                      atm_center=(atm_center if uniform else None))
     x_hires = gauss_newton_regularized(forward_hires, y_true, x0=np.ones(G), Sy_inv_diag=Sy_inv_diag,
                                        gamma=gamma, sigma_abs=sigma_abs, label=f"[{row_lo}-{row_hi}] hires")
     resid_hires = y_true - forward_hires(x_hires)
@@ -153,9 +164,15 @@ def main() -> int:
     ap.add_argument("--gamma", type=float, default=3.0)
     ap.add_argument("--sigma-abs", type=float, default=0.10)
     ap.add_argument("--n-workers", type=int, default=None)
+    ap.add_argument("--uniform", action="store_true", help="constant-atmosphere scene "
+                    "(no real along-slit variation at all) -- a debugging aid: with a "
+                    "genuinely uniform truth, correct bias is EXACTLY zero everywhere "
+                    "(no bin-quantization/resolution-floor effect is even possible), so "
+                    "any nonzero structure here is unambiguously implementation, not physics.")
     args = ap.parse_args()
 
-    print(f"Building realistic-scene FPA{FPA} band (renders the real 1024x1024 detector image)...", flush=True)
+    scene_label = "uniform" if args.uniform else "realistic"
+    print(f"Building {scene_label}-scene FPA{FPA} band (renders the real 1024x1024 detector image)...", flush=True)
     block = gg.geocarb_demo(verbose=False)["blocks"][0]
     _, _, geo = sample_geometries(block, n=1, seed=0)[0]
     absco = gert.ABSCOTable.load_all(str(GERT_ROOT / "input/absco/absco.h5"))
@@ -164,7 +181,7 @@ def main() -> int:
     gdt._G.update(dict(atm=atm_center, absco=absco, geo=geo, solar=solar))
     snr = gdt.DEFAULT_SNR_BY_FPA[FPA]
     band = gdt._band_setup(FPA, atm_center, absco, geo, solar, snr, 400, None,
-                           False, False, 32, False, 0)
+                           args.uniform, False, 32, False, 0)
     wide_win, wide_inst, albedo = band_basics(FPA, atm_center, absco, geo, solar)
     print("done.\n", flush=True)
 
@@ -175,7 +192,8 @@ def main() -> int:
 
     _SWEEP.update(dict(band=band, absco=absco, wide_inst=wide_inst, geo=geo, solar=solar,
                        albedo=albedo, wn_hires=band["wn_hires"], ils=band["ils"],
-                       gamma=args.gamma, sigma_abs=args.sigma_abs))
+                       gamma=args.gamma, sigma_abs=args.sigma_abs,
+                       uniform=args.uniform, atm_center=atm_center))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
     print(f"solving with {n_workers} workers...", flush=True)
@@ -198,10 +216,11 @@ def main() -> int:
     n_ok = sum(1 for r in results.values() if "error" not in r)
     print(f"\nall done ({time.time()-t0:.0f}s): {n_ok}/{len(tiles)} windows solved successfully", flush=True)
 
-    out_path = REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}.pkl"
+    suffix = "_uniform" if args.uniform else ""
+    out_path = REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}.pkl"
     out_path.parent.mkdir(exist_ok=True)
     with open(out_path, "wb") as f:
-        pickle.dump({"results": results, "tiles": tiles, "fpa": FPA,
+        pickle.dump({"results": results, "tiles": tiles, "fpa": FPA, "uniform": args.uniform,
                     "gamma": args.gamma, "sigma_abs": args.sigma_abs,
                     "g_ratio": G_RATIO, "min_window": MIN_WINDOW, "pad": PAD}, f)
     print(f"saved {out_path}")

@@ -34,7 +34,7 @@ keystone/smile spread is present in the synthetic measurement.
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_block_keystone_free_sweep.py \\
         [--n-workers N]
 Output: results/gd_joint_block_keystone_free_fpa2.pkl
-        plots/gd_joint_block_keystone_free_fpa2.png
+        plots/joint_block/gd_joint_block_keystone_free_fpa2.png
 """
 from __future__ import annotations
 
@@ -120,17 +120,23 @@ def build_forward_no_keystone(fpa, rows, bin_centers, prior_atms, spectrum_for, 
 
 
 def build_forward_hires_no_keystone(fpa, rows_win, anchor_rows, bin_centers, spectrum_for,
-                                    wn_hires, ils, pad=4):
+                                    wn_hires, ils, pad=4, atm_center=None):
     """gd_joint_block_hires_test.build_forward_hires, rendered with
     predict_neighborhood_no_keystone. With keystone removed, every column
     in a row already shares one eta, so the coarse-vs-hires distinction
     here is purely between-row interpolation (step vs piecewise-linear
-    across rows), not within-row attribution."""
+    across rows), not within-row attribution.
+
+    atm_center : optional shared-atmosphere override for a uniform-scene
+    test -- see gd_joint_block_hires_test.build_forward_hires's own note."""
     anchor_etas = _eta_of(fpa, np.full(len(anchor_rows), 512.0), anchor_rows.astype(float))
     order = np.argsort(anchor_etas)
     anchor_etas_sorted = anchor_etas[order]
-    anchor_atms = [als.atmosphere_at(float(e * als.SLIT_HALF_KM)) for e in anchor_etas_sorted]
     G_eff = len(anchor_etas_sorted)
+    if atm_center is not None:
+        anchor_atms = [atm_center] * G_eff
+    else:
+        anchor_atms = [als.atmosphere_at(float(e * als.SLIT_HALF_KM)) for e in anchor_etas_sorted]
 
     cache_co2 = np.full(G_eff, np.nan)
     cache_S = [None] * G_eff
@@ -155,11 +161,16 @@ def _solve_window(row_lo: int, row_hi: int, bin_centers: np.ndarray, G: int):
                                             _SWEEP["geo"], _SWEEP["solar"], _SWEEP["albedo"])
     wn_hires, ils, gamma, sigma_abs = _SWEEP["wn_hires"], _SWEEP["ils"], _SWEEP["gamma"], _SWEEP["sigma_abs"]
     pad = _SWEEP["pad"]
+    uniform, atm_center = _SWEEP["uniform"], _SWEEP["atm_center"]
 
     rows_win = np.arange(row_lo, row_hi + 1)
-    x_km_bins = bin_centers * als.SLIT_HALF_KM
-    prior_atms = [als.atmosphere_at(float(xk)) for xk in x_km_bins]
-    prior_co2_ppm_bins = np.array([float(als.xco2_ppm(xk)) for xk in x_km_bins])
+    if uniform:
+        prior_atms = [atm_center] * G
+        prior_co2_ppm_bins = np.full(G, float(als.xco2_ppm(0.0)))
+    else:
+        x_km_bins = bin_centers * als.SLIT_HALF_KM
+        prior_atms = [als.atmosphere_at(float(xk)) for xk in x_km_bins]
+        prior_co2_ppm_bins = np.array([float(als.xco2_ppm(xk)) for xk in x_km_bins])
 
     spectrum_for = make_spectrum_fn(absco, wide_inst, geo, solar, albedo)
 
@@ -185,7 +196,8 @@ def _solve_window(row_lo: int, row_hi: int, bin_centers: np.ndarray, G: int):
     anchor_rows = np.arange(max(0, row_lo - pad), min(ROW_MAX_IDX, row_hi + pad) + 1)
     t0 = time.time()
     forward_hires, anchor_etas = build_forward_hires_no_keystone(FPA, rows_win, anchor_rows, bin_centers,
-                                                                  spectrum_for, wn_hires, ils, pad=pad)
+                                                                  spectrum_for, wn_hires, ils, pad=pad,
+                                                                  atm_center=(atm_center if uniform else None))
     x_hires = gauss_newton_regularized(forward_hires, y_true, x0=np.ones(G), Sy_inv_diag=Sy_inv_diag,
                                        gamma=gamma, sigma_abs=sigma_abs, label=f"[{row_lo}-{row_hi}] hires-nk")
     resid_hires = y_true - forward_hires(x_hires)
@@ -208,6 +220,12 @@ def _worker(task):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n-workers", type=int, default=None)
+    ap.add_argument("--uniform", action="store_true", help="constant-atmosphere scene, "
+                    "for isolating implementation bugs from real resolution-floor effects "
+                    "-- see gd_joint_block_whole_slit_sweep.py's own --uniform for the "
+                    "rationale. Tiles/G/bin_centers are still reused from the REALISTIC-"
+                    "scene source pickle regardless (window tiling is purely geometric, "
+                    "independent of scene content), only the band and prior atmospheres change.")
     args = ap.parse_args()
 
     src_path = REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}.pkl"
@@ -218,7 +236,8 @@ def main() -> int:
     print(f"reusing {len(src_windows)} windows/G/bin_centers from {src_path.name} "
          f"(gamma={gamma}, sigma_abs={sigma_abs}, pad={pad})", flush=True)
 
-    print(f"Building realistic-scene FPA{FPA} band (same underlying scene as the real sweep)...", flush=True)
+    scene_label = "uniform" if args.uniform else "realistic"
+    print(f"Building {scene_label}-scene FPA{FPA} band...", flush=True)
     block = gg.geocarb_demo(verbose=False)["blocks"][0]
     _, _, geo = sample_geometries(block, n=1, seed=0)[0]
     absco = gert.ABSCOTable.load_all(str(GERT_ROOT / "input/absco/absco.h5"))
@@ -227,13 +246,14 @@ def main() -> int:
     gdt._G.update(dict(atm=atm_center, absco=absco, geo=geo, solar=solar))
     snr = gdt.DEFAULT_SNR_BY_FPA[FPA]
     band = gdt._band_setup(FPA, atm_center, absco, geo, solar, snr, 400, None,
-                           False, False, 32, False, 0)
+                           args.uniform, False, 32, False, 0)
     wide_win, wide_inst, albedo = band_basics(FPA, atm_center, absco, geo, solar)
     print("done.\n", flush=True)
 
     _SWEEP.update(dict(band=band, absco=absco, wide_inst=wide_inst, geo=geo, solar=solar,
                        albedo=albedo, wn_hires=band["wn_hires"], ils=band["ils"],
-                       gamma=gamma, sigma_abs=sigma_abs, pad=pad))
+                       gamma=gamma, sigma_abs=sigma_abs, pad=pad,
+                       uniform=args.uniform, atm_center=atm_center))
 
     tasks = [(w["row_lo"], w["row_hi"], w["bin_centers"], w["G"]) for w in src_windows]
 
@@ -258,11 +278,12 @@ def main() -> int:
     n_ok = sum(1 for r in results.values() if "error" not in r)
     print(f"\nall done ({time.time()-t0:.0f}s): {n_ok}/{len(tasks)} windows solved successfully", flush=True)
 
-    out_path = REPO_ROOT / "results" / f"gd_joint_block_keystone_free_fpa{FPA}.pkl"
+    suffix = "_uniform" if args.uniform else ""
+    out_path = REPO_ROOT / "results" / f"gd_joint_block_keystone_free_fpa{FPA}{suffix}.pkl"
     out_path.parent.mkdir(exist_ok=True)
     with open(out_path, "wb") as f:
-        pickle.dump({"results": results, "fpa": FPA, "gamma": gamma, "sigma_abs": sigma_abs,
-                    "pad": pad, "source": str(src_path)}, f)
+        pickle.dump({"results": results, "fpa": FPA, "uniform": args.uniform, "gamma": gamma,
+                    "sigma_abs": sigma_abs, "pad": pad, "source": str(src_path)}, f)
     print(f"saved {out_path}")
 
     # ================= comparison plot =================
@@ -273,7 +294,8 @@ def main() -> int:
             row_lo, row_hi = w["row_lo"], w["row_hi"]
             rows_win = np.arange(row_lo, row_hi + 1)
             eta_win = _eta_of(FPA, np.full(len(rows_win), 512.0), rows_win.astype(float))
-            true_win = als.xco2_ppm(eta_win * als.SLIT_HALF_KM)
+            true_win = (np.full(len(rows_win), float(als.xco2_ppm(0.0))) if args.uniform
+                       else als.xco2_ppm(eta_win * als.SLIT_HALF_KM))
             bin_centers = w["bin_centers"]
             retrieved_ppm_coarse = w["prior_co2_ppm_bins"] * w["x_coarse"]
             retrieved_ppm_hires = w["prior_co2_ppm_bins"] * w["x_hires"]
@@ -292,7 +314,14 @@ def main() -> int:
         return rows_all, coarse_all - true_all, hires_all - true_all
 
     rows_nk, bias_coarse_nk, bias_hires_nk = stitch(results)
-    rows_real, bias_coarse_real, bias_hires_real = stitch(src["results"])
+    if args.uniform:
+        ref_path = REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}_uniform.pkl"
+        with open(ref_path, "rb") as f:
+            ref = pickle.load(f)
+        print(f"reference (keystone-present) curve from {ref_path.name}")
+    else:
+        ref = src
+    rows_real, bias_coarse_real, bias_hires_real = stitch(ref["results"])
 
     def stats(b):
         return dict(mean=float(b.mean()), rms=float(np.sqrt(np.mean(b ** 2))), max=float(np.max(np.abs(b))))
@@ -343,9 +372,9 @@ def main() -> int:
     fig.suptitle(f"FPA{FPA}: does removing keystone/smile close the joint block's remaining gap?", fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
 
-    plots_dir = REPO_ROOT / "plots"
-    plots_dir.mkdir(exist_ok=True)
-    out_fig = plots_dir / f"gd_joint_block_keystone_free_fpa{FPA}.png"
+    plots_dir = REPO_ROOT / "plots" / "joint_block"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    out_fig = plots_dir / f"gd_joint_block_keystone_free_fpa{FPA}{suffix}.png"
     fig.savefig(out_fig, dpi=140, bbox_inches="tight")
     plt.close(fig)
     print(f"saved {out_fig}")

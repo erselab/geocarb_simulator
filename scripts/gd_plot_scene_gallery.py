@@ -114,8 +114,8 @@ def main() -> int:
     ap.add_argument("--scene", choices=["realistic", "uniform", "barcode"], default="realistic")
     args = ap.parse_args()
 
-    plots_dir = REPO_ROOT / "plots"
-    plots_dir.mkdir(exist_ok=True)
+    plots_dir = REPO_ROOT / "plots" / "scene_gallery"
+    plots_dir.mkdir(parents=True, exist_ok=True)
     fig = make_figure(args.scene)
     if fig is None:
         print("no figure produced (missing data)")

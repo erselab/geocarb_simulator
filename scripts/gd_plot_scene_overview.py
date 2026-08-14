@@ -202,9 +202,9 @@ def main() -> int:
     args = ap.parse_args()
     fpas = [int(x) for x in args.fpas.split(",")]
 
-    plots_dir = REPO_ROOT / "plots"
-    plots_dir.mkdir(exist_ok=True)
     tag = fpas_tag(fpas)
+    plots_dir = REPO_ROOT / "plots" / "band_stress_test" / tag
+    plots_dir.mkdir(parents=True, exist_ok=True)
     print(f"{'+'.join(f'FPA{f}' for f in fpas)} ...", flush=True)
     fig = make_figure(fpas)
     if fig is None:

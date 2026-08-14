@@ -58,7 +58,9 @@ def main() -> int:
             ax2.set_xticklabels([])
 
     fig.tight_layout()
-    out_path = REPO_ROOT / "plots" / "gd_along_slit_atm_profiles_fpa2.png"
+    out_dir = REPO_ROOT / "plots" / "scene_gallery"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "gd_along_slit_atm_profiles_fpa2.png"
     fig.savefig(out_path, dpi=140)
     print(f"saved {out_path}")
     return 0

@@ -107,8 +107,8 @@ def main() -> int:
     ax.set_title("trace-and-select sample count per row", fontsize=9)
 
     fig.tight_layout()
-    plots_dir = REPO_ROOT / "plots"
-    plots_dir.mkdir(exist_ok=True)
+    plots_dir = REPO_ROOT / "plots" / "trace_and_select"
+    plots_dir.mkdir(parents=True, exist_ok=True)
     out_path = plots_dir / f"gd_trace_vs_native_fpa2_tol{args.tolerance_km:g}.png"
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close(fig)

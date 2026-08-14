@@ -13,7 +13,7 @@ this script follows from), so it's shown here for continuity/reference
 only, not as a target the joint block should be expected to approach.
 
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_block_vs_native_plot.py
-Output: plots/gd_joint_block_vs_native_fpa2.png
+Output: plots/joint_block/gd_joint_block_vs_native_fpa2.png
 """
 from __future__ import annotations
 
@@ -142,8 +142,8 @@ def main() -> int:
     fig.suptitle("Joint block (whole-slit adaptive sweep) vs. native/rectified/undistorted", fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
 
-    plots_dir = REPO_ROOT / "plots"
-    plots_dir.mkdir(exist_ok=True)
+    plots_dir = REPO_ROOT / "plots" / "joint_block"
+    plots_dir.mkdir(parents=True, exist_ok=True)
     out_path = plots_dir / f"gd_joint_block_vs_native_fpa{FPA}.png"
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close(fig)

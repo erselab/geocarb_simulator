@@ -7,7 +7,7 @@ from the sweep's own saved state vectors (x_coarse, x_hires per window) --
 no re-solving.
 
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_block_whole_slit_plot.py
-Output: plots/gd_joint_block_whole_slit_fpa2.png
+Output: plots/joint_block/gd_joint_block_whole_slit_fpa2.png
 """
 from __future__ import annotations
 
@@ -131,8 +131,8 @@ def main() -> int:
     ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc="upper left")
 
     fig.tight_layout()
-    plots_dir = REPO_ROOT / "plots"
-    plots_dir.mkdir(exist_ok=True)
+    plots_dir = REPO_ROOT / "plots" / "joint_block"
+    plots_dir.mkdir(parents=True, exist_ok=True)
     out_path = plots_dir / f"gd_joint_block_whole_slit_fpa{FPA}.png"
     fig.savefig(out_path, dpi=140, bbox_inches="tight")
     plt.close(fig)

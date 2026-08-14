@@ -17,7 +17,7 @@ that's what makes the bin-vs-row ground comparison meaningful at all.
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_block_ground_projection.py \\
         [--row-min 890] [--row-max 935] [--n-bins 15] \\
         [--center-lat 0.0] [--center-lon -95.0] [--context-pad 60]
-Output: plots/gd_joint_block_ground_projection_fpa2_row{row_min}-{row_max}_G{n_bins}.png
+Output: plots/joint_block/gd_joint_block_ground_projection_fpa2_row{row_min}-{row_max}_G{n_bins}.png
 """
 from __future__ import annotations
 
@@ -176,8 +176,8 @@ def main() -> int:
     ax2.legend(fontsize=8.5, loc="center left", bbox_to_anchor=(1.02, 0.5))
 
     fig.tight_layout()
-    plots_dir = REPO_ROOT / "plots"
-    plots_dir.mkdir(exist_ok=True)
+    plots_dir = REPO_ROOT / "plots" / "joint_block"
+    plots_dir.mkdir(parents=True, exist_ok=True)
     out_path = plots_dir / f"gd_joint_block_ground_projection_fpa{FPA}_row{row_min}-{row_max}_G{G}.png"
     fig.savefig(out_path, dpi=140, bbox_inches="tight")
     plt.close(fig)

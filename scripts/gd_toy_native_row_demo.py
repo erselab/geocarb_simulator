@@ -257,8 +257,8 @@ def main() -> int:
     fig.suptitle(f"Native pipeline, one row: FPA{fpa} ({label}), row {target_row} "
                 f"(x $\\approx$ {xtrue_x_km:+.0f} km along slit)", fontsize=13)
 
-    plots_dir = REPO_ROOT / "plots"
-    plots_dir.mkdir(exist_ok=True)
+    plots_dir = REPO_ROOT / "plots" / "toy_diagnostics"
+    plots_dir.mkdir(parents=True, exist_ok=True)
     out_path = plots_dir / f"gd_toy_native_row_demo_fpa{fpa}_row{target_row}.png"
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close(fig)

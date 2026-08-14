@@ -28,7 +28,7 @@ pixel still traces back to exactly one anchor's own independent RT
 output, never a blend of two anchors' spectra.
 
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_block_hires_test.py
-Output: plots/gd_joint_block_hires_test_fpa2_row890-935_G15.png
+Output: plots/joint_block/gd_joint_block_hires_test_fpa2_row890-935_G15.png
 """
 from __future__ import annotations
 
@@ -60,18 +60,28 @@ from geocarb_gert import gd_render  # noqa: E402
 from geocarb_gert.gd_polynomials import rows_crossed  # noqa: E402
 
 
-def build_forward_hires(fpa, rows_win, anchor_rows, bin_centers, spectrum_for, wn_hires, ils, pad=4):
+def build_forward_hires(fpa, rows_win, anchor_rows, bin_centers, spectrum_for, wn_hires, ils, pad=4,
+                        atm_center=None):
     """G_eff anchors, one per real detector row in the padded window
     (native row resolution). Each anchor's co2_scale is linearly
     interpolated from the G-dim retrieval state x at bin_centers --
     state-space only, never radiance-space. Reuses nearest_bin_scene
     unchanged at G_eff resolution instead of G, so within-row keystone
-    splicing is resolved at native row granularity."""
+    splicing is resolved at native row granularity.
+
+    atm_center : optional. When given, every anchor uses this SAME shared
+    atmosphere instead of its own position-dependent als.atmosphere_at(...)
+    -- for a uniform-scene test, where the true nuisance state really is
+    constant everywhere, so per-anchor position-dependent priors would
+    themselves be a (small) source of mismatch."""
     anchor_etas = _eta_of(fpa, np.full(len(anchor_rows), 512.0), anchor_rows.astype(float))
     order = np.argsort(anchor_etas)
     anchor_etas_sorted = anchor_etas[order]
-    anchor_atms = [als.atmosphere_at(float(e * als.SLIT_HALF_KM)) for e in anchor_etas_sorted]
     G_eff = len(anchor_etas_sorted)
+    if atm_center is not None:
+        anchor_atms = [atm_center] * G_eff
+    else:
+        anchor_atms = [als.atmosphere_at(float(e * als.SLIT_HALF_KM)) for e in anchor_etas_sorted]
 
     cache_co2 = np.full(G_eff, np.nan)
     cache_S = [None] * G_eff
@@ -295,8 +305,8 @@ def main() -> int:
                 f"G={args.n_bins} free parameters", fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
 
-    plots_dir = REPO_ROOT / "plots"
-    plots_dir.mkdir(exist_ok=True)
+    plots_dir = REPO_ROOT / "plots" / "joint_block"
+    plots_dir.mkdir(parents=True, exist_ok=True)
     out_path = plots_dir / f"gd_joint_block_hires_test_fpa2_row{args.row_min}-{args.row_max}_G{args.n_bins}.png"
     fig.savefig(out_path, dpi=140, bbox_inches="tight")
     plt.close(fig)

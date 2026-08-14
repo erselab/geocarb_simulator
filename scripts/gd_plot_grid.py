@@ -249,9 +249,9 @@ def main() -> int:
     pipelines_filter = [p.strip() for p in args.pipelines.split(",")]
     pipe_suffix = "" if sorted(pipelines_filter) == sorted(ALL_PIPELINES) else "_" + "_".join(sorted(pipelines_filter))
 
-    plots_dir = REPO_ROOT / "plots"
-    plots_dir.mkdir(exist_ok=True)
     tag = fpas_tag(fpas)
+    plots_dir = REPO_ROOT / "plots" / "band_stress_test" / tag
+    plots_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = plots_dir / f"gd_joint_{tag}{pipe_suffix}_all_grid.pdf"
     n_saved = 0
     with PdfPages(pdf_path) as pdf:

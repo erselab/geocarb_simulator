@@ -163,8 +163,8 @@ def main() -> int:
                 fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
 
-    plots_dir = REPO_ROOT / "plots"
-    plots_dir.mkdir(exist_ok=True)
+    plots_dir = REPO_ROOT / "plots" / "toy_diagnostics"
+    plots_dir.mkdir(parents=True, exist_ok=True)
     out_path = plots_dir / f"gd_toy_trace_pixels_fpa{FPA}.png"
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close(fig)

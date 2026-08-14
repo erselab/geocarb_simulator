@@ -28,7 +28,7 @@ this script only adds the two new pieces of analysis, no new retrieval
 machinery.
 
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_block_diagnostics.py
-Output: plots/gd_joint_block_diagnostics_fpa2_row890-935_G15.png
+Output: plots/joint_block/gd_joint_block_diagnostics_fpa2_row890-935_G15.png
 """
 from __future__ import annotations
 
@@ -235,8 +235,8 @@ def main() -> int:
                 f"G={args.n_bins}, gamma={args.gamma}", fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
 
-    plots_dir = REPO_ROOT / "plots"
-    plots_dir.mkdir(exist_ok=True)
+    plots_dir = REPO_ROOT / "plots" / "joint_block"
+    plots_dir.mkdir(parents=True, exist_ok=True)
     out_path = plots_dir / f"gd_joint_block_diagnostics_fpa2_row{args.row_min}-{args.row_max}_G{args.n_bins}.png"
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close(fig)
