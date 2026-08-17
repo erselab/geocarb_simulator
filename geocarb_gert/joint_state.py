@@ -194,6 +194,33 @@ class StateSpec:
                            else np.interp(etas, p.positions, v))
         return out
 
+    def snapshot(self, x, **extra) -> dict:
+        """A complete, self-describing record of this solve's state vector.
+
+        Standing project rule: every run saves the ENTIRE state vector and
+        all residuals, not just the quantity of interest. That includes the
+        FROZEN rows -- "what was held fixed, and at what value" is exactly
+        what is needed to interpret a result months later, and it is not
+        recoverable from the free rows alone. It is also what makes two runs
+        with different free/frozen splits comparable at all.
+
+        Every row records its positions, prior, retrieved values, whether it
+        was free, its kind, and its prior sigma/correlation length, so the
+        record reproduces the solve without reference to the code that
+        produced it.
+        """
+        x = np.asarray(x, dtype=float)
+        vals = self.unpack(x)
+        return dict(
+            params={p.name: dict(positions=p.positions.copy(), prior=p.prior.copy(),
+                                 values=vals[p.name].copy(), free=bool(p.free),
+                                 kind=p.kind, sigma=float(p.sigma),
+                                 corr_length=float(p.corr_length))
+                    for p in self.params},
+            x=x.copy(), free_names=list(self.free_names), n_free=int(self.n_free),
+            slices={k: (v.start, v.stop) for k, v in self.slices().items()},
+            **extra)
+
     def __repr__(self) -> str:
         rows = ", ".join(f"{p.name}[{p.n}]{'' if p.free else ' FROZEN'}" for p in self.params)
         return f"StateSpec({rows}; n_free={self.n_free})"
@@ -226,3 +253,69 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                   free=(name in free), kind=kinds.get(name, "scale"))
         for name, fn in fields.items()
     ])
+
+
+def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
+                       step: float = 1e-3, max_iter: int = 15, tol: float = 1e-5,
+                       label: str = "", verbose: bool = True):
+    """Regularized Gauss-Newton over whatever :class:`StateSpec` says is free.
+
+    The generic counterpart of `gd_joint_block_retrieve.gauss_newton_
+    regularized`, which hardwired a single flat CO2 vector and a
+    `gamma*(L^T L) + I/sigma_abs**2` prior. Here the free parameters, their
+    ordering, and the prior precision all come from `spec`, so freeing
+    surface pressure or freezing CO2 is a flag rather than a code change.
+
+    Rodgers form, unchanged:
+        dx = (K^T Sy^-1 K + Sa^-1)^-1 (K^T Sy^-1 resid - Sa^-1 (x - x_a))
+
+    `Sa_inv` is `spec.Sa_inv()` -- block diagonal, one exponential-correlation
+    block per free row, each with its own sigma and correlation length in
+    eta. JOINT_BLOCK_MIGRATION_PLAN.md Sec.4.0 showed the old two-constant
+    form is an implicit, awkwardly parameterized special case of exactly
+    this: there, the decorrelation length and the marginal prior std were
+    both set jointly by the ratio (1/sigma_abs^2)/gamma and could only be
+    recovered by inverting the matrix. Here they are independent, named, and
+    in physical units.
+
+    One finite-difference step serves every parameter because all rows use
+    `kind="scale"`: each element is a multiplier on its own prior, so they
+    are all O(1) regardless of whether the underlying quantity is 416 ppm or
+    1013 hPa. A row switched to `kind="absolute"` would need its own step,
+    which is why this asserts rather than silently mis-scaling.
+    """
+    for p in spec.free_params:
+        if p.kind != "scale":
+            raise NotImplementedError(
+                f"{p.name}: gauss_newton_state uses one shared finite-difference "
+                f"step, which assumes kind='scale' (elements are O(1) multipliers). "
+                f"kind='absolute' needs a per-row step -- not implemented.")
+
+    x = spec.x0()
+    x_a = x.copy()
+    n = x.size
+    if n == 0:
+        raise ValueError("no free parameters -- every row is frozen")
+    Sa_inv = spec.Sa_inv()
+    Sy_inv_diag = np.asarray(Sy_inv_diag, dtype=float)
+
+    for it in range(max_iter):
+        y0 = forward(x)
+        resid = y_true - y0
+        K = np.empty((y0.size, n))
+        for k in range(n):
+            xp = x.copy()
+            xp[k] += step
+            K[:, k] = (forward(xp) - y0) / step
+        KtSyinv = K.T * Sy_inv_diag[None, :]
+        A = KtSyinv @ K + Sa_inv
+        b = KtSyinv @ resid - Sa_inv @ (x - x_a)
+        dx = np.linalg.solve(A, b)
+        x = x + dx
+        if verbose:
+            rms = float(np.sqrt(np.mean(resid ** 2)))
+            print(f"  [{label}] iter {it}: |dx|={np.linalg.norm(dx):.3e} "
+                  f"rms_resid={rms:.4g}", flush=True)
+        if np.linalg.norm(dx) < tol:
+            break
+    return x
