@@ -42,7 +42,9 @@ from pathlib import Path
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-GERT_ROOT = Path("/scratch/scrowel3_lab/gert")
+from geocarb_gert import gert_root  # noqa: E402
+
+GERT_ROOT = gert_root()   # $GERT_ROOT -> ../../gert -> ../gert -> HPC scratch
 
 import geosat_geometry as gg
 import gert

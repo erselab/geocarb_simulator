@@ -35,9 +35,10 @@ from gd_toy_trace_retrieve import retrieve_at  # noqa: E402
 import geosat_geometry as gg  # noqa: E402
 import gert  # noqa: E402
 from geocarb_gert import along_slit_scene as als, sample_geometries  # noqa: E402
+from geocarb_gert import gert_root  # noqa: E402
 from geocarb_gert.gd_render import available_cpus  # noqa: E402
 
-GERT_ROOT = Path("/scratch/scrowel3_lab/gert")
+GERT_ROOT = gert_root()   # $GERT_ROOT -> ../../gert -> ../gert -> HPC scratch
 FPA = 2
 
 _SWEEP = {}

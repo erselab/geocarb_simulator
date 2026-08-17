@@ -68,6 +68,7 @@ import geosat_geometry as gg  # noqa: E402
 import gert  # noqa: E402
 from geocarb_gert import GEOCARB_BANDS, albedo_for, along_slit_scene as als, nearest_bin_scene, sample_geometries  # noqa: E402
 from geocarb_gert import gd_render  # noqa: E402
+from geocarb_gert import gert_root  # noqa: E402
 from geocarb_gert.gd_polynomials import real_wavenumber_range, xy_to_wavelength_slit  # noqa: E402
 from geocarb_gert.gd_render import s_max  # noqa: E402
 
@@ -83,25 +84,7 @@ from gert.rt_solver import SingleScatterSolver  # noqa: E402
 # 2026-08-17, when the cluster was unavailable -- nothing else in the
 # joint-block chain is HPC-specific, since the sweep already runs standalone
 # on a local multiprocessing Pool when --task-id/--n-tasks are omitted).
-def _resolve_gert_root() -> Path:
-    """$GERT_ROOT, else the sibling `../../gert` checkout this repo already
-    reaches (the relationship `geocarb_gert` itself relies on), else the HPC
-    scratch path. Checked for an actual `input/` tree rather than mere
-    existence, since that is what absco.h5/solar.h5 live under."""
-    env = os.environ.get("GERT_ROOT")
-    if env:
-        return Path(env)
-    # ../../gert is the documented relationship (geocarb_gert is an adapter
-    # over the gert checkout two levels up); ../gert is checked too so a
-    # flat side-by-side layout also works.
-    for rel in ("../../gert", "../gert"):
-        cand = (REPO_ROOT / rel).resolve()
-        if (cand / "input").is_dir():
-            return cand
-    return Path("/scratch/scrowel3_lab/gert")
-
-
-GERT_ROOT = _resolve_gert_root()
+GERT_ROOT = gert_root()   # geocarb_gert.paths -- shared by every driver
 FPA = 2
 
 

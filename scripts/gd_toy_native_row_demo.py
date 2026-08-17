@@ -66,6 +66,7 @@ import matplotlib.pyplot as plt
 
 import geosat_geometry as gg
 from geocarb_gert import GEOCARB_BANDS, albedo_for, along_slit_scene as als, sample_geometries
+from geocarb_gert import gert_root  # noqa: E402
 from geocarb_gert import geocarb_noise_model
 from geocarb_gert.focalplane import gaussian_blur_rows
 from geocarb_gert.gd_polynomials import real_wavenumber_range, xy_to_wavelength_slit
@@ -78,7 +79,7 @@ from gert.instrument_config import Instrument
 from gert.rt_solver import SingleScatterSolver
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-GERT_ROOT = Path("/scratch/scrowel3_lab/gert")
+GERT_ROOT = gert_root()   # $GERT_ROOT -> ../../gert -> ../gert -> HPC scratch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gd_test as gdt   # reuse the real retrieval code, unmodified

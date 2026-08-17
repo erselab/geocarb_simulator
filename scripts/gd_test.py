@@ -103,6 +103,7 @@ import numpy as np
 
 import geosat_geometry as gg
 from geocarb_gert import GEOCARB_BANDS, albedo_for, along_slit_scene as als, sample_geometries
+from geocarb_gert import gert_root  # noqa: E402
 from geocarb_gert import gd_render, build_geocarb_instrument
 from geocarb_gert import (RADIOMETRIC_SPEC_BY_FPA, geocarb_noise_model,
                           geocarb_noise_model_multi)
@@ -118,7 +119,7 @@ from gert.retrieval import GERTRetrieval, StateVector
 from gert.rt_solver import SingleScatterSolver
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-GERT_ROOT = Path("/scratch/scrowel3_lab/gert")
+GERT_ROOT = gert_root()   # $GERT_ROOT -> ../../gert -> ../gert -> HPC scratch
 
 WELL_MIXED_GASES = {"o2", "n2o"}
 DEFAULT_SNR_BY_FPA = {0: 400.0, 1: 300.0, 2: 300.0, 3: 200.0}

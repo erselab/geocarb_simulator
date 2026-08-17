@@ -43,16 +43,9 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 # HPC scratch path. Deliberately NOT an absolute machine-specific default --
 # an earlier version hardcoded one workstation's Google-Drive path, which
 # breaks the moment the tree is relocated.
-def _default_gert_root() -> str:
-    _repo = Path(__file__).resolve().parent.parent
-    for rel in ("../../gert", "../gert"):
-        cand = (_repo / rel).resolve()
-        if (cand / "input").is_dir():
-            return str(cand)
-    return "/scratch/scrowel3_lab/gert"
+from geocarb_gert import gert_root  # noqa: E402
 
-
-DEFAULT_GERT_ROOT = os.environ.get("GERT_ROOT", _default_gert_root())
+DEFAULT_GERT_ROOT = str(gert_root())
 
 
 def cache_path(cache_dir: Path, fpa: int, uniform: bool) -> Path:

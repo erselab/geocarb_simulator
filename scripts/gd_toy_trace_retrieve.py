@@ -37,10 +37,11 @@ import gd_test as gdt  # noqa: E402
 import geosat_geometry as gg  # noqa: E402
 import gert  # noqa: E402
 from geocarb_gert import along_slit_scene as als, sample_geometries  # noqa: E402
+from geocarb_gert import gert_root  # noqa: E402
 from geocarb_gert.gd_polynomials import rows_crossed, xy_to_wavelength_slit  # noqa: E402
 from geocarb_gert.gd_render import s_max  # noqa: E402
 
-GERT_ROOT = Path("/scratch/scrowel3_lab/gert")
+GERT_ROOT = gert_root()   # $GERT_ROOT -> ../../gert -> ../gert -> HPC scratch
 MIN_WINDOW = 4   # rows on each side, floor for near-null-keystone targets
 
 
