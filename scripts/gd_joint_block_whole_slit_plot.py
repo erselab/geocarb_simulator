@@ -43,6 +43,14 @@ def main() -> int:
     results = d["results"]
     windows = sorted(results.values(), key=lambda r: r["row_lo"])
 
+    # --hires-only sweeps (--anchor-density / --state-interp variants) carry no
+    # x_coarse/resid_coarse_rms at all, since the coarse solve is unaffected by
+    # those flags and re-running it would just reproduce the baseline. Detect
+    # that once here and drop the coarse curves rather than KeyError.
+    has_coarse = all("x_coarse" in w for w in windows)
+    if not has_coarse:
+        print("no x_coarse in this pickle (hi-res-only sweep) -- plotting hi-res only")
+
     rows_all, true_all, coarse_all, hires_all = [], [], [], []
     width_all, G_all, resid_c_all, resid_h_all, row_mid_all = [], [], [], [], []
 
@@ -54,42 +62,51 @@ def main() -> int:
 
         bin_centers = w["bin_centers"]
         coarse_edges = 0.5 * (bin_centers[:-1] + bin_centers[1:]) if len(bin_centers) > 1 else np.array([])
-        retrieved_ppm_coarse = w["prior_co2_ppm_bins"] * w["x_coarse"]
+        retrieved_ppm_coarse = (w["prior_co2_ppm_bins"] * w["x_coarse"]
+                                if has_coarse else None)
         retrieved_ppm_hires = w["prior_co2_ppm_bins"] * w["x_hires"]
 
         if len(bin_centers) > 1:
             idx = np.searchsorted(coarse_edges, eta_win)
-            coarse_win = retrieved_ppm_coarse[idx]
+            coarse_win = retrieved_ppm_coarse[idx] if has_coarse else None
             hires_win = np.interp(eta_win, bin_centers, retrieved_ppm_hires)
         else:
-            coarse_win = np.full(len(rows_win), retrieved_ppm_coarse[0])
+            coarse_win = (np.full(len(rows_win), retrieved_ppm_coarse[0])
+                          if has_coarse else None)
             hires_win = np.full(len(rows_win), retrieved_ppm_hires[0])
 
         rows_all.append(rows_win)
         true_all.append(true_win)
-        coarse_all.append(coarse_win)
+        if has_coarse:
+            coarse_all.append(coarse_win)
         hires_all.append(hires_win)
         width_all.append(w["width"])
         G_all.append(w["G"])
-        resid_c_all.append(w["resid_coarse_rms"])
+        if has_coarse:
+            resid_c_all.append(w["resid_coarse_rms"])
         resid_h_all.append(w["resid_hires_rms"])
         row_mid_all.append(0.5 * (row_lo + row_hi))
 
     rows_all = np.concatenate(rows_all)
     true_all = np.concatenate(true_all)
-    coarse_all = np.concatenate(coarse_all)
     hires_all = np.concatenate(hires_all)
-    bias_coarse = coarse_all - true_all
     bias_hires = hires_all - true_all
+    if has_coarse:
+        coarse_all = np.concatenate(coarse_all)
+        bias_coarse = coarse_all - true_all
 
     print(f"{len(windows)} windows, {len(rows_all)} rows total")
-    print(f"coarse: mean={bias_coarse.mean():+.4f} rms={np.sqrt(np.mean(bias_coarse**2)):.4f} "
-         f"max|bias|={np.max(np.abs(bias_coarse)):.4f} ppm")
+    if has_coarse:
+        print(f"coarse: mean={bias_coarse.mean():+.4f} rms={np.sqrt(np.mean(bias_coarse**2)):.4f} "
+             f"max|bias|={np.max(np.abs(bias_coarse)):.4f} ppm")
     print(f"hires:  mean={bias_hires.mean():+.4f} rms={np.sqrt(np.mean(bias_hires**2)):.4f} "
          f"max|bias|={np.max(np.abs(bias_hires)):.4f} ppm")
-    worst_row_c = rows_all[np.argmax(np.abs(bias_coarse))]
     worst_row_h = rows_all[np.argmax(np.abs(bias_hires))]
-    print(f"worst coarse bias at row {worst_row_c}, worst hires bias at row {worst_row_h}")
+    if has_coarse:
+        print(f"worst coarse bias at row {rows_all[np.argmax(np.abs(bias_coarse))]}, "
+             f"worst hires bias at row {worst_row_h}")
+    else:
+        print(f"worst hires bias at row {worst_row_h}")
 
     rc_fine = rows_crossed(FPA, rows_all.astype(float))
 
@@ -102,7 +119,8 @@ def main() -> int:
 
     ax = axes[0]
     ax.plot(rows_all, true_all, color="black", lw=1.1, label="true", zorder=5)
-    ax.plot(rows_all, coarse_all, color="tab:orange", lw=0.9, alpha=0.85, label="coarse posterior")
+    if has_coarse:
+        ax.plot(rows_all, coarse_all, color="tab:orange", lw=0.9, alpha=0.85, label="coarse posterior")
     ax.plot(rows_all, hires_all, color="tab:blue", lw=0.9, alpha=0.85, label="hi-res posterior")
     ax.set_ylabel("CO2 [ppm]")
     ax.set_title(f"FPA{FPA} whole-slit joint block sweep: true vs. retrieved CO2, {len(windows)} independent windows", fontsize=12)
@@ -110,8 +128,9 @@ def main() -> int:
 
     ax = axes[1]
     ax.axhline(0, color="black", lw=0.6)
-    ax.plot(rows_all, bias_coarse, color="tab:orange", lw=0.8,
-           label=f"coarse (rms={np.sqrt(np.mean(bias_coarse**2)):.3f}, max={np.max(np.abs(bias_coarse)):.3f} ppm)")
+    if has_coarse:
+        ax.plot(rows_all, bias_coarse, color="tab:orange", lw=0.8,
+               label=f"coarse (rms={np.sqrt(np.mean(bias_coarse**2)):.3f}, max={np.max(np.abs(bias_coarse)):.3f} ppm)")
     ax.plot(rows_all, bias_hires, color="tab:blue", lw=0.8,
            label=f"hi-res (rms={np.sqrt(np.mean(bias_hires**2)):.3f}, max={np.max(np.abs(bias_hires)):.3f} ppm)")
     ax.set_ylabel("retrieval bias\n(posterior - true) [ppm]")
@@ -119,7 +138,8 @@ def main() -> int:
     ax.legend(fontsize=8.5, loc="upper right")
 
     ax = axes[2]
-    ax.step(row_mid_all, resid_c_all, where="mid", color="tab:orange", lw=1.2, label="coarse")
+    if has_coarse:
+        ax.step(row_mid_all, resid_c_all, where="mid", color="tab:orange", lw=1.2, label="coarse")
     ax.step(row_mid_all, resid_h_all, where="mid", color="tab:blue", lw=1.2, label="hi-res")
     ax.set_yscale("log")
     ax.set_ylabel("per-window\nresid RMS")
