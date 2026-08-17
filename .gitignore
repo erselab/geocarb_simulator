@@ -20,3 +20,6 @@ results/
 # Environments
 .venv/
 venv/
+
+# Claude Code session logs (contains .credentials.json) -- never commit
+bh3_claude_output/

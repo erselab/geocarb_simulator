@@ -128,7 +128,8 @@ _G = {}
 
 def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_samples: int,
                 n_workers, uniform: bool, barcode: bool, barcode_bars: int,
-                noise: bool, noise_seed: int, realistic_barcode: bool = False):
+                noise: bool, noise_seed: int, realistic_barcode: bool = False,
+                vary_albedo: bool = False):
     """Render one band's raw detector image plus everything needed for all
     three pipelines: `A` (native/rectified source), `wn_hires`/`radiance`
     (undistorted source, and the barcode/lookup truth), the nominal per-band
@@ -168,16 +169,22 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
         from geocarb_gert.focalplane import barcode_scene
         wn_hires, radiance_real = als.build_lookup_radiance(
             absco, wide_inst, geo, solar, np.array([albedo]),
-            n_samples=n_lookup_samples, n_workers=n_workers, uniform=False)
+            n_samples=n_lookup_samples, n_workers=n_workers, uniform=False,
+            vary_albedo=vary_albedo)
         brightness = np.resize([1.0, 0.2], barcode_bars)
         gain_of_eta = barcode_scene(np.ones_like(wn_hires), brightness=brightness, widths=None, softness=0.0)
 
         def radiance(eta, _gain=gain_of_eta, _real=radiance_real):
             return _gain(eta) * _real(eta)
     else:
+        # vary_albedo=True makes surface albedo vary along the slit too
+        # (als.albedo_at: land-cover patches + fine-scale variability),
+        # instead of the single fixed `albedo` scalar above. Off by default,
+        # so pre-2026-08-17 runs reproduce exactly.
         wn_hires, radiance = als.build_lookup_radiance(
             absco, wide_inst, geo, solar, np.array([albedo]),
-            n_samples=n_lookup_samples, n_workers=n_workers, uniform=uniform)
+            n_samples=n_lookup_samples, n_workers=n_workers, uniform=uniform,
+            vary_albedo=vary_albedo)
 
     A = gd_render.image(fpa, wn_hires, radiance, wide_win.ils, spatial_psf_fwhm_px=1.5,
                         n_workers=n_workers)

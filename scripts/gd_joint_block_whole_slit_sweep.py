@@ -99,6 +99,9 @@ def _solve_window(row_lo: int, row_hi: int):
     wn_hires, ils, gamma, sigma_abs = _SWEEP["wn_hires"], _SWEEP["ils"], _SWEEP["gamma"], _SWEEP["sigma_abs"]
     uniform, atm_center = _SWEEP["uniform"], _SWEEP["atm_center"]
     g_ratio = _SWEEP.get("g_ratio", G_RATIO)
+    hires_only = _SWEEP.get("hires_only", False)
+    anchor_density = int(_SWEEP.get("anchor_density", 1))
+    state_interp = bool(_SWEEP.get("state_interp", False))
 
     rows_win = np.arange(row_lo, row_hi + 1)
     width = len(rows_win)
@@ -127,21 +130,31 @@ def _solve_window(row_lo: int, row_hi: int):
     out = dict(row_lo=row_lo, row_hi=row_hi, width=width, G=G, bin_centers=bin_centers,
               prior_co2_ppm_bins=prior_co2_ppm_bins)
 
-    t0 = time.time()
-    forward_coarse = build_forward(FPA, rows_win, bin_centers, prior_atms, spectrum_for, wn_hires, ils, pad=PAD)
-    x_coarse = gauss_newton_regularized(forward_coarse, y_true, x0=np.ones(G), Sy_inv_diag=Sy_inv_diag,
-                                        gamma=gamma, sigma_abs=sigma_abs, label=f"[{row_lo}-{row_hi}] coarse")
-    resid_coarse = y_true - forward_coarse(x_coarse)
-    out["x_coarse"] = x_coarse
-    out["resid_coarse"] = resid_coarse
-    out["resid_coarse_rms"] = float(np.sqrt(np.mean(resid_coarse ** 2)))
-    out["t_coarse"] = time.time() - t0
+    # The coarse solve is unaffected by --anchor-density/--state-interp (both
+    # only touch the hi-res anchor construction), so --hires-only skips it
+    # rather than recomputing an identical result.
+    if not hires_only:
+        t0 = time.time()
+        forward_coarse = build_forward(FPA, rows_win, bin_centers, prior_atms, spectrum_for, wn_hires, ils, pad=PAD)
+        x_coarse = gauss_newton_regularized(forward_coarse, y_true, x0=np.ones(G), Sy_inv_diag=Sy_inv_diag,
+                                            gamma=gamma, sigma_abs=sigma_abs, label=f"[{row_lo}-{row_hi}] coarse")
+        resid_coarse = y_true - forward_coarse(x_coarse)
+        out["x_coarse"] = x_coarse
+        out["resid_coarse"] = resid_coarse
+        out["resid_coarse_rms"] = float(np.sqrt(np.mean(resid_coarse ** 2)))
+        out["t_coarse"] = time.time() - t0
 
-    anchor_rows = np.arange(max(0, row_lo - PAD), min(ROW_MAX_IDX, row_hi + PAD) + 1)
+    # anchor_density>1 places anchors at FRACTIONAL row positions, i.e. finer
+    # eta spacing h, shrinking the nearest-anchor step error ~(1/4)|f'|h
+    # proportionally. Anchors are still real states with their own fresh RT;
+    # only their spacing changes.
+    a_lo, a_hi = max(0, row_lo - PAD), min(ROW_MAX_IDX, row_hi + PAD)
+    anchor_rows = np.arange(a_lo, a_hi + 1e-9, 1.0 / anchor_density)
     t0 = time.time()
     forward_hires, anchor_etas = build_forward_hires(FPA, rows_win, anchor_rows, bin_centers,
                                                       spectrum_for, wn_hires, ils, pad=PAD,
-                                                      atm_center=(atm_center if uniform else None))
+                                                      atm_center=(atm_center if uniform else None),
+                                                      state_interp=state_interp)
     x_hires = gauss_newton_regularized(forward_hires, y_true, x0=np.ones(G), Sy_inv_diag=Sy_inv_diag,
                                        gamma=gamma, sigma_abs=sigma_abs, label=f"[{row_lo}-{row_hi}] hires")
     resid_hires = y_true - forward_hires(x_hires)
@@ -183,6 +196,19 @@ def main() -> int:
                     "--n-tasks. Merge outputs afterward with gd_joint_block_whole_slit_merge.py.")
     ap.add_argument("--n-tasks", type=int, default=None, help="total number of tasks for "
                     "--task-id round-robin partitioning (e.g. SLURM_ARRAY_TASK_COUNT).")
+    ap.add_argument("--hires-only", action="store_true",
+                    help="skip the coarse solve (unchanged by --anchor-density/"
+                         "--state-interp, so re-running it would just reproduce the baseline)")
+    ap.add_argument("--anchor-density", type=int, default=1,
+                    help="anchors per detector row for the hi-res forward model "
+                         "(default 1 = the original one-per-row). >1 places anchors at "
+                         "fractional row positions, shrinking the nearest-anchor step "
+                         "error ~(1/4)|f'|h proportionally. Cost scales with it.")
+    ap.add_argument("--state-interp", action="store_true",
+                    help="build each hi-res anchor's atmosphere from state parameters "
+                         "linearly interpolated from the G bin centres (CO2, CH4, CO, H2O, "
+                         "p_surface alike) instead of exact truth at the anchor's own eta. "
+                         "State-space interpolation + fresh RT per anchor; no spectrum blending.")
     args = ap.parse_args()
     if (args.task_id is None) != (args.n_tasks is None):
         ap.error("--task-id and --n-tasks must be given together")
@@ -216,7 +242,9 @@ def main() -> int:
     _SWEEP.update(dict(band=band, absco=absco, wide_inst=wide_inst, geo=geo, solar=solar,
                        albedo=albedo, wn_hires=band["wn_hires"], ils=band["ils"],
                        gamma=args.gamma, sigma_abs=args.sigma_abs, g_ratio=args.g_ratio,
-                       uniform=args.uniform, atm_center=atm_center))
+                       uniform=args.uniform, atm_center=atm_center,
+                       hires_only=args.hires_only, anchor_density=args.anchor_density,
+                       state_interp=args.state_interp))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
     print(f"solving with {n_workers} workers...", flush=True)
@@ -231,7 +259,9 @@ def main() -> int:
             results[key] = r
             n_done += 1
             status = "ERROR: " + r["error"] if "error" in r else \
-                     f"G={r['G']} t_coarse={r['t_coarse']:.0f}s t_hires={r['t_hires']:.0f}s"
+                     (f"G={r['G']} " + (f"t_coarse={r['t_coarse']:.0f}s "
+                                        if "t_coarse" in r else "")
+                      + f"t_hires={r['t_hires']:.0f}s")
             elapsed = time.time() - t0
             print(f"  {n_done}/{len(tiles)} rows {key[0]}-{key[1]}: {status} "
                  f"({elapsed:.0f}s elapsed)", flush=True)
@@ -241,9 +271,15 @@ def main() -> int:
 
     suffix = "_uniform" if args.uniform else ""
     suffix += f"_gratio{args.g_ratio:g}"
+    if args.anchor_density != 1:
+        suffix += f"_adens{args.anchor_density}"
+    if args.state_interp:
+        suffix += "_stateinterp"
     payload = {"results": results, "tiles": all_tiles, "fpa": FPA, "uniform": args.uniform,
               "gamma": args.gamma, "sigma_abs": args.sigma_abs,
-              "g_ratio": args.g_ratio, "min_window": MIN_WINDOW, "pad": PAD}
+              "g_ratio": args.g_ratio, "min_window": MIN_WINDOW, "pad": PAD,
+              "hires_only": args.hires_only, "anchor_density": args.anchor_density,
+              "state_interp": args.state_interp}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
         out_dir = REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}_parts"

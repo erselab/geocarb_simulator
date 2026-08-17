@@ -53,6 +53,7 @@ Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_block_retri
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -76,7 +77,13 @@ from gert.instrument_config import Instrument  # noqa: E402
 from gert.retrieval import StateVector  # noqa: E402
 from gert.rt_solver import SingleScatterSolver  # noqa: E402
 
-GERT_ROOT = Path("/scratch/scrowel3_lab/gert")
+# Where gert's input/ tree (absco.h5, solar.h5) lives. Defaults to the HPC
+# scratch path every batch script and prior run used, so those are unchanged;
+# override with $GERT_ROOT to run the same sweeps on a workstation (needed
+# 2026-08-17, when the cluster was unavailable -- nothing else in the
+# joint-block chain is HPC-specific, since the sweep already runs standalone
+# on a local multiprocessing Pool when --task-id/--n-tasks are omitted).
+GERT_ROOT = Path(os.environ.get("GERT_ROOT", "/scratch/scrowel3_lab/gert"))
 FPA = 2
 
 

@@ -61,13 +61,33 @@ from geocarb_gert.gd_polynomials import rows_crossed  # noqa: E402
 
 
 def build_forward_hires(fpa, rows_win, anchor_rows, bin_centers, spectrum_for, wn_hires, ils, pad=4,
-                        atm_center=None):
+                        atm_center=None, state_interp=False):
     """G_eff anchors, one per real detector row in the padded window
     (native row resolution). Each anchor's co2_scale is linearly
     interpolated from the G-dim retrieval state x at bin_centers --
     state-space only, never radiance-space. Reuses nearest_bin_scene
     unchanged at G_eff resolution instead of G, so within-row keystone
     splicing is resolved at native row granularity.
+
+    state_interp : bool, default False (2026-08-17). Build each anchor's
+    atmosphere from state parameters LINEARLY INTERPOLATED from the G bin
+    centres -- CO2, CH4, CO, H2O and surface pressure alike -- instead of
+    evaluating the exact truth at the anchor's own eta. This is state-space
+    interpolation followed by a fresh RT run per anchor, exactly what
+    `nearest_bin_scene`'s docstring prescribes; no spectrum is ever blended
+    with another. Default False reproduces every earlier result exactly.
+
+    Note what each variant does and does not fix. The residual's dominant
+    large-scale structure comes from the nuisance state being a STEP
+    function in eta at anchor spacing h (error ~(1/4)|f'|h), which is why
+    per-row residual RMS tracks p_surface's own nearest-anchor error at
+    +0.94 across the topographic depression and H2O's at +0.89 globally,
+    versus +0.59 for CO2 and +0.38 for keystone. Shrinking h (denser
+    `anchor_rows`, passed in by the caller) attacks that directly.
+    `state_interp` instead makes the whole state vector one consistent
+    interpolated field sampled at the G bins -- which for a coarse bin grid
+    is *sparser* than today's per-anchor exact truth, so it is a genuine
+    comparison, not strictly an improvement.
 
     atm_center : optional. When given, every anchor uses this SAME shared
     atmosphere instead of its own position-dependent als.atmosphere_at(...)
@@ -80,6 +100,19 @@ def build_forward_hires(fpa, rows_win, anchor_rows, bin_centers, spectrum_for, w
     G_eff = len(anchor_etas_sorted)
     if atm_center is not None:
         anchor_atms = [atm_center] * G_eff
+    elif state_interp:
+        # State-space interpolation: every parameter defined on the G bin
+        # centres, linearly interpolated onto the anchors, then a fresh RT
+        # run per anchor (spectrum_for below). CO2 here is the interpolated
+        # PRIOR profile; the retrieved co2_scale multiplies it, exactly as
+        # in the default path.
+        # Generic over als.STATE_FIELDS -- every parameter through the identical
+        # path, CO2 included, no quantity named individually here. Adding a
+        # state parameter is a row in that table, not an edit to this branch.
+        st = als.interp_state(anchor_etas_sorted * als.SLIT_HALF_KM,
+                              np.asarray(bin_centers, dtype=float) * als.SLIT_HALF_KM)
+        anchor_atms = [als.atmosphere_from_params(**{k: float(v[k_i]) for k, v in st.items()})
+                       for k_i in range(G_eff)]
     else:
         anchor_atms = [als.atmosphere_at(float(e * als.SLIT_HALF_KM)) for e in anchor_etas_sorted]
 
