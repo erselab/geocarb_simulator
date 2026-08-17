@@ -58,6 +58,10 @@ from gd_joint_block_diagnostics import pixel_density_bin_centers  # noqa: E402
 import geosat_geometry as gg  # noqa: E402
 import gert  # noqa: E402
 from geocarb_gert import along_slit_scene as als, sample_geometries  # noqa: E402
+from geocarb_gert.joint_state import (build_forward_state, gauss_newton_state,  # noqa: E402
+                                      state_spec_from_scene)
+from gert.forward_model import ForwardModel  # noqa: E402
+from gert.rt_solver import SingleScatterSolver  # noqa: E402
 from geocarb_gert.gd_polynomials import rows_crossed  # noqa: E402
 from geocarb_gert.gd_render import available_cpus  # noqa: E402
 
@@ -90,6 +94,21 @@ def build_window_tiles(fpa: int, row_min: int = 0, row_max: int = ROW_MAX_IDX,
         tiles.append((row_start, row_end))
         row_start = row_end + 1
     return tiles
+
+
+def _make_state_spectrum(absco, wide_inst, geo, solar, albedo):
+    """spectrum(params_dict) -> hi-res radiance, built straight from
+    `als.atmosphere_from_params`. Deliberately NOT gert's
+    StateVector.gas_scaling, which only knows how to scale gases and would
+    reintroduce the CO2-is-special asymmetry. Albedo stays fixed: it is not
+    part of AtmosphericProfile (see als.STATE_FIELDS)."""
+    def spectrum(params: dict):
+        atm = als.atmosphere_from_params(**params)
+        fm = ForwardModel(atm, absco, wide_inst, geo, solver=SingleScatterSolver(),
+                          solar_spectrum=solar)
+        res = fm.run(albedo=np.array([albedo]), albedo_slope=np.zeros(1))
+        return np.asarray(res.I_hires[0], dtype=float)
+    return spectrum
 
 
 def _solve_window(row_lo: int, row_hi: int):
@@ -130,38 +149,50 @@ def _solve_window(row_lo: int, row_hi: int):
     out = dict(row_lo=row_lo, row_hi=row_hi, width=width, G=G, bin_centers=bin_centers,
               prior_co2_ppm_bins=prior_co2_ppm_bins)
 
-    # The coarse solve is unaffected by --anchor-density/--state-interp (both
-    # only touch the hi-res anchor construction), so --hires-only skips it
-    # rather than recomputing an identical result.
+    free = tuple(_SWEEP.get("free", ("co2_ppm",)))
+    corr_length = float(_SWEEP.get("corr_length", 0.02))
+    spectrum = _make_state_spectrum(absco, wide_inst, geo, solar, albedo)
+
+    # COARSE: scene evaluated at the state's own bin centres, so
+    # interp_to() is the identity -- --state-interp has no content here.
     if not hires_only:
         t0 = time.time()
-        forward_coarse = build_forward(FPA, rows_win, bin_centers, prior_atms, spectrum_for, wn_hires, ils, pad=PAD)
-        x_coarse = gauss_newton_regularized(forward_coarse, y_true, x0=np.ones(G), Sy_inv_diag=Sy_inv_diag,
-                                            gamma=gamma, sigma_abs=sigma_abs, label=f"[{row_lo}-{row_hi}] coarse")
-        resid_coarse = y_true - forward_coarse(x_coarse)
-        out["x_coarse"] = x_coarse
-        out["resid_coarse"] = resid_coarse
-        out["resid_coarse_rms"] = float(np.sqrt(np.mean(resid_coarse ** 2)))
+        spec_c = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length)
+        # coarse: scene positions ARE the state positions, so interpolation is
+        # the identity either way -- state_interp is genuinely a no-op here.
+        fwd_c = build_forward_state(FPA, rows_win, bin_centers, spec_c, spectrum,
+                                    wn_hires, ils, pad=PAD, state_interp=True)
+        x_c = gauss_newton_state(fwd_c, y_true, spec_c, Sy_inv_diag,
+                                 label=f"[{row_lo}-{row_hi}] coarse", verbose=False)
+        resid_c = y_true - fwd_c(x_c)
+        # Standing rule: save the ENTIRE state vector (free AND frozen) and
+        # the FULL residual field, never just summary scalars.
+        out["coarse"] = spec_c.snapshot(x_c, resid=resid_c,
+                                        resid_rms=float(np.sqrt(np.mean(resid_c ** 2))))
+        out["x_coarse"] = x_c                      # back-compat with existing plotters
+        out["resid_coarse"] = resid_c
+        out["resid_coarse_rms"] = float(np.sqrt(np.mean(resid_c ** 2)))
         out["t_coarse"] = time.time() - t0
 
-    # anchor_density>1 places anchors at FRACTIONAL row positions, i.e. finer
-    # eta spacing h, shrinking the nearest-anchor step error ~(1/4)|f'|h
-    # proportionally. Anchors are still real states with their own fresh RT;
-    # only their spacing changes.
     a_lo, a_hi = max(0, row_lo - PAD), min(ROW_MAX_IDX, row_hi + PAD)
     anchor_rows = np.arange(a_lo, a_hi + 1e-9, 1.0 / anchor_density)
+    anchor_etas = np.sort(_eta_of(FPA, np.full(len(anchor_rows), 512.0),
+                                  anchor_rows.astype(float)))
     t0 = time.time()
-    forward_hires, anchor_etas = build_forward_hires(FPA, rows_win, anchor_rows, bin_centers,
-                                                      spectrum_for, wn_hires, ils, pad=PAD,
-                                                      atm_center=(atm_center if uniform else None),
-                                                      state_interp=state_interp)
-    x_hires = gauss_newton_regularized(forward_hires, y_true, x0=np.ones(G), Sy_inv_diag=Sy_inv_diag,
-                                       gamma=gamma, sigma_abs=sigma_abs, label=f"[{row_lo}-{row_hi}] hires")
-    resid_hires = y_true - forward_hires(x_hires)
-    out["x_hires"] = x_hires
-    out["resid_hires"] = resid_hires
+    # HI-RES: scene on the finer anchor grid, every row interpolated there.
+    spec_h = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length)
+    fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
+                                wn_hires, ils, pad=PAD, state_interp=state_interp)
+    x_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
+                             label=f"[{row_lo}-{row_hi}] hires", verbose=False)
+    resid_h = y_true - fwd_h(x_h)
+    out["hires"] = spec_h.snapshot(x_h, resid=resid_h,
+                                   resid_rms=float(np.sqrt(np.mean(resid_h ** 2))))
+    out["x_hires"] = x_h
+    out["resid_hires"] = resid_h
+    out["anchor_etas"] = anchor_etas
     out["G_eff"] = len(anchor_rows)
-    out["resid_hires_rms"] = float(np.sqrt(np.mean(resid_hires ** 2)))
+    out["resid_hires_rms"] = float(np.sqrt(np.mean(resid_h ** 2)))
     out["t_hires"] = time.time() - t0
 
     return out
@@ -209,6 +240,12 @@ def main() -> int:
                          "linearly interpolated from the G bin centres (CO2, CH4, CO, H2O, "
                          "p_surface alike) instead of exact truth at the anchor's own eta. "
                          "State-space interpolation + fresh RT per anchor; no spectrum blending.")
+    ap.add_argument("--free", type=str, default="co2_ppm",
+                    help="comma-separated state rows to retrieve; everything else is "
+                         "frozen at local truth. Names from als.STATE_FIELDS, e.g. "
+                         "co2_ppm,p_surface_hpa. CO2 is an ordinary row and may be frozen.")
+    ap.add_argument("--corr-length", type=float, default=0.02,
+                    help="prior correlation length in eta, applied to every free row")
     args = ap.parse_args()
     if (args.task_id is None) != (args.n_tasks is None):
         ap.error("--task-id and --n-tasks must be given together")
@@ -244,7 +281,9 @@ def main() -> int:
                        gamma=args.gamma, sigma_abs=args.sigma_abs, g_ratio=args.g_ratio,
                        uniform=args.uniform, atm_center=atm_center,
                        hires_only=args.hires_only, anchor_density=args.anchor_density,
-                       state_interp=args.state_interp))
+                       state_interp=args.state_interp,
+                       free=tuple(x.strip() for x in args.free.split(',')),
+                       corr_length=args.corr_length))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
     print(f"solving with {n_workers} workers...", flush=True)
@@ -275,11 +314,15 @@ def main() -> int:
         suffix += f"_adens{args.anchor_density}"
     if args.state_interp:
         suffix += "_stateinterp"
+    free_t = tuple(x.strip() for x in args.free.split(","))
+    if free_t != ("co2_ppm",):
+        suffix += "_free-" + "-".join(n.split("_")[0] for n in free_t)
     payload = {"results": results, "tiles": all_tiles, "fpa": FPA, "uniform": args.uniform,
               "gamma": args.gamma, "sigma_abs": args.sigma_abs,
               "g_ratio": args.g_ratio, "min_window": MIN_WINDOW, "pad": PAD,
               "hires_only": args.hires_only, "anchor_density": args.anchor_density,
-              "state_interp": args.state_interp}
+              "state_interp": args.state_interp, "free": free_t,
+              "corr_length": args.corr_length}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
         out_dir = REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}_parts"

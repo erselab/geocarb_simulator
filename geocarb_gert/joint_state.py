@@ -319,3 +319,84 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
         if np.linalg.norm(dx) < tol:
             break
     return x
+
+
+def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
+                        wn_hires, ils, pad: int = 4, state_interp: bool = True):
+    """``forward(x) -> raveled sub-image`` for a :class:`StateSpec`, on an
+    arbitrary set of scene positions.
+
+    Unifies the joint block's "coarse" and "hi-res" forward models, which
+    differ only in WHERE the scene is evaluated:
+
+      coarse   ``scene_etas = bin_centers``  -- the state's own positions, so
+               :meth:`StateSpec.interp_to` is the identity and no
+               interpolation happens at all. (This is why a ``--state-interp``
+               switch is meaningless for the coarse solve: there is nothing
+               between the state and the scene to interpolate.)
+      hi-res   ``scene_etas = anchor_etas``  -- a finer grid, so every row is
+               linearly interpolated from its own positions onto the anchors.
+               State-space interpolation followed by a fresh RT run per
+               anchor, exactly what ``nearest_bin_scene``'s docstring
+               prescribes; no spectrum is ever blended with another.
+
+    Pixels are then assigned to scene positions by nearest
+    (``nearest_bin_scene``), unchanged. That hard assignment is the source of
+    the first-order ``~(1/4)|f'|h`` stepping error the residual is dominated
+    by, and it is a property of the SAMPLING, not of the state -- which is
+    why adding free parameters barely dents it while halving ``h`` does.
+
+    Each scene position's spectrum is cached on that position's full
+    parameter vector, so an iteration re-runs RT only where the state
+    actually moved.
+
+    ``state_interp=False`` reproduces the pre-StateSpec hi-res behaviour:
+    FROZEN rows are evaluated at their exact truth at each scene position
+    (``als.state_at(scene_etas)``) instead of being interpolated from the bin
+    grid, while free rows are still interpolated. That distinction is real
+    and measurable -- on a smooth, low-keystone window, exact-at-anchor beats
+    interpolated-from-bins by ~1.5x in residual RMS, because interpolation
+    can only add error to a quantity that was already exactly known. With
+    ``state_interp=True`` every row goes through the identical path, which is
+    the honest configuration when the nuisance state is meant to be treated
+    like any other (and the only sane one once those rows are actually
+    free, since a free row has no "truth" to be exact about).
+
+    Parameters
+    ----------
+    spectrum : callable
+        ``spectrum(params: dict) -> hi-res radiance``, where ``params`` is
+        keyed exactly as :data:`geocarb_gert.along_slit_scene.STATE_FIELDS`.
+    """
+    from . import gd_render
+    from .focalplane import nearest_bin_scene
+
+    scene_etas = np.asarray(scene_etas, dtype=float)
+    order = np.argsort(scene_etas)
+    scene_etas = scene_etas[order]
+    n_scene = scene_etas.size
+    names = [p.name for p in spec.params]
+    cache_key = np.full((n_scene, len(names)), np.nan)
+    cache_S = [None] * n_scene
+
+    exact = None
+    if not state_interp:
+        from . import along_slit_scene as _als
+        frozen = [p.name for p in spec.params if not p.free]
+        exact = {n: np.asarray(_als.STATE_FIELDS[n](scene_etas * _als.SLIT_HALF_KM),
+                               dtype=float) for n in frozen if n in _als.STATE_FIELDS}
+
+    def forward(x):
+        vals = spec.interp_to(scene_etas, x)
+        if exact:
+            vals.update(exact)          # frozen rows at exact truth, not interpolated
+        key = np.column_stack([vals[n] for n in names])
+        for g in range(n_scene):
+            if cache_S[g] is None or not np.array_equal(key[g], cache_key[g]):
+                cache_S[g] = spectrum({n: float(vals[n][g]) for n in names})
+                cache_key[g] = key[g]
+        radiance = nearest_bin_scene(scene_etas, cache_S)
+        return gd_render.predict_neighborhood(fpa, rows_win, wn_hires, radiance,
+                                              ils, pad=pad).ravel()
+
+    return forward
