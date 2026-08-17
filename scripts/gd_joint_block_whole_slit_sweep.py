@@ -150,14 +150,16 @@ def _solve_window(row_lo: int, row_hi: int):
               prior_co2_ppm_bins=prior_co2_ppm_bins)
 
     free = tuple(_SWEEP.get("free", ("co2_ppm",)))
-    corr_length = float(_SWEEP.get("corr_length", 0.02))
+    corr_length = _SWEEP.get("corr_length")          # None -> per-row physical defaults
+    prior_form = _SWEEP.get("prior_form", "exponential")
     spectrum = _make_state_spectrum(absco, wide_inst, geo, solar, albedo)
 
     # COARSE: scene evaluated at the state's own bin centres, so
     # interp_to() is the identity -- --state-interp has no content here.
     if not hires_only:
         t0 = time.time()
-        spec_c = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length)
+        spec_c = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length,
+                                       prior_form=prior_form)
         # coarse: scene positions ARE the state positions, so interpolation is
         # the identity either way -- state_interp is genuinely a no-op here.
         fwd_c = build_forward_state(FPA, rows_win, bin_centers, spec_c, spectrum,
@@ -180,7 +182,8 @@ def _solve_window(row_lo: int, row_hi: int):
                                   anchor_rows.astype(float)))
     t0 = time.time()
     # HI-RES: scene on the finer anchor grid, every row interpolated there.
-    spec_h = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length)
+    spec_h = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length,
+                                   prior_form=prior_form)
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
                                 wn_hires, ils, pad=PAD, state_interp=state_interp)
     x_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
@@ -244,8 +247,18 @@ def main() -> int:
                     help="comma-separated state rows to retrieve; everything else is "
                          "frozen at local truth. Names from als.STATE_FIELDS, e.g. "
                          "co2_ppm,p_surface_hpa. CO2 is an ordinary row and may be frozen.")
-    ap.add_argument("--corr-length", type=float, default=0.02,
-                    help="prior correlation length in eta, applied to every free row")
+    ap.add_argument("--corr-length", type=float, default=None,
+                    help="prior correlation length in eta applied to EVERY row. Default "
+                         "(unset) uses joint_state.DEFAULT_CORR_LENGTH_ETA -- each row's "
+                         "own physical scale (co2 ~10km hot-spot, p_surface ~140km "
+                         "topography, etc). A single shared value is rarely right, since "
+                         "surface pressure and a CO2 hot spot do not share a scale.")
+    ap.add_argument("--prior-form", type=str, default="exponential",
+                    choices=["exponential", "tikhonov"],
+                    help="'exponential' (default): sigma^2 exp(-|d_eta|/corr_length) in "
+                         "PHYSICAL eta, correct under non-uniform bin spacing. "
+                         "'tikhonov': the original gamma*(L^T L)+I/sigma^2 in bin index, "
+                         "bit-identical to pre-2026-08-17 results.")
     args = ap.parse_args()
     if (args.task_id is None) != (args.n_tasks is None):
         ap.error("--task-id and --n-tasks must be given together")
@@ -283,7 +296,7 @@ def main() -> int:
                        hires_only=args.hires_only, anchor_density=args.anchor_density,
                        state_interp=args.state_interp,
                        free=tuple(x.strip() for x in args.free.split(',')),
-                       corr_length=args.corr_length))
+                       corr_length=args.corr_length, prior_form=args.prior_form))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
     print(f"solving with {n_workers} workers...", flush=True)
@@ -322,7 +335,7 @@ def main() -> int:
               "g_ratio": args.g_ratio, "min_window": MIN_WINDOW, "pad": PAD,
               "hires_only": args.hires_only, "anchor_density": args.anchor_density,
               "state_interp": args.state_interp, "free": free_t,
-              "corr_length": args.corr_length}
+              "corr_length": args.corr_length, "prior_form": args.prior_form}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
         out_dir = REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}_parts"

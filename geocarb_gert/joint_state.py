@@ -49,6 +49,39 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
+#: Default prior correlation length per state row, in eta (1 eta = 1400 km,
+#: 1 detector row ~ 0.00195 eta = 2.73 km). Each is set from the PHYSICAL
+#: scale of that quantity's own structure in `along_slit_scene`, not from a
+#: bin count -- which is the whole point of measuring distance in eta rather
+#: than bin index: these numbers stay correct when the bin density changes.
+#:
+#: For scale, the prior these replace (`prior_form="tikhonov"` with
+#: gamma=3.0, sigma=0.10) had an implied decorrelation length of ~0.28 bins,
+#: i.e. 0.77 km at one bin per row -- BELOW the 2.73 km ground sample
+#: distance. It imposed essentially no spatial correlation at all, which is
+#: the real explanation for Sec.9's puzzling null result that changing gamma
+#: by 100x moved the bias under 2%: the smoothness spring was never actually
+#: engaged, only the absolute one.
+#:
+#: CAVEAT on p_surface (user, 2026-08-17): this value is taken from the
+#: scene's own topographic depression (`p_surface_hpa`'s `mountain`, width
+#: 140 km), because in THIS synthetic scene surface pressure varies only
+#: with topography. In real retrievals the dominant source of
+#: surface-pressure-related bias is SCATTERING HEIGHT uncertainty (aerosol
+#: and cloud layers), not genuine surface pressure variability -- and that
+#: has its own, generally shorter and more variable, spatial scale. So this
+#: default is right for the current scene and should NOT be carried over
+#: uncritically to real data or to a scene with aerosols.
+DEFAULT_CORR_LENGTH_ETA = {
+    "co2_ppm": 0.0071,            # ~10 km -- the CO2/CO hot-spot scale; longer would
+                                  # wash out the point sources the study is about
+    "ch4_ppb": 0.0714,            # ~100 km -- its own broad plume width
+    "co_ppb": 0.0393,             # ~55 km  -- its own broad plume width
+    "h2o_surface_vmr": 0.357,     # ~500 km -- the smooth climatological tanh gradient
+    "p_surface_hpa": 0.100,       # ~140 km -- the topographic depression width
+}
+
+
 @dataclass
 class ParamSpec:
     """One state-vector element: where it lives, its prior, and whether it
@@ -58,9 +91,11 @@ class ParamSpec:
     positions: np.ndarray          # eta bin centres for this parameter
     prior: np.ndarray              # prior value at each position
     sigma: float                   # prior 1-sigma (in the parameter's own units)
-    corr_length: float = 0.05      # correlation length in eta
+    corr_length: float = 0.05      # correlation length in eta ("exponential" prior only)
     free: bool = True              # False -> frozen at `prior`, contributes no elements
     kind: str = "scale"            # "scale" (multiplies prior) or "absolute"
+    prior_form: str = "exponential"  # "exponential" (default) or "tikhonov"
+    gamma: float = 3.0             # tikhonov: first-difference smoothness strength
 
     def __post_init__(self):
         self.positions = np.atleast_1d(np.asarray(self.positions, dtype=float))
@@ -88,9 +123,50 @@ class ParamSpec:
         return self.prior * xi if self.kind == "scale" else xi
 
     def Sa_block(self) -> np.ndarray:
-        """Exponential-correlation prior covariance for this row alone."""
+        """Prior COVARIANCE for this row alone (exponential form only)."""
         d = np.abs(self.positions[:, None] - self.positions[None, :])
         return self.sigma ** 2 * np.exp(-d / max(self.corr_length, 1e-12))
+
+    def Sa_inv_block(self) -> np.ndarray:
+        """Prior PRECISION for this row alone.
+
+        Two forms, and they are NOT interchangeable despite Sec.4.0 showing
+        they belong to the same family:
+
+        ``tikhonov`` (default) reproduces the original
+        ``gauss_newton_regularized`` exactly:
+        ``gamma*(L^T L) + I/sigma**2`` with ``L`` the first-difference
+        operator. Distance is measured in BIN INDEX, so every adjacent pair
+        couples equally regardless of eta separation, and the edge bins get
+        the free/natural boundary condition (one neighbour instead of two)
+        that Sec.9 measured -- an edge/centre marginal-std ratio of 1.014 at
+        sigma=0.10, rising to 1.251 as sigma loosens.
+
+        ``exponential`` builds the covariance ``sigma^2 exp(-|eta_i-eta_j|/
+        corr_length)`` and inverts it. Distance is physical eta, so
+        non-uniform bin spacing (which `pixel_density_bin_centers` always
+        produces) is handled correctly, and sigma/corr_length are
+        independent knobs. But inverting a stationary exponential covariance
+        yields compensating corner terms, so it has NO edge weakening --
+        a real behavioural difference at every window boundary, since
+        production windows tile non-overlapping.
+
+        Defaulting to ``tikhonov`` keeps continuity with every result
+        computed before 2026-08-17; ``exponential`` is opt-in.
+        """
+        n = self.n
+        if self.prior_form == "tikhonov":
+            if n == 1:
+                return np.eye(1) / self.sigma ** 2
+            L = np.zeros((n - 1, n))
+            for k in range(n - 1):
+                L[k, k] = -1.0
+                L[k, k + 1] = 1.0
+            return self.gamma * (L.T @ L) + np.eye(n) / self.sigma ** 2
+        if self.prior_form == "exponential":
+            return np.linalg.inv(self.Sa_block())
+        raise ValueError(f"{self.name}: unknown prior_form {self.prior_form!r} "
+                         f"(expected 'tikhonov' or 'exponential')")
 
 
 class StateSpec:
@@ -169,7 +245,7 @@ class StateSpec:
 
     def Sa_inv(self) -> np.ndarray:
         """Block-diagonal prior precision over the free rows only."""
-        blocks = [np.linalg.inv(p.Sa_block()) for p in self.free_params]
+        blocks = [p.Sa_inv_block() for p in self.free_params]
         if not blocks:
             return np.zeros((0, 0))
         n = sum(b.shape[0] for b in blocks)
@@ -227,7 +303,8 @@ class StateSpec:
 
 
 def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
-                          sigmas=None, corr_length=0.05, kinds=None) -> StateSpec:
+                          sigmas=None, corr_length=None, kinds=None,
+                          prior_form="exponential", gamma=3.0) -> StateSpec:
     """Build a :class:`StateSpec` whose priors are the truth scene's own
     values at `bin_centers` -- the joint block's existing "local-truth
     nuisance idealization", but now with every quantity present as a real,
@@ -237,6 +314,12 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
     `free` names the rows that start free; everything else starts frozen, so
     the default `free=("co2_ppm",)` reproduces today's CO2-only retrieval
     exactly while making the other four one flag away from being retrieved.
+
+    `corr_length` may be a float (applied to every row), a dict keyed by row
+    name, or None (the default) to use :data:`DEFAULT_CORR_LENGTH_ETA` --
+    each row's own physical scale. Passing a single float is what the
+    original bin-index prior effectively did and is usually NOT what you
+    want, since surface pressure and a CO2 hot spot do not share a scale.
     """
     from . import along_slit_scene as als
 
@@ -247,10 +330,20 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                      "h2o_surface_vmr": 0.25, "p_surface_hpa": 0.02}
     sigmas = {**default_sigma, **(sigmas or {})}
     kinds = kinds or {}
+
+    def _corr_for(name, cl):
+        if cl is None:
+            return DEFAULT_CORR_LENGTH_ETA.get(name, 0.05)
+        if isinstance(cl, dict):
+            return cl.get(name, DEFAULT_CORR_LENGTH_ETA.get(name, 0.05))
+        return cl
+
     return StateSpec([
         ParamSpec(name=name, positions=bin_centers, prior=np.asarray(fn(x_km), dtype=float),
-                  sigma=float(sigmas.get(name, 0.10)), corr_length=float(corr_length),
-                  free=(name in free), kind=kinds.get(name, "scale"))
+                  sigma=float(sigmas.get(name, 0.10)),
+                  corr_length=float(_corr_for(name, corr_length)),
+                  free=(name in free), kind=kinds.get(name, "scale"),
+                  prior_form=prior_form, gamma=float(gamma))
         for name, fn in fields.items()
     ])
 
