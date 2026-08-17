@@ -83,7 +83,21 @@ from gert.rt_solver import SingleScatterSolver  # noqa: E402
 # 2026-08-17, when the cluster was unavailable -- nothing else in the
 # joint-block chain is HPC-specific, since the sweep already runs standalone
 # on a local multiprocessing Pool when --task-id/--n-tasks are omitted).
-GERT_ROOT = Path(os.environ.get("GERT_ROOT", "/scratch/scrowel3_lab/gert"))
+def _resolve_gert_root() -> Path:
+    """$GERT_ROOT, else the sibling `../../gert` checkout this repo already
+    reaches (the relationship `geocarb_gert` itself relies on), else the HPC
+    scratch path. Checked for an actual `input/` tree rather than mere
+    existence, since that is what absco.h5/solar.h5 live under."""
+    env = os.environ.get("GERT_ROOT")
+    if env:
+        return Path(env)
+    sibling = (REPO_ROOT / ".." / "gert").resolve()
+    if (sibling / "input").is_dir():
+        return sibling
+    return Path("/scratch/scrowel3_lab/gert")
+
+
+GERT_ROOT = _resolve_gert_root()
 FPA = 2
 
 
