@@ -91,9 +91,13 @@ def _resolve_gert_root() -> Path:
     env = os.environ.get("GERT_ROOT")
     if env:
         return Path(env)
-    sibling = (REPO_ROOT / ".." / "gert").resolve()
-    if (sibling / "input").is_dir():
-        return sibling
+    # ../../gert is the documented relationship (geocarb_gert is an adapter
+    # over the gert checkout two levels up); ../gert is checked too so a
+    # flat side-by-side layout also works.
+    for rel in ("../../gert", "../gert"):
+        cand = (REPO_ROOT / rel).resolve()
+        if (cand / "input").is_dir():
+            return cand
     return Path("/scratch/scrowel3_lab/gert")
 
 
