@@ -8,10 +8,18 @@ than one row is free (with `--free co2_ppm,p_surface_hpa` the packed vector
 is 2G long), so this reads `spec.snapshot()` instead: per-row `values`,
 `prior`, and `positions`, for every row including the FROZEN ones.
 
-Plotting the frozen rows is not padding -- it is the check that they really
-were held at truth, and it makes two runs with different free/frozen splits
-directly comparable. A frozen row whose retrieved curve departs from truth
-would mean the snapshot or the forward model is wrong.
+Plotting the frozen rows is not padding. A frozen row's stored values ARE its
+local truth, but they are stored at BIN CENTRES and interpolated back to
+detector rows here, so its "deviation from truth" panel measures the pure
+bin-density REPRESENTATION ERROR of that quantity -- with no retrieval, no
+noise and no RT involved. It is therefore a direct read-out of how well the
+current bin grid can represent each field, ordered by how much structure the
+field has: on a 23-row window at one bin per row, CO (sharp plume) shows
+~5e-4 while H2O (smooth gradient) shows ~9e-6.
+
+That also makes runs with different free/frozen splits directly comparable,
+and gives the free rows a baseline: a free row is only meaningfully
+"retrieved wrong" beyond the representation error its own bin grid imposes.
 
 For each row: absolute value against truth (top strip) and fractional
 departure from truth (bottom strip), coarse and hi-res overlaid. Free rows
@@ -76,6 +84,13 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input")
     ap.add_argument("--fpa", type=int, default=None)
+    ap.add_argument("--x-axis", choices=["eta", "row", "km"], default="eta",
+                    help="along-slit coordinate for the x axis (default: eta). The state "
+                         "vector lives in eta -- bins are placed there and correlation "
+                         "lengths are defined there -- so eta is the natural axis; 'row' "
+                         "matches the detector-space residual plots, 'km' is physical "
+                         "along-slit distance. A secondary top axis always shows the "
+                         "detector row, so any panel can be read against those.")
     args = ap.parse_args()
 
     in_path = Path(args.input)
@@ -106,6 +121,16 @@ def main() -> int:
     print(f"{in_path.name}: {len(results)} windows, FPA{fpa}, solves={solves}, "
           f"free={[n for n in names if meta[n]['free']]}")
 
+    # eta is monotonic in detector row for every FPA, so a secondary axis is a
+    # well-defined reparameterisation rather than an approximation. Built by
+    # interpolation on the real polynomial mapping, not by assuming linearity
+    # (it is very nearly linear here -- ~2.69 km/row -- but that is a property
+    # of this FPA's GD curves, not something to bake in).
+    XAXIS = {"eta": (eta_rows, r"along-slit $\eta$"),
+             "row": (rows, "detector row"),
+             "km": (x_km, "along-slit distance [km]")}
+    xv, xlabel = XAXIS[args.x_axis]
+
     plt.rcParams.update(PLOT_STYLE)
     fig, axes = plt.subplots(2 * len(names), 1, figsize=(13, 2.4 * 2 * len(names)),
                              sharex=True,
@@ -118,28 +143,37 @@ def main() -> int:
                f"= {m['corr_length']*als.SLIT_HALF_KM:.0f} km)" if m["free"]
                else "frozen at local truth")
 
-        ax_v.plot(rows, truth[name], color="black", lw=1.2, label="truth", zorder=5)
+        ax_v.plot(xv, truth[name], color="black", lw=1.2, label="truth", zorder=5)
         for sv in solves:
             v = stitched[sv][0].get(name)
             if v is None:
                 continue
             c, ls = SOLVE_STYLE[sv]
-            ax_v.plot(rows, v, color=c, ls=ls, lw=0.9, alpha=0.85, label=sv)
+            ax_v.plot(xv, v, color=c, ls=ls, lw=0.9, alpha=0.85, label=sv)
             with np.errstate(invalid="ignore", divide="ignore"):
-                ax_d.plot(rows, (v - truth[name]) / truth[name], color=c, ls=ls, lw=0.8)
+                ax_d.plot(xv, (v - truth[name]) / truth[name], color=c, ls=ls, lw=0.8)
+        if i == 0 and args.x_axis != "row":
+            sec = ax_v.secondary_xaxis(
+                "top", functions=(lambda t: np.interp(t, xv, rows),
+                                  lambda r: np.interp(r, rows, xv)))
+            sec.set_xlabel("detector row", fontsize=9, labelpad=2)
+            # clamp to the real detector range: np.interp extrapolates flat
+            # outside it, which otherwise renders overlapping ticks past 1023
+            sec.set_xticks([0, 200, 400, 600, 800, 1000])
+            sec.tick_params(labelsize=8)
         ax_v.set_ylabel(name)
-        ax_v.set_title(f"{name} -- {tag}", fontsize=10)
+        ax_v.set_title(f"{name} -- {tag}", fontsize=10,
+                       pad=26 if (i == 0 and args.x_axis != "row") else 6)
         ax_v.legend(fontsize=8, loc="upper right")
         ax_d.axhline(0, color="black", lw=0.6)
         ax_d.set_ylabel("frac. dev.\nfrom truth")
-        if not m["free"]:
-            # A frozen row must sit exactly on truth; show the achieved scale
-            # rather than an empty axis, so a violation is obvious.
-            worst = max(np.nanmax(np.abs((stitched[sv][0][name] - truth[name])
-                                         / truth[name])) for sv in solves)
-            ax_d.text(0.99, 0.85, f"max |dev| = {worst:.2e}", ha="right",
-                      transform=ax_d.transAxes, fontsize=8, color="0.35")
-    axes[-1].set_xlabel("detector row")
+        worst = max(np.nanmax(np.abs((stitched[sv][0][name] - truth[name])
+                                     / truth[name])) for sv in solves)
+        note = ("bin-grid representation error (no retrieval)" if not m["free"]
+                else "retrieval + representation error")
+        ax_d.text(0.99, 0.82, f"max |dev| = {worst:.2e}   {note}", ha="right",
+                  transform=ax_d.transAxes, fontsize=7.5, color="0.35")
+    axes[-1].set_xlabel(xlabel)
 
     fig.suptitle(f"FPA{fpa} state vector along the slit -- {in_path.stem}", fontsize=12.5)
     fig.tight_layout(rect=[0, 0, 1, 0.99])
