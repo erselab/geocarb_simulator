@@ -1,0 +1,44 @@
+Building FPA2 band basics (real geometry/ILS, no realistic-scene truth needed)...
+ramp baseline (atm_center's own CO2): 415.7654 ppm
+done.
+
+center row_lo row_hi width   G rows_crossed coarse_rms coarse_vs_pred  hires_rms  hires_max
+  [[c25] coarse] iter 0: |dx|=1.504e-02 rms_resid=0.01874
+  [[c25] coarse] iter 1: |dx|=5.608e-05 rms_resid=0.00501
+  [[c25] coarse] iter 2: |dx|=2.129e-08 rms_resid=0.00501
+  [[c25] hires] iter 0: |dx|=1.710e-02 rms_resid=0.01874
+  [[c25] hires] iter 1: |dx|=6.107e-05 rms_resid=0.0008053
+  [[c25] hires] iter 2: |dx|=1.837e-08 rms_resid=0.0008054
+    25     21     29     9   3       0.0049     1.2360       2.652254   0.019489   0.040797 (14s)
+  [[c275] coarse] iter 0: |dx|=1.530e-02 rms_resid=0.01538
+  [[c275] coarse] iter 1: |dx|=4.950e-05 rms_resid=0.003319
+  [[c275] coarse] iter 2: |dx|=1.786e-08 rms_resid=0.003319
+  [[c275] hires] iter 0: |dx|=1.719e-02 rms_resid=0.01538
+  [[c275] hires] iter 1: |dx|=5.605e-05 rms_resid=0.001175
+  [[c275] hires] iter 2: |dx|=1.649e-08 rms_resid=0.001173
+   275    269    281    13   4       2.7313     0.8118       1.717280   0.083426   0.189277 (20s)
+  [[c525] coarse] iter 0: |dx|=1.983e-02 rms_resid=0.0149
+  [[c525] coarse] iter 1: |dx|=6.150e-05 rms_resid=0.001434
+  [[c525] coarse] iter 2: |dx|=2.238e-08 rms_resid=0.001433
+  [[c525] hires] iter 0: |dx|=2.048e-02 rms_resid=0.0149
+  [[c525] hires] iter 1: |dx|=6.447e-05 rms_resid=0.0006015
+  [[c525] hires] iter 2: |dx|=1.987e-08 rms_resid=0.0005992
+   525    513    537    25   8       5.3737     0.3776       0.790330   0.065914   0.241125 (45s)
+  [[c775] coarse] iter 0: |dx|=2.288e-02 rms_resid=0.01464
+  [[c775] coarse] iter 1: |dx|=6.846e-05 rms_resid=0.0009122
+  [[c775] coarse] iter 2: |dx|=2.510e-08 rms_resid=0.0009111
+  [[c775] hires] iter 0: |dx|=2.329e-02 rms_resid=0.01464
+  [[c775] hires] iter 1: |dx|=6.952e-05 rms_resid=0.000446
+  [[c775] hires] iter 2: |dx|=2.118e-08 rms_resid=0.0004432
+   775    758    792    35  12       7.9375     0.2580       0.539538   0.063256   0.253093 (76s)
+  [[c1000] coarse] iter 0: |dx|=2.493e-02 rms_resid=0.01455
+  [[c1000] coarse] iter 1: |dx|=7.336e-05 rms_resid=0.0007394
+  [[c1000] coarse] iter 2: |dx|=2.639e-08 rms_resid=0.0007382
+  [[c1000] hires] iter 0: |dx|=2.556e-02 rms_resid=0.01455
+  [[c1000] hires] iter 1: |dx|=7.526e-05 rms_resid=0.0004182
+  [[c1000] hires] iter 2: |dx|=2.480e-08 rms_resid=0.0004153
+  1000    978   1022    45  15      10.1819     0.2139       0.442715   0.051910   0.224799 (104s)
+
+summary: hi-res rms bias should stay near-zero (GN-tolerance noise) at every keystone level if nothing else is wrong; coarse rms should track the predicted sawtooth closely (small coarse_vs_pred_rms) at every level too.
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/plots/joint_block/gd_ramp_self_consistency_test_fpa2_gamma3_sigmaabs1.png
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/plots/joint_block/gd_ramp_self_consistency_trend_fpa2_gamma3_sigmaabs1.png

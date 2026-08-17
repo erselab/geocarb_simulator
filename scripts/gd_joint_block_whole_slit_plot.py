@@ -6,11 +6,13 @@ the adaptive window/G sizing itself. Every quantity here is reconstructed
 from the sweep's own saved state vectors (x_coarse, x_hires per window) --
 no re-solving.
 
-Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_block_whole_slit_plot.py
-Output: plots/joint_block/gd_joint_block_whole_slit_fpa2.png
+Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_block_whole_slit_plot.py \\
+        [results/gd_joint_block_whole_slit_fpa2_gratio1.pkl]
+Output: plots/joint_block/<input stem>.png
 """
 from __future__ import annotations
 
+import argparse
 import pickle
 import sys
 from pathlib import Path
@@ -29,7 +31,14 @@ from geocarb_gert.gd_polynomials import rows_crossed  # noqa: E402
 
 
 def main() -> int:
-    with open(REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}.pkl", "rb") as f:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("input", type=str, nargs="?",
+                    default=str(REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}.pkl"),
+                    help="path to a gd_joint_block_whole_slit_sweep.py (or _merge.py) output pickle")
+    args = ap.parse_args()
+    in_path = Path(args.input)
+
+    with open(in_path, "rb") as f:
         d = pickle.load(f)
     results = d["results"]
     windows = sorted(results.values(), key=lambda r: r["row_lo"])
@@ -133,7 +142,7 @@ def main() -> int:
     fig.tight_layout()
     plots_dir = REPO_ROOT / "plots" / "joint_block"
     plots_dir.mkdir(parents=True, exist_ok=True)
-    out_path = plots_dir / f"gd_joint_block_whole_slit_fpa{FPA}.png"
+    out_path = plots_dir / f"{in_path.stem}.png"
     fig.savefig(out_path, dpi=140, bbox_inches="tight")
     plt.close(fig)
     print(f"\nsaved {out_path}")

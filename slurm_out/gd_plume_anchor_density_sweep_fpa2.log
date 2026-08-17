@@ -1,0 +1,104 @@
+Building realistic-scene FPA2 band (renders the real 1024x1024 detector image)...
+done.
+
+15 (window, G) solves queued, OLD vs NEW anchor scheme both solved at each (gamma=3, sigma_abs=0.1)
+solving with 16 workers...
+  [[108-116 G2] old] iter 0: |dx|=2.913e-04 rms_resid=0.0009973
+  [[108-116 G3] old] iter 0: |dx|=4.121e-04 rms_resid=0.0009973
+  [[331-345 G2] old] iter 0: |dx|=1.548e-04 rms_resid=0.003195
+  [[108-116 G5] old] iter 0: |dx|=4.742e-04 rms_resid=0.0009973
+  [[108-116 G2] old] iter 1: |dx|=7.556e-08 rms_resid=0.0007856
+  [[331-345 G5] old] iter 0: |dx|=2.285e-04 rms_resid=0.003195
+  [[108-116 G9] old] iter 0: |dx|=5.282e-04 rms_resid=0.0009973
+  [[108-116 G3] old] iter 1: |dx|=1.088e-07 rms_resid=0.0006566
+  [[331-345 G8] old] iter 0: |dx|=2.465e-04 rms_resid=0.003195
+  [[331-345 G2] old] iter 1: |dx|=4.095e-08 rms_resid=0.003187
+  [[108-116 G2] new] iter 0: |dx|=1.024e-02 rms_resid=0.02222
+  [[884-924 G2] old] iter 0: |dx|=1.506e-06 rms_resid=0.0006366
+  [[108-116 G5] old] iter 1: |dx|=9.737e-08 rms_resid=0.0006652
+  [[108-116 G2] new] iter 1: |dx|=1.289e-05 rms_resid=0.005383
+  [[108-116 G18] old] iter 0: |dx|=5.292e-04 rms_resid=0.0009973
+  [[108-116 G3] new] iter 0: |dx|=1.926e-03 rms_resid=0.006146
+  [[108-116 G2] new] iter 2: |dx|=1.368e-08 rms_resid=0.00537
+  [[331-345 G2] new] iter 0: |dx|=4.558e-02 rms_resid=0.09643
+  1/15 (108, 116, 2): old=1.8609 new=1.0144 (11s elapsed)
+  [[108-116 G3] new] iter 1: |dx|=1.669e-06 rms_resid=0.003316
+  [[331-345 G15] old] iter 0: |dx|=2.549e-04 rms_resid=0.003195
+  [[331-345 G5] old] iter 1: |dx|=3.599e-08 rms_resid=0.003184
+  [[108-116 G9] old] iter 1: |dx|=8.631e-08 rms_resid=0.0006986
+  2/15 (108, 116, 3): old=0.4273 new=0.8767 (12s elapsed)
+  [[108-116 G5] new] iter 0: |dx|=1.228e-03 rms_resid=0.002724
+  [[331-345 G2] new] iter 1: |dx|=4.490e-04 rms_resid=0.04007
+  [[331-345 G2] new] iter 2: |dx|=8.497e-07 rms_resid=0.03996
+  [[884-924 G2] new] iter 0: |dx|=4.096e-03 rms_resid=0.009463
+  3/15 (331, 345, 2): old=0.3624 new=5.2051 (15s elapsed)
+  [[331-345 G8] old] iter 1: |dx|=3.414e-08 rms_resid=0.003184
+  [[108-116 G5] new] iter 1: |dx|=3.410e-07 rms_resid=0.001823
+  [[884-924 G7] old] iter 0: |dx|=4.356e-04 rms_resid=0.0006366
+  4/15 (108, 116, 5): old=0.1687 new=0.3464 (16s elapsed)
+  [[331-345 G5] new] iter 0: |dx|=9.526e-04 rms_resid=0.01314
+  [[108-116 G9] new] iter 0: |dx|=5.785e-04 rms_resid=0.001522
+  [[884-924 G2] new] iter 1: |dx|=4.289e-06 rms_resid=0.005951
+  [[108-116 G18] old] iter 1: |dx|=3.569e-08 rms_resid=0.000759
+  [[331-345 G30] old] iter 0: |dx|=2.487e-04 rms_resid=0.003195
+  5/15 (884, 924, 2): old=1.5161 new=1.2045 (20s elapsed)
+  [[331-345 G5] new] iter 1: |dx|=3.373e-07 rms_resid=0.01306
+  6/15 (331, 345, 5): old=0.0471 new=0.1963 (21s elapsed)
+  [[331-345 G8] new] iter 0: |dx|=1.087e-03 rms_resid=0.005914
+  [[108-116 G9] new] iter 1: |dx|=1.636e-07 rms_resid=0.00122
+  [[331-345 G15] old] iter 1: |dx|=2.987e-08 rms_resid=0.003185
+  7/15 (108, 116, 9): old=0.0839 new=0.1745 (23s elapsed)
+  [[884-924 G14] old] iter 0: |dx|=5.094e-04 rms_resid=0.0006366
+  [[331-345 G8] new] iter 1: |dx|=3.602e-07 rms_resid=0.005803
+  8/15 (331, 345, 8): old=0.0312 new=0.0821 (28s elapsed)
+  [[108-116 G18] new] iter 0: |dx|=7.659e-04 rms_resid=0.001497
+  [[884-924 G7] old] iter 1: |dx|=1.100e-07 rms_resid=0.0005347
+  [[331-345 G15] new] iter 0: |dx|=2.487e-04 rms_resid=0.002721
+  [[108-116 G18] new] iter 1: |dx|=1.457e-07 rms_resid=0.001115
+  [[331-345 G30] old] iter 1: |dx|=2.152e-08 rms_resid=0.003186
+  9/15 (108, 116, 18): old=0.0593 new=0.1212 (39s elapsed)
+  [[884-924 G28] old] iter 0: |dx|=5.713e-04 rms_resid=0.0006366
+  [[884-924 G7] new] iter 0: |dx|=1.386e-03 rms_resid=0.003302
+  [[331-345 G15] new] iter 1: |dx|=4.029e-08 rms_resid=0.002709
+  10/15 (331, 345, 15): old=0.0235 new=0.0260 (44s elapsed)
+  [[884-924 G14] old] iter 1: |dx|=1.033e-07 rms_resid=0.0005197
+  [[884-924 G7] new] iter 1: |dx|=7.016e-07 rms_resid=0.002911
+  [[884-924 G41] old] iter 0: |dx|=5.975e-04 rms_resid=0.0006366
+  11/15 (884, 924, 7): old=0.2281 new=0.4949 (53s elapsed)
+  [[331-345 G30] new] iter 0: |dx|=1.648e-04 rms_resid=0.001528
+  [[884-924 G14] new] iter 0: |dx|=4.047e-04 rms_resid=0.001264
+  [[884-924 G28] old] iter 1: |dx|=8.815e-08 rms_resid=0.0005257
+  [[331-345 G30] new] iter 1: |dx|=2.203e-08 rms_resid=0.00152
+  12/15 (331, 345, 30): old=0.0169 new=0.0144 (76s elapsed)
+  [[884-924 G14] new] iter 1: |dx|=1.310e-07 rms_resid=0.001221
+  13/15 (884, 924, 14): old=0.1467 new=0.1742 (83s elapsed)
+  [[884-924 G41] old] iter 1: |dx|=9.731e-08 rms_resid=0.0005329
+  [[884-924 G28] new] iter 0: |dx|=4.522e-04 rms_resid=0.0005806
+  [[884-924 G28] new] iter 1: |dx|=1.166e-07 rms_resid=0.000497
+  14/15 (884, 924, 28): old=0.0671 new=0.0698 (139s elapsed)
+  [[884-924 G41] new] iter 0: |dx|=5.536e-04 rms_resid=0.0005655
+  [[884-924 G41] new] iter 1: |dx|=1.197e-07 rms_resid=0.0004554
+  15/15 (884, 924, 41): old=0.0437 new=0.0515 (184s elapsed)
+
+all done (184s): 15/15 solves succeeded
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/results/gd_plume_anchor_density_sweep_fpa2.pkl
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/plots/joint_block/gd_plume_anchor_density_sweep_fpa2.png
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/plots/joint_block/gd_plume_anchor_density_sweep_profiles_fpa2.png
+
+summary:
+      window    G   old_rms   new_rms  improvement   resid_old   resid_new
+331-   345    2    0.3624    5.2051     -1336.5%    3.19e-03    4.00e-02
+331-   345    5    0.0471    0.1963      -316.5%    3.18e-03    1.31e-02
+331-   345    8    0.0312    0.0821      -163.4%    3.18e-03    5.80e-03
+331-   345   15    0.0235    0.0260       -10.7%    3.18e-03    2.71e-03
+331-   345   30    0.0169    0.0144        14.8%    3.19e-03    1.52e-03
+884-   924    2    1.5161    1.2045        20.6%    6.37e-04    5.95e-03
+884-   924    7    0.2281    0.4949      -117.0%    5.35e-04    2.91e-03
+884-   924   14    0.1467    0.1742       -18.8%    5.20e-04    1.22e-03
+884-   924   28    0.0671    0.0698        -3.9%    5.26e-04    4.97e-04
+884-   924   41    0.0437    0.0515       -18.0%    5.33e-04    4.55e-04
+108-   116    2    1.8609    1.0144        45.5%    7.86e-04    5.37e-03
+108-   116    3    0.4273    0.8767      -105.2%    6.57e-04    3.32e-03
+108-   116    5    0.1687    0.3464      -105.3%    6.65e-04    1.82e-03
+108-   116    9    0.0839    0.1745      -108.0%    6.99e-04    1.22e-03
+108-   116   18    0.0593    0.1212      -104.2%    7.59e-04    1.12e-03

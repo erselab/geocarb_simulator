@@ -1,0 +1,12 @@
+Building realistic-scene FPA2 band (renders the real 1024x1024 detector image)...
+done.
+
+58 windows total, widths min=9 max=45 mean=17.7, total rows=1024
+task 56/58: 1 windows assigned (round-robin, tiles[56::58])
+solving with 4 workers...
+  [[968-1012] coarse] iter 0: |dx|=8.156e-06 rms_resid=2.439e-05
+  [[968-1012] hires] iter 0: |dx|=2.242e-06 rms_resid=2.398e-05
+  1/1 rows 968-1012: G=45 t_coarse=51s t_hires=55s (106s elapsed)
+
+all done (106s): 1/1 windows solved successfully
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/results/gd_joint_block_whole_slit_fpa2_gratio1_parts/task056of58.pkl

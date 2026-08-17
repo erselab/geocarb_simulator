@@ -1,0 +1,187 @@
+reusing 58 windows/G/bin_centers from gd_joint_block_whole_slit_fpa2.pkl (gamma=3.0, sigma_abs=0.1, pad=4)
+Building uniform-scene FPA2 band...
+done.
+
+solving 58 windows with 16 workers...
+  [[0-8] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[126-134] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[81-89] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[135-143] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[99-107] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[18-26] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[72-80] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[90-98] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[54-62] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[27-35] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[9-17] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[45-53] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[117-125] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[36-44] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[108-116] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[63-71] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[0-8] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  1/58 rows 0-8: G=3 t_coarse=2s t_hires=3s (5s elapsed)
+  [[81-89] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[18-26] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[9-17] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[126-134] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[99-107] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[135-143] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[90-98] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[54-62] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[117-125] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[36-44] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[108-116] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[45-53] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[72-80] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[27-35] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[63-71] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  2/58 rows 81-89: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  3/58 rows 126-134: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  4/58 rows 135-143: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  5/58 rows 99-107: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  6/58 rows 18-26: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  7/58 rows 54-62: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  8/58 rows 90-98: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  9/58 rows 108-116: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  10/58 rows 117-125: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  11/58 rows 9-17: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  12/58 rows 72-80: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  13/58 rows 45-53: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  14/58 rows 63-71: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  15/58 rows 36-44: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  16/58 rows 27-35: G=3 t_coarse=3s t_hires=4s (7s elapsed)
+  [[144-152] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[153-161] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[162-170] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[180-188] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[171-179] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[189-197] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[198-206] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[207-215] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[216-226] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[227-237] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[238-248] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[249-261] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[275-287] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[288-300] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[262-274] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[301-315] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[144-152] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  17/58 rows 144-152: G=3 t_coarse=2s t_hires=4s (12s elapsed)
+  [[153-161] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[180-188] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[162-170] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[171-179] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[198-206] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[207-215] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[189-197] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  18/58 rows 153-161: G=3 t_coarse=2s t_hires=4s (14s elapsed)
+  19/58 rows 162-170: G=3 t_coarse=2s t_hires=4s (14s elapsed)
+  20/58 rows 171-179: G=3 t_coarse=2s t_hires=4s (14s elapsed)
+  21/58 rows 180-188: G=3 t_coarse=2s t_hires=4s (14s elapsed)
+  22/58 rows 198-206: G=3 t_coarse=2s t_hires=4s (14s elapsed)
+  23/58 rows 207-215: G=3 t_coarse=2s t_hires=4s (14s elapsed)
+  24/58 rows 189-197: G=3 t_coarse=2s t_hires=4s (14s elapsed)
+  [[227-237] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[216-226] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[238-248] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  25/58 rows 227-237: G=4 t_coarse=3s t_hires=5s (16s elapsed)
+  26/58 rows 216-226: G=4 t_coarse=3s t_hires=5s (16s elapsed)
+  [[275-287] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  27/58 rows 238-248: G=4 t_coarse=3s t_hires=5s (16s elapsed)
+  [[249-261] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[288-300] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[262-274] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[316-330] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  28/58 rows 275-287: G=4 t_coarse=4s t_hires=6s (17s elapsed)
+  29/58 rows 249-261: G=4 t_coarse=4s t_hires=6s (17s elapsed)
+  30/58 rows 288-300: G=4 t_coarse=4s t_hires=6s (17s elapsed)
+  31/58 rows 262-274: G=4 t_coarse=4s t_hires=6s (17s elapsed)
+  [[331-345] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[301-315] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  32/58 rows 301-315: G=5 t_coarse=4s t_hires=7s (19s elapsed)
+  [[346-362] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[363-379] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[380-398] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[399-417] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[418-438] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[439-459] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[316-330] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[460-482] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[483-505] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  33/58 rows 316-330: G=5 t_coarse=4s t_hires=7s (24s elapsed)
+  [[506-530] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[331-345] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[531-555] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  34/58 rows 331-345: G=5 t_coarse=4s t_hires=7s (25s elapsed)
+  [[556-582] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[583-609] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[346-362] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[363-379] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  35/58 rows 346-362: G=6 t_coarse=6s t_hires=8s (28s elapsed)
+  36/58 rows 363-379: G=6 t_coarse=6s t_hires=8s (28s elapsed)
+  [[380-398] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[610-638] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[399-417] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  37/58 rows 380-398: G=6 t_coarse=6s t_hires=9s (29s elapsed)
+  38/58 rows 399-417: G=6 t_coarse=6s t_hires=9s (29s elapsed)
+  [[639-669] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[418-438] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[439-459] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  39/58 rows 418-438: G=7 t_coarse=7s t_hires=10s (32s elapsed)
+  40/58 rows 439-459: G=7 t_coarse=7s t_hires=10s (32s elapsed)
+  [[460-482] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[670-700] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[483-505] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  41/58 rows 460-482: G=8 t_coarse=8s t_hires=12s (36s elapsed)
+  [[506-530] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  42/58 rows 483-505: G=8 t_coarse=9s t_hires=12s (37s elapsed)
+  [[531-555] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  43/58 rows 506-530: G=8 t_coarse=9s t_hires=13s (38s elapsed)
+  44/58 rows 531-555: G=8 t_coarse=9s t_hires=12s (38s elapsed)
+  [[701-733] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[1013-1023] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[556-582] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[583-609] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  45/58 rows 556-582: G=9 t_coarse=10s t_hires=14s (42s elapsed)
+  46/58 rows 583-609: G=9 t_coarse=10s t_hires=14s (42s elapsed)
+  [[734-768] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[1013-1023] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[769-805] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  47/58 rows 1013-1023: G=4 t_coarse=3s t_hires=4s (44s elapsed)
+  [[610-638] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  48/58 rows 610-638: G=10 t_coarse=12s t_hires=16s (45s elapsed)
+  [[806-844] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[845-883] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[639-669] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  49/58 rows 639-669: G=10 t_coarse=12s t_hires=17s (48s elapsed)
+  [[884-924] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[925-967] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[670-700] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  50/58 rows 670-700: G=10 t_coarse=12s t_hires=16s (53s elapsed)
+  [[701-733] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  51/58 rows 701-733: G=11 t_coarse=14s t_hires=17s (57s elapsed)
+  [[968-1012] coarse-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[734-768] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  52/58 rows 734-768: G=12 t_coarse=16s t_hires=19s (63s elapsed)
+  [[769-805] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  53/58 rows 769-805: G=12 t_coarse=16s t_hires=20s (64s elapsed)
+  [[806-844] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  [[845-883] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  54/58 rows 806-844: G=13 t_coarse=18s t_hires=22s (69s elapsed)
+  55/58 rows 845-883: G=13 t_coarse=18s t_hires=22s (69s elapsed)
+  [[884-924] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  56/58 rows 884-924: G=14 t_coarse=20s t_hires=23s (75s elapsed)
+  [[925-967] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  57/58 rows 925-967: G=14 t_coarse=20s t_hires=24s (77s elapsed)
+  [[968-1012] hires-nk] iter 0: |dx|=0.000e+00 rms_resid=0
+  58/58 rows 968-1012: G=15 t_coarse=22s t_hires=25s (83s elapsed)
+
+all done (83s): 58/58 windows solved successfully
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/results/gd_joint_block_keystone_free_fpa2_uniform.pkl
+reference (keystone-present) curve from gd_joint_block_whole_slit_fpa2_uniform.pkl
+
+keystone-free ceiling: coarse rms=0.0000 max=0.0000 ppm; hires rms=0.0000 max=0.0000 ppm
+real (keystone-present): coarse rms=0.0000 max=0.0000 ppm; hires rms=0.0000 max=0.0000 ppm
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/plots/gd_joint_block_keystone_free_fpa2_uniform.png

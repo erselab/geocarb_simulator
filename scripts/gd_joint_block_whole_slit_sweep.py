@@ -98,10 +98,11 @@ def _solve_window(row_lo: int, row_hi: int):
                                             _SWEEP["geo"], _SWEEP["solar"], _SWEEP["albedo"])
     wn_hires, ils, gamma, sigma_abs = _SWEEP["wn_hires"], _SWEEP["ils"], _SWEEP["gamma"], _SWEEP["sigma_abs"]
     uniform, atm_center = _SWEEP["uniform"], _SWEEP["atm_center"]
+    g_ratio = _SWEEP.get("g_ratio", G_RATIO)
 
     rows_win = np.arange(row_lo, row_hi + 1)
     width = len(rows_win)
-    G = max(2, int(round(width / G_RATIO)))
+    G = max(2, int(round(width / g_ratio)))
     cols = np.arange(1024.0)
     eta_all = np.stack([_eta_of(FPA, cols, np.full(1024, float(i))) for i in rows_win])
     bin_centers = pixel_density_bin_centers(eta_all.ravel(), G)
@@ -132,6 +133,7 @@ def _solve_window(row_lo: int, row_hi: int):
                                         gamma=gamma, sigma_abs=sigma_abs, label=f"[{row_lo}-{row_hi}] coarse")
     resid_coarse = y_true - forward_coarse(x_coarse)
     out["x_coarse"] = x_coarse
+    out["resid_coarse"] = resid_coarse
     out["resid_coarse_rms"] = float(np.sqrt(np.mean(resid_coarse ** 2)))
     out["t_coarse"] = time.time() - t0
 
@@ -144,6 +146,7 @@ def _solve_window(row_lo: int, row_hi: int):
                                        gamma=gamma, sigma_abs=sigma_abs, label=f"[{row_lo}-{row_hi}] hires")
     resid_hires = y_true - forward_hires(x_hires)
     out["x_hires"] = x_hires
+    out["resid_hires"] = resid_hires
     out["G_eff"] = len(anchor_rows)
     out["resid_hires_rms"] = float(np.sqrt(np.mean(resid_hires ** 2)))
     out["t_hires"] = time.time() - t0
@@ -169,7 +172,20 @@ def main() -> int:
                     "genuinely uniform truth, correct bias is EXACTLY zero everywhere "
                     "(no bin-quantization/resolution-floor effect is even possible), so "
                     "any nonzero structure here is unambiguously implementation, not physics.")
+    ap.add_argument("--g-ratio", type=float, default=G_RATIO, help="G = max(2, round(width/"
+                    "g_ratio)) per window -- default matches the production convention "
+                    "(G_RATIO=3). Pass 1.0 for 'one bin per row' (ground-footprint-tied "
+                    "resolution, docs/JOINT_BLOCK_MIGRATION_PLAN.md Sec.9).")
+    ap.add_argument("--task-id", type=int, default=None, help="SLURM-array-friendly "
+                    "partitioning: process only tiles[task_id::n_tasks] (round-robin, so "
+                    "wide/narrow windows are spread across tasks rather than grouped) and "
+                    "write a per-task output file instead of the combined one. Requires "
+                    "--n-tasks. Merge outputs afterward with gd_joint_block_whole_slit_merge.py.")
+    ap.add_argument("--n-tasks", type=int, default=None, help="total number of tasks for "
+                    "--task-id round-robin partitioning (e.g. SLURM_ARRAY_TASK_COUNT).")
     args = ap.parse_args()
+    if (args.task_id is None) != (args.n_tasks is None):
+        ap.error("--task-id and --n-tasks must be given together")
 
     scene_label = "uniform" if args.uniform else "realistic"
     print(f"Building {scene_label}-scene FPA{FPA} band (renders the real 1024x1024 detector image)...", flush=True)
@@ -185,14 +201,21 @@ def main() -> int:
     wide_win, wide_inst, albedo = band_basics(FPA, atm_center, absco, geo, solar)
     print("done.\n", flush=True)
 
-    tiles = build_window_tiles(FPA)
-    widths = [hi - lo + 1 for lo, hi in tiles]
-    print(f"{len(tiles)} windows, widths min={min(widths)} max={max(widths)} "
+    all_tiles = build_window_tiles(FPA)
+    widths = [hi - lo + 1 for lo, hi in all_tiles]
+    print(f"{len(all_tiles)} windows total, widths min={min(widths)} max={max(widths)} "
          f"mean={np.mean(widths):.1f}, total rows={sum(widths)}", flush=True)
+
+    if args.task_id is not None:
+        tiles = all_tiles[args.task_id::args.n_tasks]
+        print(f"task {args.task_id}/{args.n_tasks}: {len(tiles)} windows assigned "
+             f"(round-robin, tiles[{args.task_id}::{args.n_tasks}])", flush=True)
+    else:
+        tiles = all_tiles
 
     _SWEEP.update(dict(band=band, absco=absco, wide_inst=wide_inst, geo=geo, solar=solar,
                        albedo=albedo, wn_hires=band["wn_hires"], ils=band["ils"],
-                       gamma=args.gamma, sigma_abs=args.sigma_abs,
+                       gamma=args.gamma, sigma_abs=args.sigma_abs, g_ratio=args.g_ratio,
                        uniform=args.uniform, atm_center=atm_center))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
@@ -217,12 +240,20 @@ def main() -> int:
     print(f"\nall done ({time.time()-t0:.0f}s): {n_ok}/{len(tiles)} windows solved successfully", flush=True)
 
     suffix = "_uniform" if args.uniform else ""
-    out_path = REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}.pkl"
-    out_path.parent.mkdir(exist_ok=True)
+    suffix += f"_gratio{args.g_ratio:g}"
+    payload = {"results": results, "tiles": all_tiles, "fpa": FPA, "uniform": args.uniform,
+              "gamma": args.gamma, "sigma_abs": args.sigma_abs,
+              "g_ratio": args.g_ratio, "min_window": MIN_WINDOW, "pad": PAD}
+    if args.task_id is not None:
+        payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
+        out_dir = REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}_parts"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"task{args.task_id:03d}of{args.n_tasks}.pkl"
+    else:
+        out_path = REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}.pkl"
+        out_path.parent.mkdir(exist_ok=True)
     with open(out_path, "wb") as f:
-        pickle.dump({"results": results, "tiles": tiles, "fpa": FPA, "uniform": args.uniform,
-                    "gamma": args.gamma, "sigma_abs": args.sigma_abs,
-                    "g_ratio": G_RATIO, "min_window": MIN_WINDOW, "pad": PAD}, f)
+        pickle.dump(payload, f)
     print(f"saved {out_path}")
     return 0
 

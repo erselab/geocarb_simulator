@@ -1,0 +1,15 @@
+Building realistic-scene FPA2 band...
+done.
+
+Building independent keystone-free + PSF 2D array (no joint-block code)...
+done (74s).
+
+1024 independent single-row retrievals (order=2)...
+  200/1024 done (151s)
+  400/1024 done (267s)
+  600/1024 done (394s)
+  800/1024 done (512s)
+  1000/1024 done (629s)
+all done (634s): free 1024/1024, fixed 1024/1024 converged
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/results/gd_keystone_free_1d_ceiling_fpa2.pkl
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/plots/gd_keystone_free_1d_ceiling_fpa2.png

@@ -1,0 +1,105 @@
+Building realistic-scene FPA2 band (renders the real 1024x1024 detector image)...
+done.
+
+15 (window, G) solves queued, G sweeping 5 -> G_eff+1 per window, OLD (row-uniform) vs NEW (pixel-density) anchors both solved at each (gamma=3, sigma_abs=0.1)
+  331-345: G_eff=23, G values=[5, 12, 18, 23, 24]
+  884-924: G_eff=49, G values=[5, 24, 39, 49, 50]
+  108-116: G_eff=17, G values=[5, 8, 14, 17, 18]
+solving with 16 workers...
+  [[108-116 G5] old] iter 0: |dx|=4.742e-04 rms_resid=0.0009973
+  [[108-116 G8] old] iter 0: |dx|=5.188e-04 rms_resid=0.0009973
+  [[331-345 G5] old] iter 0: |dx|=2.285e-04 rms_resid=0.003195
+  [[108-116 G14] old] iter 0: |dx|=5.355e-04 rms_resid=0.0009973
+  [[108-116 G5] old] iter 1: |dx|=9.737e-08 rms_resid=0.0006652
+  [[108-116 G17] old] iter 0: |dx|=5.270e-04 rms_resid=0.0009973
+  [[108-116 G18] old] iter 0: |dx|=5.292e-04 rms_resid=0.0009973
+  [[331-345 G12] old] iter 0: |dx|=2.520e-04 rms_resid=0.003195
+  [[108-116 G8] old] iter 1: |dx|=7.867e-08 rms_resid=0.0006845
+  [[331-345 G5] old] iter 1: |dx|=3.599e-08 rms_resid=0.003184
+  [[331-345 G18] old] iter 0: |dx|=2.560e-04 rms_resid=0.003195
+  [[884-924 G5] old] iter 0: |dx|=1.510e-04 rms_resid=0.0006366
+  [[108-116 G5] new] iter 0: |dx|=4.820e-04 rms_resid=0.0009732
+  [[108-116 G14] old] iter 1: |dx|=6.101e-08 rms_resid=0.0007291
+  [[331-345 G23] old] iter 0: |dx|=2.546e-04 rms_resid=0.003195
+  [[331-345 G24] old] iter 0: |dx|=2.540e-04 rms_resid=0.003195
+  [[108-116 G8] new] iter 0: |dx|=5.111e-04 rms_resid=0.0009732
+  [[108-116 G5] new] iter 1: |dx|=9.188e-08 rms_resid=0.0006757
+  [[108-116 G17] old] iter 1: |dx|=6.149e-08 rms_resid=0.0007363
+  1/15 (108, 116, 5): old=0.1687 new=0.1569 nullity=0 (20s elapsed)
+  [[108-116 G18] old] iter 1: |dx|=3.569e-08 rms_resid=0.000759
+  [[331-345 G5] new] iter 0: |dx|=2.913e-04 rms_resid=0.003104
+  [[331-345 G12] old] iter 1: |dx|=3.216e-08 rms_resid=0.003185
+  [[108-116 G8] new] iter 1: |dx|=7.077e-08 rms_resid=0.0006866
+  2/15 (108, 116, 8): old=0.1129 new=0.1082 nullity=0 (25s elapsed)
+  [[108-116 G14] new] iter 0: |dx|=5.179e-04 rms_resid=0.0009732
+  [[331-345 G5] new] iter 1: |dx|=6.256e-08 rms_resid=0.003084
+  [[331-345 G18] old] iter 1: |dx|=2.796e-08 rms_resid=0.003185
+  3/15 (331, 345, 5): old=0.0471 new=0.0538 nullity=0 (27s elapsed)
+  [[884-924 G5] old] iter 1: |dx|=3.354e-08 rms_resid=0.0006271
+  [[108-116 G17] new] iter 0: |dx|=5.092e-04 rms_resid=0.0009732
+  [[108-116 G18] new] iter 0: |dx|=5.087e-04 rms_resid=0.0009732
+  [[331-345 G12] new] iter 0: |dx|=3.304e-04 rms_resid=0.003104
+  [[331-345 G23] old] iter 1: |dx|=2.872e-08 rms_resid=0.003186
+  [[108-116 G14] new] iter 1: |dx|=5.752e-08 rms_resid=0.000728
+  [[331-345 G24] old] iter 1: |dx|=2.749e-08 rms_resid=0.003186
+  4/15 (108, 116, 14): old=0.0707 new=0.0665 nullity=3 (34s elapsed)
+  [[884-924 G24] old] iter 0: |dx|=5.576e-04 rms_resid=0.0006366
+  [[108-116 G17] new] iter 1: |dx|=7.004e-08 rms_resid=0.0007221
+  5/15 (108, 116, 17): old=0.0662 new=0.0633 nullity=6 (39s elapsed)
+  [[108-116 G18] new] iter 1: |dx|=2.922e-08 rms_resid=0.0007631
+  6/15 (108, 116, 18): old=0.0593 new=0.0551 nullity=7 (40s elapsed)
+  [[331-345 G12] new] iter 1: |dx|=5.888e-08 rms_resid=0.003085
+  [[331-345 G18] new] iter 0: |dx|=3.359e-04 rms_resid=0.003104
+  7/15 (331, 345, 12): old=0.0257 new=0.0334 nullity=0 (42s elapsed)
+  [[884-924 G5] new] iter 0: |dx|=1.582e-04 rms_resid=0.0006303
+  [[331-345 G23] new] iter 0: |dx|=3.345e-04 rms_resid=0.003104
+  [[331-345 G24] new] iter 0: |dx|=3.338e-04 rms_resid=0.003104
+  [[884-924 G39] old] iter 0: |dx|=5.940e-04 rms_resid=0.0006366
+  [[331-345 G18] new] iter 1: |dx|=5.252e-08 rms_resid=0.003086
+  8/15 (331, 345, 18): old=0.0219 new=0.0281 nullity=1 (55s elapsed)
+  [[884-924 G5] new] iter 1: |dx|=3.717e-08 rms_resid=0.0006195
+  9/15 (884, 924, 5): old=0.9528 new=0.9528 nullity=0 (58s elapsed)
+  [[884-924 G49] old] iter 0: |dx|=6.009e-04 rms_resid=0.0006366
+  [[331-345 G23] new] iter 1: |dx|=5.169e-08 rms_resid=0.003087
+  [[884-924 G50] old] iter 0: |dx|=6.019e-04 rms_resid=0.0006366
+  10/15 (331, 345, 23): old=0.0212 new=0.0261 nullity=6 (65s elapsed)
+  [[331-345 G24] new] iter 1: |dx|=5.155e-08 rms_resid=0.003087
+  11/15 (331, 345, 24): old=0.0205 new=0.0251 nullity=7 (66s elapsed)
+  [[884-924 G24] old] iter 1: |dx|=9.788e-08 rms_resid=0.0005229
+  [[884-924 G39] old] iter 1: |dx|=7.565e-08 rms_resid=0.000533
+  [[884-924 G24] new] iter 0: |dx|=5.571e-04 rms_resid=0.0006303
+  [[884-924 G49] old] iter 1: |dx|=7.366e-08 rms_resid=0.0005393
+  [[884-924 G50] old] iter 1: |dx|=7.502e-08 rms_resid=0.000539
+  [[884-924 G24] new] iter 1: |dx|=9.893e-08 rms_resid=0.0005154
+  12/15 (884, 924, 24): old=0.0762 new=0.0762 nullity=0 (137s elapsed)
+  [[884-924 G39] new] iter 0: |dx|=5.938e-04 rms_resid=0.0006303
+  [[884-924 G49] new] iter 0: |dx|=6.006e-04 rms_resid=0.0006303
+  [[884-924 G50] new] iter 0: |dx|=6.013e-04 rms_resid=0.0006303
+  [[884-924 G39] new] iter 1: |dx|=7.529e-08 rms_resid=0.0005255
+  13/15 (884, 924, 39): old=0.0519 new=0.0519 nullity=0 (194s elapsed)
+  [[884-924 G49] new] iter 1: |dx|=7.260e-08 rms_resid=0.0005319
+  14/15 (884, 924, 49): old=0.0420 new=0.0421 nullity=6 (230s elapsed)
+  [[884-924 G50] new] iter 1: |dx|=7.266e-08 rms_resid=0.0005319
+  15/15 (884, 924, 50): old=0.0413 new=0.0413 nullity=7 (235s elapsed)
+
+all done (235s): 15/15 solves succeeded
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/results/gd_plume_anchor_density_sweep_v2_fpa2.pkl
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/plots/joint_block/gd_plume_anchor_density_sweep_v2_fpa2.png
+
+summary:
+      window    G  G_eff   old_rms   new_rms  rank_old  rank_new  nullity
+331-   345    5     23    0.0471    0.0538         5         5        0
+331-   345   12     23    0.0257    0.0334        12        12        0
+331-   345   18     23    0.0219    0.0281        17        17        1
+331-   345   23     23    0.0212    0.0261        18        17        6
+331-   345   24     23    0.0205    0.0251        19        17        7
+884-   924    5     49    0.9528    0.9528         5         5        0
+884-   924   24     49    0.0762    0.0762        24        24        0
+884-   924   39     49    0.0519    0.0519        39        39        0
+884-   924   49     49    0.0420    0.0421        45        43        6
+884-   924   50     49    0.0413    0.0413        45        43        7
+108-   116    5     17    0.1687    0.1569         5         5        0
+108-   116    8     17    0.1129    0.1082         8         8        0
+108-   116   14     17    0.0707    0.0665        11        11        3
+108-   116   17     17    0.0662    0.0633        11        11        6
+108-   116   18     17    0.0593    0.0551        11        11        7

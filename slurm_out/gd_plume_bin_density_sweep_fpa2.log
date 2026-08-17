@@ -1,0 +1,103 @@
+Building realistic-scene FPA2 band (renders the real 1024x1024 detector image)...
+done.
+
+15 (window, G) solves queued at the production baseline (gamma=3, sigma_abs=0.1)
+solving with 16 workers...
+  [[108-116 G2] coarse] iter 0: |dx|=4.270e-03 rms_resid=0.01012
+  [[331-345 G2] coarse] iter 0: |dx|=2.400e-02 rms_resid=0.05431
+  [[108-116 G3] coarse] iter 0: |dx|=1.639e-03 rms_resid=0.003094
+  [[108-116 G2] coarse] iter 1: |dx|=1.475e-06 rms_resid=0.004565
+  [[108-116 G5] coarse] iter 0: |dx|=6.128e-04 rms_resid=0.001454
+  [[331-345 G2] coarse] iter 1: |dx|=1.190e-04 rms_resid=0.02856
+  [[884-924 G2] coarse] iter 0: |dx|=3.985e-03 rms_resid=0.009304
+  [[331-345 G5] coarse] iter 0: |dx|=3.478e-03 rms_resid=0.009345
+  [[108-116 G3] coarse] iter 1: |dx|=4.357e-07 rms_resid=0.001648
+  [[108-116 G9] coarse] iter 0: |dx|=5.082e-04 rms_resid=0.00105
+  [[331-345 G2] coarse] iter 2: |dx|=1.190e-07 rms_resid=0.02854
+  [[331-345 G8] coarse] iter 0: |dx|=1.510e-03 rms_resid=0.004536
+  [[108-116 G5] coarse] iter 1: |dx|=1.713e-07 rms_resid=0.001092
+  [[108-116 G2] hires] iter 0: |dx|=2.913e-04 rms_resid=0.0009973
+  [[884-924 G2] coarse] iter 1: |dx|=4.024e-06 rms_resid=0.005936
+  [[331-345 G5] coarse] iter 1: |dx|=1.159e-06 rms_resid=0.008443
+  [[108-116 G3] hires] iter 0: |dx|=4.121e-04 rms_resid=0.0009973
+  [[108-116 G2] hires] iter 1: |dx|=7.556e-08 rms_resid=0.0007856
+  [[108-116 G18] coarse] iter 0: |dx|=5.052e-04 rms_resid=0.0008492
+  [[108-116 G9] coarse] iter 1: |dx|=9.665e-08 rms_resid=0.0008187
+  1/15 (108, 116, 2): bias_hires_rms=1.8609 resid_hires_rms=7.86e-04 (10s elapsed)
+  [[884-924 G7] coarse] iter 0: |dx|=1.257e-03 rms_resid=0.002496
+  [[331-345 G2] hires] iter 0: |dx|=1.548e-04 rms_resid=0.003195
+  [[331-345 G15] coarse] iter 0: |dx|=4.608e-04 rms_resid=0.003067
+  [[108-116 G5] hires] iter 0: |dx|=4.742e-04 rms_resid=0.0009973
+  [[108-116 G3] hires] iter 1: |dx|=1.088e-07 rms_resid=0.0006566
+  [[331-345 G8] coarse] iter 1: |dx|=4.661e-07 rms_resid=0.004242
+  2/15 (108, 116, 3): bias_hires_rms=0.4273 resid_hires_rms=6.57e-04 (12s elapsed)
+  [[331-345 G2] hires] iter 1: |dx|=4.095e-08 rms_resid=0.003187
+  [[331-345 G5] hires] iter 0: |dx|=2.285e-04 rms_resid=0.003195
+  [[108-116 G5] hires] iter 1: |dx|=9.737e-08 rms_resid=0.0006652
+  3/15 (331, 345, 2): bias_hires_rms=0.3624 resid_hires_rms=3.19e-03 (16s elapsed)
+  4/15 (108, 116, 5): bias_hires_rms=0.1687 resid_hires_rms=6.65e-04 (16s elapsed)
+  [[108-116 G9] hires] iter 0: |dx|=5.282e-04 rms_resid=0.0009973
+  [[884-924 G2] hires] iter 0: |dx|=1.506e-06 rms_resid=0.0006366
+  [[884-924 G14] coarse] iter 0: |dx|=3.736e-04 rms_resid=0.000992
+  [[108-116 G18] coarse] iter 1: |dx|=6.466e-08 rms_resid=0.0005814
+  [[331-345 G8] hires] iter 0: |dx|=2.465e-04 rms_resid=0.003195
+  5/15 (884, 924, 2): bias_hires_rms=1.5161 resid_hires_rms=6.37e-04 (20s elapsed)
+  [[884-924 G7] coarse] iter 1: |dx|=6.747e-07 rms_resid=0.002127
+  [[331-345 G30] coarse] iter 0: |dx|=2.898e-04 rms_resid=0.001649
+  [[331-345 G5] hires] iter 1: |dx|=3.599e-08 rms_resid=0.003184
+  [[331-345 G15] coarse] iter 1: |dx|=7.063e-08 rms_resid=0.003034
+  6/15 (331, 345, 5): bias_hires_rms=0.0471 resid_hires_rms=3.18e-03 (22s elapsed)
+  [[108-116 G9] hires] iter 1: |dx|=8.631e-08 rms_resid=0.0006986
+  7/15 (108, 116, 9): bias_hires_rms=0.0839 resid_hires_rms=6.99e-04 (23s elapsed)
+  [[331-345 G8] hires] iter 1: |dx|=3.414e-08 rms_resid=0.003184
+  8/15 (331, 345, 8): bias_hires_rms=0.0312 resid_hires_rms=3.18e-03 (29s elapsed)
+  [[108-116 G18] hires] iter 0: |dx|=5.292e-04 rms_resid=0.0009973
+  [[331-345 G15] hires] iter 0: |dx|=2.549e-04 rms_resid=0.003195
+  [[884-924 G28] coarse] iter 0: |dx|=4.910e-04 rms_resid=0.0005287
+  [[884-924 G14] coarse] iter 1: |dx|=1.138e-07 rms_resid=0.0009495
+  [[884-924 G7] hires] iter 0: |dx|=4.356e-04 rms_resid=0.0006366
+  [[108-116 G18] hires] iter 1: |dx|=3.569e-08 rms_resid=0.000759
+  9/15 (108, 116, 18): bias_hires_rms=0.0593 resid_hires_rms=7.59e-04 (39s elapsed)
+  [[331-345 G30] coarse] iter 1: |dx|=2.454e-08 rms_resid=0.001627
+  [[331-345 G15] hires] iter 1: |dx|=2.987e-08 rms_resid=0.003185
+  10/15 (331, 345, 15): bias_hires_rms=0.0235 resid_hires_rms=3.18e-03 (44s elapsed)
+  [[884-924 G41] coarse] iter 0: |dx|=5.947e-04 rms_resid=0.0006269
+  [[884-924 G7] hires] iter 1: |dx|=1.100e-07 rms_resid=0.0005347
+  11/15 (884, 924, 7): bias_hires_rms=0.2281 resid_hires_rms=5.35e-04 (54s elapsed)
+  [[331-345 G30] hires] iter 0: |dx|=2.487e-04 rms_resid=0.003195
+  [[884-924 G14] hires] iter 0: |dx|=5.094e-04 rms_resid=0.0006366
+  [[884-924 G28] coarse] iter 1: |dx|=1.181e-07 rms_resid=0.0004268
+  [[331-345 G30] hires] iter 1: |dx|=2.152e-08 rms_resid=0.003186
+  12/15 (331, 345, 30): bias_hires_rms=0.0169 resid_hires_rms=3.19e-03 (77s elapsed)
+  [[884-924 G14] hires] iter 1: |dx|=1.033e-07 rms_resid=0.0005197
+  13/15 (884, 924, 14): bias_hires_rms=0.1467 resid_hires_rms=5.20e-04 (84s elapsed)
+  [[884-924 G41] coarse] iter 1: |dx|=1.171e-07 rms_resid=0.0005218
+  [[884-924 G28] hires] iter 0: |dx|=5.713e-04 rms_resid=0.0006366
+  [[884-924 G28] hires] iter 1: |dx|=8.815e-08 rms_resid=0.0005257
+  14/15 (884, 924, 28): bias_hires_rms=0.0671 resid_hires_rms=5.26e-04 (140s elapsed)
+  [[884-924 G41] hires] iter 0: |dx|=5.975e-04 rms_resid=0.0006366
+  [[884-924 G41] hires] iter 1: |dx|=9.731e-08 rms_resid=0.0005329
+  15/15 (884, 924, 41): bias_hires_rms=0.0437 resid_hires_rms=5.33e-04 (188s elapsed)
+
+all done (188s): 15/15 solves succeeded
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/results/gd_plume_bin_density_sweep_fpa2.pkl
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/plots/joint_block/gd_plume_bin_density_sweep_fpa2.png
+saved /gpfs/fs2/scratch/scrowel3_lab/geocarb_simulator/plots/joint_block/gd_plume_bin_density_sweep_profiles_fpa2.png
+
+summary:
+      window    G  bias_hires_rms  bias_coarse_rms  resid_hires_rms
+331-   345    2          0.3624           7.0049         3.19e-03
+331-   345    5          0.0471           0.4738         3.18e-03
+331-   345    8          0.0312           0.1749         3.18e-03
+331-   345   15          0.0235           0.0603         3.18e-03
+331-   345   30          0.0169           0.0167         3.19e-03
+884-   924    2          1.5161           1.0291         6.37e-04
+884-   924    7          0.2281           0.4710         5.35e-04
+884-   924   14          0.1467           0.2983         5.20e-04
+884-   924   28          0.0671           0.1482         5.26e-04
+884-   924   41          0.0437           0.0461         5.33e-04
+108-   116    2          1.8609           0.8779         7.86e-04
+108-   116    3          0.4273           0.4232         6.57e-04
+108-   116    5          0.1687           0.3055         6.65e-04
+108-   116    9          0.0839           0.1967         6.99e-04
+108-   116   18          0.0593           0.0382         7.59e-04

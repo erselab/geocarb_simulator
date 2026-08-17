@@ -115,7 +115,12 @@ def _diagonal_ils_convolve(wn_hires: np.ndarray, S_row: np.ndarray,
     sig = ils.sigma
     half = ils.ils_half_width * sig
     spacing = wn_hires[1] - wn_hires[0]
-    half_idx = max(1, int(np.ceil(half / spacing)))
+    # Matches gert.instrument.ILS.convolve's own _window() exactly: one extra
+    # hi-res point of margin (+1) plus a final exact `|delta| <= half` cutoff
+    # below -- confirmed by scripts/gd_diagonal_ils_convolve_test.py to have
+    # been a real, if tiny (~3e-7 relative in line depth), discrepancy from
+    # the reference convolution before this fix.
+    half_idx = max(1, int(np.ceil(half / spacing)) + 1)
     n_hires = len(wn_hires)
     wn0 = wn_hires[0]
 
@@ -125,9 +130,10 @@ def _diagonal_ils_convolve(wn_hires: np.ndarray, S_row: np.ndarray,
         lo = max(0, idx_c - half_idx)
         hi = min(n_hires, idx_c + half_idx + 1)
         delta = wn_hires[lo:hi] - wn_c
-        G = np.exp(-0.5 * (delta / sig) ** 2)
+        mask = np.abs(delta) <= half
+        G = np.exp(-0.5 * (delta[mask] / sig) ** 2)
         Gsum = G.sum()
-        out[j] = (G * S_row[j, lo:hi]).sum() / Gsum if Gsum > 0 else 0.0
+        out[j] = (G * S_row[j, lo:hi][mask]).sum() / Gsum if Gsum > 0 else 0.0
     return out
 
 
