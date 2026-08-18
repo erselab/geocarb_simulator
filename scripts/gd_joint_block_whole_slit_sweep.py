@@ -177,18 +177,28 @@ def _solve_window(row_lo: int, row_hi: int):
     spectrum = _make_state_spectrum(absco, wide_inst, geo, solar, albedo)
 
     # Analytic Jacobians: derivatives from gert's per-layer arrays composed with
-    # the detector operator, rather than n_free+1 forward evaluations. Only
-    # meaningful with state_interp=True -- `linearize` differentiates the
-    # interpolated state, whereas state_interp=False pins frozen rows to exact
-    # truth at each anchor, a path with no derivative to take.
+    # the detector operator, rather than n_free+1 forward evaluations.
+    #
+    # `linearize` unconditionally does state-space interpolation for every row
+    # (`spec.interp_to`), with no equivalent of `build_forward_state`'s
+    # `state_interp=False` "exact truth at anchor" override for frozen rows.
+    # That is fine for COARSE regardless of the sweep's own `state_interp`
+    # flag -- `fwd_c` below is itself always built with `state_interp=True`,
+    # since `scene_etas = bin_centers` there makes interpolation the identity
+    # (see that call's own comment) -- but it is a REAL mismatch for HIRES
+    # whenever `state_interp=False`: `linearize` would silently interpolate a
+    # frozen row that `fwd_h` evaluates at exact truth, changing what the
+    # `adens4`-style configs are actually testing. So analytic is used for
+    # hires only when the sweep also requested `state_interp=True`; otherwise
+    # hires falls back to FD and `jacobian_used` records that per solve below,
+    # rather than the top-level `jacobian` flag silently overstating it.
     use_analytic = _SWEEP.get("jacobian", "fd") == "analytic"
-    if use_analytic and not state_interp:
-        raise ValueError("--jacobian analytic requires --state-interp")
+    use_analytic_hires = use_analytic and state_interp
     spectrum_jac = (jac.make_spectrum_jac(absco, wide_inst, geo, solar, albedo)
                     if use_analytic else None)
 
-    def _linearizer(spec_, scene_etas_):
-        if not use_analytic:
+    def _linearizer(spec_, scene_etas_, enabled):
+        if not enabled:
             return None
         def lin(x):
             return jac.linearize(FPA, rows_win, scene_etas_, spec_, spectrum_jac,
@@ -207,12 +217,15 @@ def _solve_window(row_lo: int, row_hi: int):
                                     wn_hires, ils, pad=PAD, state_interp=True)
         x_c = gauss_newton_state(fwd_c, y_true, spec_c, Sy_inv_diag,
                                  label=f"[{row_lo}-{row_hi}] coarse", verbose=False,
-                                 jacobian_fn=_linearizer(spec_c, bin_centers))
+                                 jacobian_fn=_linearizer(spec_c, bin_centers, use_analytic))
         resid_c = y_true - fwd_c(x_c)
         # Standing rule: save the ENTIRE state vector (free AND frozen) and
-        # the FULL residual field, never just summary scalars.
+        # the FULL residual field, never just summary scalars. `jacobian_used`
+        # is the solve's OWN record, not the requested `--jacobian` flag --
+        # see the note above on why hires can silently differ from coarse.
         out["coarse"] = spec_c.snapshot(x_c, resid=resid_c,
-                                        resid_rms=float(np.sqrt(np.mean(resid_c ** 2))))
+                                        resid_rms=float(np.sqrt(np.mean(resid_c ** 2))),
+                                        jacobian_used=("analytic" if use_analytic else "fd"))
         out["x_coarse"] = x_c                      # back-compat with existing plotters
         out["resid_coarse"] = resid_c
         out["resid_coarse_rms"] = float(np.sqrt(np.mean(resid_c ** 2)))
@@ -230,10 +243,11 @@ def _solve_window(row_lo: int, row_hi: int):
                                 wn_hires, ils, pad=PAD, state_interp=state_interp)
     x_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
                              label=f"[{row_lo}-{row_hi}] hires", verbose=False,
-                             jacobian_fn=_linearizer(spec_h, anchor_etas))
+                             jacobian_fn=_linearizer(spec_h, anchor_etas, use_analytic_hires))
     resid_h = y_true - fwd_h(x_h)
     out["hires"] = spec_h.snapshot(x_h, resid=resid_h,
-                                   resid_rms=float(np.sqrt(np.mean(resid_h ** 2))))
+                                   resid_rms=float(np.sqrt(np.mean(resid_h ** 2))),
+                                   jacobian_used=("analytic" if use_analytic_hires else "fd"))
     out["x_hires"] = x_h
     out["resid_hires"] = resid_h
     out["anchor_etas"] = anchor_etas
@@ -347,6 +361,10 @@ def main() -> int:
     widths = [hi - lo + 1 for lo, hi in all_tiles]
     print(f"{len(all_tiles)} windows total, widths min={min(widths)} max={max(widths)} "
          f"mean={np.mean(widths):.1f}, total rows={sum(widths)}", flush=True)
+    if args.jacobian == "analytic" and not args.state_interp:
+        print("NOTE: --jacobian analytic without --state-interp -- coarse uses analytic, "
+             "hires falls back to fd (linearize has no state_interp=False equivalent for "
+             "frozen rows). Each solve's snapshot records its own jacobian_used.", flush=True)
 
     if args.task_id is not None:
         tiles = all_tiles[args.task_id::args.n_tasks]
