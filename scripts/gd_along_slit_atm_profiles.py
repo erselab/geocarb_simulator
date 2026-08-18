@@ -45,7 +45,13 @@ def main() -> int:
     axes[3].set_ylabel("H2O surface VMR [%]")
 
     axes[4].plot(x_km, als.p_surface_hpa(x_km), color="tab:green")
-    axes[4].axhline(als.P_BG_HPA, color="gray", lw=0.5, ls="--")
+    # the background this field actually oscillates below -- NOT P_BG_HPA
+    # itself, which is the standard-atmosphere ceiling the field is held
+    # P_HEADROOM_HPA clear of so a retrieved p_surface has room to move.
+    axes[4].axhline(als.P_BG_HPA - als.P_HEADROOM_HPA, color="gray", lw=0.5, ls="--")
+    axes[4].axhline(als.P_BG_HPA, color="crimson", lw=0.7, ls=":")
+    axes[4].text(x_km[0], als.P_BG_HPA, f" {als.P_BG_HPA} hPa -- NaN above here",
+                 va="bottom", fontsize=7.5, color="crimson")
     axes[4].set_ylabel("Surface pressure [hPa]")
     axes[4].set_xlabel("along-slit distance [km]  (slit length ~2800 km, eta = distance/1400)")
 

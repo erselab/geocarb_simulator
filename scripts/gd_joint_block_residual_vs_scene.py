@@ -168,16 +168,21 @@ def failed_windows(results: dict):
 
     The failure to expect with `--free ...,p_surface_hpa` is
     ``ValueError: cannot convert float NaN to integer``. Its cause:
-    `along_slit_scene.p_surface_hpa` has a background of `P_BG_HPA` = 1013.25
-    hPa, which is exactly `pressure_to_alt_std_atm`'s ceiling -- above it
-    there is no standard atmosphere and it returns NaN, which propagates
-    through `atmosphere_from_params`' `z_km` into `q_levels` and only
-    surfaces much later as an int conversion. A surface pressure retrieved as
-    `kind="scale"` therefore has ZERO headroom above background: even
-    `gauss_newton_state`'s finite-difference probe (`step=1e-3`, so
-    `p * 1.001`) crosses the ceiling wherever truth is within 0.1% of it.
-    On FPA2 that is the broad eastern rise peaking at 1013.15 hPa near row
-    700 -- and indeed the failures are exactly the windows spanning it.
+    `pressure_to_alt_std_atm` returns NaN above sea level (1013.25 hPa) --
+    there is no standard atmosphere below sea level -- and that NaN
+    propagates through `atmosphere_from_params`' `z_km` into `q_levels`,
+    surfacing much later as an int conversion. Before 2026-08-18 the truth
+    field peaked 0.1 hPa under that ceiling, so a p_surface retrieved as
+    `kind="scale"` had essentially no headroom: `gauss_newton_state`'s
+    finite-difference probe alone (`step=1e-3`, so `p * 1.001` ~ +1.0 hPa)
+    crossed it, and every FPA2 window spanning the eastern rise (rows
+    583-844, 26% of the slit) died.
+
+    Fixed at the source by `along_slit_scene.P_HEADROOM_HPA` = 10.0, so this
+    should no longer fire on a sweep run against the current scene. Kept
+    because the check is cheap, because older pickles still carry the
+    failures, and because any future state row with a hard physical bound
+    can fail the same silent way.
     """
     out = []
     for w in results.values():
@@ -267,7 +272,8 @@ def main() -> int:
     print(f"{in_path.name}: {len(results)} windows, FPA{fpa}, g_ratio={d.get('g_ratio')}, "
           f"free={free_rows}, solves={solves}")
     print(f"depression bottom at row {row_bottom} (x={x_km[row_bottom]:.0f} km, "
-          f"p={psurf[row_bottom]:.1f} hPa vs background {als.P_BG_HPA:.1f})")
+          f"p={psurf[row_bottom]:.1f} hPa); truth peaks at {psurf.max():.2f} hPa, "
+          f"{P_STD_CEILING_HPA - psurf.max():.2f} hPa of headroom under the ceiling")
 
     failed = failed_windows(results)
     if failed:

@@ -58,6 +58,26 @@ XCO_BG_PPB = 100.0
 H2O_BG_VMR = 1.0e-2      # surface VMR, fraction
 P_BG_HPA = 1013.25
 
+#: How far below the standard-atmosphere ceiling (`P_BG_HPA`, = sea level)
+#: the truth surface-pressure field is held. `pressure_to_alt_std_atm`
+#: returns NaN above that pressure, so this is the room a RETRIEVAL has to
+#: move surface pressure upward before the forward model goes NaN.
+#:
+#: Raised from 0.1 to 10.0 hPa (user, 2026-08-18). 0.1 hPa was enough to keep
+#: the TRUTH scene valid, which was all it had to do while p_surface was
+#: always frozen -- but it is not enough to RETRIEVE p_surface. With
+#: `kind="scale"`, `gauss_newton_state`'s finite-difference probe alone is
+#: `p * (1 + 1e-3)` ~ +1.0 hPa, an order of magnitude over that margin, so
+#: every window spanning the eastern rise (rows 583-844, 26% of FPA2's slit)
+#: died with `cannot convert float NaN to integer` in the first free-p sweep.
+#: 10 hPa is ~1% of background: 10x the FD probe, and enough room for a
+#: genuine ~1% retrieval excursion on top of it.
+#:
+#: Note the sign convention: a LARGER headroom means LOWER surface pressure,
+#: i.e. the surface sits higher in altitude, further from the sea-level floor
+#: of the standard atmosphere.
+P_HEADROOM_HPA = 10.0
+
 # Small, localized "hot spots" -- point-source-scale features, deliberately
 # narrower than the along-slit ground sample distance (~2.7 km/row for the
 # ~2800 km slit over 1024 rows) times a handful of rows, i.e. only a few
@@ -234,9 +254,13 @@ def p_surface_hpa(x_km):
     # p <= standard sea level (1013.25 hPa) -- it returns NaN above that
     # (found 2026-07-24: a symmetric +/-3 hPa sinusoid here briefly exceeded
     # 1013.25 and silently corrupted T_levels/h2o downstream). Kept
-    # asymmetric (oscillates *below* P_BG_HPA only) so the background term
-    # can never push p_surface above standard sea level, regardless of x_km.
-    background = (P_BG_HPA - 0.1) - 3.0 * (1.0 + np.sin(2 * np.pi * (x_km + 1400) / 2800 + 0.5))
+    # asymmetric (oscillates *below* the offset background only) so the
+    # background term can never push p_surface above standard sea level,
+    # regardless of x_km -- and offset by P_HEADROOM_HPA rather than hugging
+    # the ceiling, so a RETRIEVED p_surface has somewhere to go too. See
+    # P_HEADROOM_HPA for why 0.1 hPa was not enough once p_surface went free.
+    background = ((P_BG_HPA - P_HEADROOM_HPA)
+                  - 3.0 * (1.0 + np.sin(2 * np.pi * (x_km + 1400) / 2800 + 0.5)))
     mountain = _gauss(x_km, x0=-250.0, width=140.0, amp=-250.0)   # topographic depression
     return background + mountain
 
