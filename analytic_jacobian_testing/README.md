@@ -70,53 +70,43 @@ Config naming: `{free}-{n_windows}-g{g_ratio}`, e.g. `co2p-29-g3` =
 | `results/<config>_<jacobian>.pkl` | the 16 raw sweep outputs (8 configs × {`analytic`, `fd`}) — full `gd_joint_block_whole_slit_sweep.py` payloads, one per config/solver pair, ~17 MB each |
 | `plots/co2p-58-g1_analytic_state.png` | one illustrative `gd_joint_block_state_plot.py` render (CO2 + p_surface, retrieved vs. truth) from `co2p-58-g1_analytic.pkl` — a spot-check made while deciding which plotting script handles multi-row-free configs, not a systematic plot battery over the whole matrix |
 
-## 3a. Copies also placed in `results/`, as a guide for what to run next
+## 3a. The 8 analytic results also copied into `results/`, as a guide for what to run next
 
 User's explicit request (2026-08-18), duplication acknowledged and
-accepted: a copy of each of the 16 `results/<config>_<jacobian>.pkl` files
-above also lives in the project's main `results/` folder, renamed to the
-naming convention `gd_joint_block_whole_slit_sweep.py` itself would produce
-for that config (its own `suffix` construction, `main()` around line 409),
-so they sit legibly alongside every other joint-block result rather than
-only under this folder's short `co2p-29-g3`-style names. Same content,
-byte-identical (copied with `shutil.copy2`, sizes verified) — the archive
-copies here remain the canonical ones; treat the `results/` copies as
-disposable convenience duplicates, not a second source of truth.
+accepted — and, on a follow-up correction, **analytic only, not FD**: a
+copy of each of the 8 `results/<config>_analytic.pkl` files above (not the
+8 `_fd.pkl` ones) also lives in the project's main `results/` folder,
+renamed to the naming convention `gd_joint_block_whole_slit_sweep.py`
+itself would produce for that config (its own `suffix` construction,
+`main()` around line 409), so they sit legibly alongside every other
+joint-block result rather than only under this folder's short
+`co2p-29-g3`-style names. Same content, byte-identical (copied with
+`shutil.copy2`, sizes verified) — the archive copies here remain the
+canonical ones; treat the `results/` copies as disposable convenience
+duplicates, not a second source of truth.
 
 | this folder | `results/` copy |
 |---|---|
-| `co2-58-g1_fd.pkl` | `gd_joint_block_whole_slit_fpa2_gratio1_stateinterp.pkl` |
 | `co2-58-g1_analytic.pkl` | `gd_joint_block_whole_slit_fpa2_gratio1_stateinterp_analytic.pkl` |
-| `co2-58-g3_fd.pkl` | `gd_joint_block_whole_slit_fpa2_gratio3_stateinterp.pkl` |
 | `co2-58-g3_analytic.pkl` | `gd_joint_block_whole_slit_fpa2_gratio3_stateinterp_analytic.pkl` |
-| `co2-29-g1_fd.pkl` | `gd_joint_block_whole_slit_fpa2_gratio1_stateinterp_nwin29.pkl` |
 | `co2-29-g1_analytic.pkl` | `gd_joint_block_whole_slit_fpa2_gratio1_stateinterp_nwin29_analytic.pkl` |
-| `co2-29-g3_fd.pkl` | `gd_joint_block_whole_slit_fpa2_gratio3_stateinterp_nwin29.pkl` |
 | `co2-29-g3_analytic.pkl` | `gd_joint_block_whole_slit_fpa2_gratio3_stateinterp_nwin29_analytic.pkl` |
-| `co2p-58-g1_fd.pkl` | `gd_joint_block_whole_slit_fpa2_gratio1_stateinterp_free-co2-p.pkl` |
 | `co2p-58-g1_analytic.pkl` | `gd_joint_block_whole_slit_fpa2_gratio1_stateinterp_free-co2-p_analytic.pkl` |
-| `co2p-58-g3_fd.pkl` | `gd_joint_block_whole_slit_fpa2_gratio3_stateinterp_free-co2-p.pkl` |
 | `co2p-58-g3_analytic.pkl` | `gd_joint_block_whole_slit_fpa2_gratio3_stateinterp_free-co2-p_analytic.pkl` |
-| `co2p-29-g1_fd.pkl` | `gd_joint_block_whole_slit_fpa2_gratio1_stateinterp_free-co2-p_nwin29.pkl` |
 | `co2p-29-g1_analytic.pkl` | `gd_joint_block_whole_slit_fpa2_gratio1_stateinterp_free-co2-p_nwin29_analytic.pkl` |
-| `co2p-29-g3_fd.pkl` | `gd_joint_block_whole_slit_fpa2_gratio3_stateinterp_free-co2-p_nwin29.pkl` |
 | `co2p-29-g3_analytic.pkl` | `gd_joint_block_whole_slit_fpa2_gratio3_stateinterp_free-co2-p_nwin29_analytic.pkl` |
 
-**Four of these filenames collided with pre-existing files** in `results/`:
-the 58-window, `gratio1`/`gratio3`, `co2`/`co2p` FD results land on exactly
-the same names as the four pre-`P_HEADROOM_HPA`/pre-pure-sigma-levels
-"legacy" runs from 2026-08-17 (`JOINT_BLOCK_MIGRATION_PLAN.md`'s own
-`*_stateinterp[_free-co2-p]` family). Those were already known-stale — two
-scene revisions behind — so rather than silently overwrite them they were
-renamed aside to `<original name>.pkl.stale-pre-headroom-sigma` first (same
-pattern as `results/band_cache/*.stale-pre-headroom`/`*.stale-pre-sigma`
-from earlier in this work). Net effect: the four `*_stateinterp[_free-co2-p]`
-names in `results/` (no `_nwin29`, no `_analytic`) now point at the
-current-scene FD result instead of the stale one — which also means this
-folder's own regression matrix quietly doubles as the "re-run the legacy
-configs on the current scene" task that had been deferred earlier in this
-session, at least for these four of the original eight (not `adens4` or
-`uniform` — see §5).
+None of these 8 names collide with anything pre-existing (every one carries
+`_analytic`, which no prior run in this project ever produced). The FD
+copies were tried first, in which 4 of the 8 *did* collide with the four
+pre-`P_HEADROOM_HPA`/pre-pure-sigma-levels "legacy" runs from 2026-08-17
+(`JOINT_BLOCK_MIGRATION_PLAN.md`'s own `*_stateinterp[_free-co2-p]`
+family) — those four were renamed aside to
+`<name>.pkl.stale-pre-headroom-sigma` rather than overwritten, then, once
+the FD-copy request itself was withdrawn, restored back to their original
+names untouched. `results/` now has no `_fd`-sourced copies from this
+folder at all, and those four legacy files are exactly as they were before
+this exercise touched them.
 
 ## 4. Result
 
