@@ -480,7 +480,7 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
 
 def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
                        step: float = 1e-3, max_iter: int = 15, tol: float = 1e-5,
-                       label: str = "", verbose: bool = True):
+                       label: str = "", verbose: bool = True, jacobian_fn=None):
     """Regularized Gauss-Newton over whatever :class:`StateSpec` says is free.
 
     The generic counterpart of `gd_joint_block_retrieve.gauss_newton_
@@ -506,13 +506,22 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     are all O(1) regardless of whether the underlying quantity is 416 ppm or
     1013 hPa. A row switched to `kind="absolute"` would need its own step,
     which is why this asserts rather than silently mis-scaling.
+
+    Passing `jacobian_fn` switches to ANALYTIC derivatives: a callable
+    ``jacobian_fn(x) -> (y, K)``, normally
+    `geocarb_gert.jacobians.linearize` bound to this window. It returns the
+    forward value alongside the Jacobian, so an iteration costs one
+    evaluation rather than ``n_free + 1``, and `forward` is then unused. The
+    `kind="scale"` restriction is lifted in that mode, because analytic
+    columns carry their own units and there is no shared step to mis-scale.
     """
-    for p in spec.free_params:
-        if p.kind != "scale":
-            raise NotImplementedError(
-                f"{p.name}: gauss_newton_state uses one shared finite-difference "
-                f"step, which assumes kind='scale' (elements are O(1) multipliers). "
-                f"kind='absolute' needs a per-row step -- not implemented.")
+    if jacobian_fn is None:
+        for p in spec.free_params:
+            if p.kind != "scale":
+                raise NotImplementedError(
+                    f"{p.name}: gauss_newton_state uses one shared finite-difference "
+                    f"step, which assumes kind='scale' (elements are O(1) multipliers). "
+                    f"kind='absolute' needs a per-row step -- pass jacobian_fn instead.")
 
     x = spec.x0()
     x_a = x.copy()
@@ -523,13 +532,17 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     Sy_inv_diag = np.asarray(Sy_inv_diag, dtype=float)
 
     for it in range(max_iter):
-        y0 = forward(x)
-        resid = y_true - y0
-        K = np.empty((y0.size, n))
-        for k in range(n):
-            xp = x.copy()
-            xp[k] += step
-            K[:, k] = (forward(xp) - y0) / step
+        if jacobian_fn is not None:
+            y0, K = jacobian_fn(x)
+            resid = y_true - y0
+        else:
+            y0 = forward(x)
+            resid = y_true - y0
+            K = np.empty((y0.size, n))
+            for k in range(n):
+                xp = x.copy()
+                xp[k] += step
+                K[:, k] = (forward(xp) - y0) / step
         KtSyinv = K.T * Sy_inv_diag[None, :]
         A = KtSyinv @ K + Sa_inv
         b = KtSyinv @ resid - Sa_inv @ (x - x_a)

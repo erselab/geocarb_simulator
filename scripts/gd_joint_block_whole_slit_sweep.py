@@ -64,6 +64,7 @@ from gert.forward_model import ForwardModel  # noqa: E402
 from gert.rt_solver import SingleScatterSolver  # noqa: E402
 from geocarb_gert.gd_polynomials import rows_crossed  # noqa: E402
 from geocarb_gert.gd_render import available_cpus  # noqa: E402
+from geocarb_gert import jacobians as jac  # noqa: E402
 
 MIN_WINDOW = 4
 PAD = 4
@@ -73,8 +74,29 @@ ROW_MAX_IDX = 1023
 _SWEEP = {}
 
 
+def scale_for_window_count(fpa: int, target: int, min_window: int = MIN_WINDOW) -> float:
+    """The `window_scale` whose tiling yields `target` windows.
+
+    Window width is set by local keystone, so the count cannot be requested
+    directly -- but it falls monotonically with the scale factor, so a coarse
+    scan finds it. Returns the smallest scale hitting `target` exactly, or
+    raises with the counts that ARE reachable, since not every target is
+    (widths are integers, so the count moves in jumps).
+    """
+    seen = {}
+    for s in np.arange(0.5, 6.001, 0.05):
+        n = len(build_window_tiles(fpa, min_window=min_window, window_scale=float(s)))
+        seen.setdefault(n, float(s))
+        if n == target:
+            return float(s)
+    raise ValueError(f"no window_scale in [0.5, 6] gives {target} windows at "
+                     f"min_window={min_window}; reachable counts near it: "
+                     f"{sorted(k for k in seen if abs(k - target) <= 6)}")
+
+
 def build_window_tiles(fpa: int, row_min: int = 0, row_max: int = ROW_MAX_IDX,
-                       min_window: int = MIN_WINDOW) -> list:
+                       min_window: int = MIN_WINDOW,
+                       window_scale: float = 1.0) -> list:
     """Non-overlapping tiling of [row_min, row_max]. Each window's own
     radius is a small fixed-point solve (window width depends on
     rows_crossed at the window's own center, which depends on width) --
@@ -86,7 +108,7 @@ def build_window_tiles(fpa: int, row_min: int = 0, row_max: int = ROW_MAX_IDX,
         for _ in range(6):
             center = min(row_start + r, row_max)
             k_c = float(rows_crossed(fpa, np.array([float(center)]))[0])
-            r_new = max(min_window, int(round(2.2 * k_c)))
+            r_new = max(min_window, int(round(window_scale * 2.2 * k_c)))
             if r_new == r:
                 break
             r = r_new
@@ -154,6 +176,25 @@ def _solve_window(row_lo: int, row_hi: int):
     prior_form = _SWEEP.get("prior_form", "exponential")
     spectrum = _make_state_spectrum(absco, wide_inst, geo, solar, albedo)
 
+    # Analytic Jacobians: derivatives from gert's per-layer arrays composed with
+    # the detector operator, rather than n_free+1 forward evaluations. Only
+    # meaningful with state_interp=True -- `linearize` differentiates the
+    # interpolated state, whereas state_interp=False pins frozen rows to exact
+    # truth at each anchor, a path with no derivative to take.
+    use_analytic = _SWEEP.get("jacobian", "fd") == "analytic"
+    if use_analytic and not state_interp:
+        raise ValueError("--jacobian analytic requires --state-interp")
+    spectrum_jac = (jac.make_spectrum_jac(absco, wide_inst, geo, solar, albedo)
+                    if use_analytic else None)
+
+    def _linearizer(spec_, scene_etas_):
+        if not use_analytic:
+            return None
+        def lin(x):
+            return jac.linearize(FPA, rows_win, scene_etas_, spec_, spectrum_jac,
+                                 wn_hires, ils, x, pad=PAD)
+        return lin
+
     # COARSE: scene evaluated at the state's own bin centres, so
     # interp_to() is the identity -- --state-interp has no content here.
     if not hires_only:
@@ -165,7 +206,8 @@ def _solve_window(row_lo: int, row_hi: int):
         fwd_c = build_forward_state(FPA, rows_win, bin_centers, spec_c, spectrum,
                                     wn_hires, ils, pad=PAD, state_interp=True)
         x_c = gauss_newton_state(fwd_c, y_true, spec_c, Sy_inv_diag,
-                                 label=f"[{row_lo}-{row_hi}] coarse", verbose=False)
+                                 label=f"[{row_lo}-{row_hi}] coarse", verbose=False,
+                                 jacobian_fn=_linearizer(spec_c, bin_centers))
         resid_c = y_true - fwd_c(x_c)
         # Standing rule: save the ENTIRE state vector (free AND frozen) and
         # the FULL residual field, never just summary scalars.
@@ -187,7 +229,8 @@ def _solve_window(row_lo: int, row_hi: int):
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
                                 wn_hires, ils, pad=PAD, state_interp=state_interp)
     x_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
-                             label=f"[{row_lo}-{row_hi}] hires", verbose=False)
+                             label=f"[{row_lo}-{row_hi}] hires", verbose=False,
+                             jacobian_fn=_linearizer(spec_h, anchor_etas))
     resid_h = y_true - fwd_h(x_h)
     out["hires"] = spec_h.snapshot(x_h, resid=resid_h,
                                    resid_rms=float(np.sqrt(np.mean(resid_h ** 2))))
@@ -253,6 +296,23 @@ def main() -> int:
                          "own physical scale (co2 ~10km hot-spot, p_surface ~140km "
                          "topography, etc). A single shared value is rarely right, since "
                          "surface pressure and a CO2 hot spot do not share a scale.")
+    ap.add_argument("--jacobian", type=str, default="fd", choices=["fd", "analytic"],
+                    help="'fd' (default) finite-differences the forward model, "
+                         "n_free+1 evaluations per iteration. 'analytic' uses "
+                         "geocarb_gert.jacobians.linearize -- derivatives assembled "
+                         "from gert's per-layer arrays, one evaluation per iteration, "
+                         "no step size. Validated per row by gd_jacobian_validate.py.")
+    ap.add_argument("--n-windows", type=int, default=None,
+                    help="target number of slit windows; solved for via "
+                         "scale_for_window_count. Default (None) keeps the historical "
+                         "keystone-only tiling, which gives 58 on FPA2.")
+    ap.add_argument("--window-scale", type=float, default=1.0,
+                    help="multiplier on the keystone window-radius formula; larger "
+                         "means fewer, wider windows. Ignored when --n-windows is given.")
+    ap.add_argument("--min-window", type=int, default=MIN_WINDOW,
+                    help=f"minimum window radius (default {MIN_WINDOW})")
+    ap.add_argument("--out", type=str, default=None,
+                    help="output pickle path (default: derived from the run settings)")
     ap.add_argument("--prior-form", type=str, default="exponential",
                     choices=["exponential", "tikhonov"],
                     help="'exponential' (default): sigma^2 exp(-|d_eta|/corr_length) in "
@@ -277,7 +337,13 @@ def main() -> int:
     wide_win, wide_inst, albedo = band_basics(FPA, atm_center, absco, geo, solar)
     print("done.\n", flush=True)
 
-    all_tiles = build_window_tiles(FPA)
+    if args.n_windows is not None:
+        window_scale = scale_for_window_count(FPA, args.n_windows, args.min_window)
+        print(f"--n-windows {args.n_windows} -> window_scale {window_scale:.2f}", flush=True)
+    else:
+        window_scale = args.window_scale
+    all_tiles = build_window_tiles(FPA, min_window=args.min_window,
+                                   window_scale=window_scale)
     widths = [hi - lo + 1 for lo, hi in all_tiles]
     print(f"{len(all_tiles)} windows total, widths min={min(widths)} max={max(widths)} "
          f"mean={np.mean(widths):.1f}, total rows={sum(widths)}", flush=True)
@@ -296,7 +362,8 @@ def main() -> int:
                        hires_only=args.hires_only, anchor_density=args.anchor_density,
                        state_interp=args.state_interp,
                        free=tuple(x.strip() for x in args.free.split(',')),
-                       corr_length=args.corr_length, prior_form=args.prior_form))
+                       corr_length=args.corr_length, prior_form=args.prior_form,
+                       jacobian=args.jacobian))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
     print(f"solving with {n_workers} workers...", flush=True)
@@ -330,20 +397,27 @@ def main() -> int:
     free_t = tuple(x.strip() for x in args.free.split(","))
     if free_t != ("co2_ppm",):
         suffix += "_free-" + "-".join(n.split("_")[0] for n in free_t)
+    if len(all_tiles) != 58:
+        suffix += f"_nwin{len(all_tiles)}"
+    if args.jacobian != "fd":
+        suffix += f"_{args.jacobian}"
     payload = {"results": results, "tiles": all_tiles, "fpa": FPA, "uniform": args.uniform,
               "gamma": args.gamma, "sigma_abs": args.sigma_abs,
               "g_ratio": args.g_ratio, "min_window": MIN_WINDOW, "pad": PAD,
               "hires_only": args.hires_only, "anchor_density": args.anchor_density,
               "state_interp": args.state_interp, "free": free_t,
-              "corr_length": args.corr_length, "prior_form": args.prior_form}
+              "corr_length": args.corr_length, "prior_form": args.prior_form,
+              "jacobian": args.jacobian, "n_windows": len(all_tiles),
+              "window_scale": window_scale}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
         out_dir = REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}_parts"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"task{args.task_id:03d}of{args.n_tasks}.pkl"
     else:
-        out_path = REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}.pkl"
-        out_path.parent.mkdir(exist_ok=True)
+        out_path = (Path(args.out) if args.out else
+                    REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}.pkl")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as f:
         pickle.dump(payload, f)
     print(f"saved {out_path}")
