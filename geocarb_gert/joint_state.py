@@ -82,6 +82,33 @@ DEFAULT_CORR_LENGTH_ETA = {
 }
 
 
+#: Where a state row enters the forward model. This is not cosmetic
+#: bookkeeping: it decides which code consumes the row, and where its
+#: Jacobian comes from.
+#:
+#: ``atmosphere``  co2/ch4/co/h2o/p_surface -- interpolated onto the anchor
+#:                 etas, fed to `along_slit_scene.atmosphere_from_params`,
+#:                 and into the RT. Jacobian from gert's per-layer arrays
+#:                 (`K_mol_lay_hires`, `dtau_mol_dT_lay_hires`,
+#:                 `dtau_mol_dpscale_lay_hires`, `K_ray_lay_hires`).
+#: ``surface``     albedo and its spectral slope -- also eta-positioned, but
+#:                 NOT part of `AtmosphericProfile`; they are passed
+#:                 separately to `ForwardModel.run`. Jacobian from gert's
+#:                 `K_albedo_hires` / `K_slope_hires`, which are exact and
+#:                 come free with `jacobians=True`.
+#: ``instrument``  dispersion -- touches neither the atmosphere nor the
+#:                 scene. It moves each detector column's ILS centre, so it
+#:                 is NOT eta-positioned (its positions are per-FPA, not
+#:                 along-slit) and must never be interpolated onto anchors.
+#:                 Its Jacobian is the only one gert cannot supply; see
+#:                 `gd_render._diagonal_ils_convolve_dnu`.
+TARGETS = ("atmosphere", "surface", "instrument")
+
+#: Targets whose rows live in eta and are interpolated onto scene positions.
+#: `instrument` is deliberately absent -- see TARGETS.
+ETA_TARGETS = ("atmosphere", "surface")
+
+
 @dataclass
 class ParamSpec:
     """One state-vector element: where it lives, its prior, and whether it
@@ -96,6 +123,7 @@ class ParamSpec:
     kind: str = "scale"            # "scale" (multiplies prior) or "absolute"
     prior_form: str = "exponential"  # "exponential" (default) or "tikhonov"
     gamma: float = 3.0             # tikhonov: first-difference smoothness strength
+    target: str = "atmosphere"     # where this row enters the forward model; see TARGETS
 
     def __post_init__(self):
         self.positions = np.atleast_1d(np.asarray(self.positions, dtype=float))
@@ -107,6 +135,14 @@ class ParamSpec:
                              f"positions {self.positions.shape}")
         if self.kind not in ("scale", "absolute"):
             raise ValueError(f"{self.name}: kind must be 'scale' or 'absolute', got {self.kind!r}")
+        if self.target not in TARGETS:
+            raise ValueError(f"{self.name}: target must be one of {TARGETS}, got {self.target!r}")
+
+    @property
+    def is_eta_positioned(self) -> bool:
+        """True when this row's `positions` are along-slit eta, so it can be
+        interpolated onto scene anchors. False for `instrument` rows."""
+        return self.target in ETA_TARGETS
 
     @property
     def n(self) -> int:
@@ -257,18 +293,63 @@ class StateSpec:
         return out
 
     # -- consumption by a forward model -----------------------------------
-    def interp_to(self, etas, x) -> dict:
-        """`{name: value}` linearly interpolated onto `etas`, every row
-        treated identically -- the state-space interpolation a forward model
-        needs to build one atmosphere per anchor."""
+    def rows_for(self, *targets):
+        """The rows belonging to the given targets, in state order."""
+        return [p for p in self.params if p.target in targets]
+
+    def interp_to(self, etas, x, targets=ETA_TARGETS) -> dict:
+        """`{name: value}` linearly interpolated onto `etas`, for the
+        eta-positioned rows -- the state-space interpolation a forward model
+        needs to build one atmosphere per anchor.
+
+        `instrument` rows are EXCLUDED by default and must be: their
+        `positions` are not along-slit coordinates, so interpolating them
+        against `etas` would be meaningless arithmetic on mismatched axes
+        rather than a harmless no-op. Use :meth:`values_for` to read them.
+        """
         etas = np.asarray(etas, dtype=float)
         vals = self.unpack(x)
         out = {}
         for p in self.params:
+            if p.target not in targets:
+                continue
             v = vals[p.name]
             out[p.name] = (np.full(etas.shape, v[0]) if p.n == 1
                            else np.interp(etas, p.positions, v))
         return out
+
+    def values_for(self, x, *targets) -> dict:
+        """`{name: values at that row's own positions}`, uninterpolated.
+
+        The read path for `instrument` rows, whose positions are not eta.
+        """
+        vals = self.unpack(x)
+        return {p.name: vals[p.name] for p in self.params if p.target in targets}
+
+    def interp_weights(self, etas, name) -> np.ndarray:
+        """`(len(etas), n)` matrix `W` with `W[g, k] = d(param at etas[g]) /
+        d(this row's value at position k)`.
+
+        The linear-interpolation operator written out as a matrix, built by
+        interpolating the basis vectors rather than by rederiving np.interp's
+        weight formula -- so it cannot drift from what :meth:`interp_to`
+        actually does, including at and beyond the end points, where np.interp
+        clamps rather than extrapolating.
+
+        This is the whole chain rule from a row's own elements to the anchor
+        values a forward model sees. Combined with `d(value)/dx = prior` for
+        `kind="scale"`, it gives `d(param at anchor g)/dx_k` exactly.
+        """
+        p = self[name]
+        etas = np.asarray(etas, dtype=float)
+        if p.n == 1:
+            return np.ones((etas.size, 1))
+        W = np.empty((etas.size, p.n))
+        for k in range(p.n):
+            e_k = np.zeros(p.n)
+            e_k[k] = 1.0
+            W[:, k] = np.interp(etas, p.positions, e_k)
+        return W
 
     def snapshot(self, x, **extra) -> dict:
         """A complete, self-describing record of this solve's state vector.
@@ -468,7 +549,10 @@ def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
     order = np.argsort(scene_etas)
     scene_etas = scene_etas[order]
     n_scene = scene_etas.size
-    names = [p.name for p in spec.params]
+    # atmosphere rows only: `spectrum` builds an AtmosphericProfile, so a
+    # `surface` or `instrument` row passed here would be an unexpected keyword.
+    # Those targets are consumed elsewhere (ForwardModel.run / the ILS centring).
+    names = [p.name for p in spec.rows_for("atmosphere")]
     cache_key = np.full((n_scene, len(names)), np.nan)
     cache_S = [None] * n_scene
 
