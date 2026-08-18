@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 
 from gert.atmosphere import AtmosphericProfile
-from gert.levels import gert_levels
+from .levels import sigma_levels
 
 from model_sampler import pressure_to_alt_std_atm
 
@@ -116,7 +116,8 @@ def reference_atmosphere(p_surface_pa: float = 101325.0,
     ``xco2_ppm`` overrides the default CO₂ mole fraction (useful for OSSE truth
     vs prior).
     """
-    p = np.asarray(gert_levels(float(p_surface_pa)), dtype=float)   # TOA → surface
+    # same pure-sigma coordinate as along_slit_scene -- see geocarb_gert.levels
+    p = np.asarray(sigma_levels(float(p_surface_pa)), dtype=float)   # TOA → surface
     z_km = np.asarray(pressure_to_alt_std_atm(p / 100.0), dtype=float)
     T = _std_temperature(z_km)
 

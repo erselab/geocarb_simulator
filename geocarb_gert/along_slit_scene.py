@@ -42,7 +42,7 @@ from typing import Callable
 import numpy as np
 
 from gert.atmosphere import AtmosphericProfile
-from gert.levels import gert_levels
+from .levels import sigma_levels
 
 from model_sampler import pressure_to_alt_std_atm
 
@@ -395,7 +395,10 @@ def atmosphere_from_params(co2_ppm: float, ch4_ppb: float, co_ppb: float,
     RT run") with a guarantee that nothing else about the profile
     construction differs from the truth generator.
     """
-    p = np.asarray(gert_levels(float(p_surface_hpa) * 100.0), dtype=float)  # TOA -> surface
+    # pure sigma, NOT gert_levels: see geocarb_gert.levels for why -- it is
+    # what makes d(p_level)/d(p_sfc) exactly parallel to p, hence an exact
+    # analytic surface-pressure Jacobian.
+    p = np.asarray(sigma_levels(float(p_surface_hpa) * 100.0), dtype=float)  # TOA -> surface
     z_km = np.asarray(pressure_to_alt_std_atm(p / 100.0), dtype=float)
     T = _std_temperature(z_km)
 

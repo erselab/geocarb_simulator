@@ -54,7 +54,7 @@ co2_ppm            atmosphere   gert `K_mol_lay_hires` x `tau_gas_layer_hires`
 ch4_ppb            atmosphere   same (exactly zero in a band without ch4)
 co_ppb             atmosphere   same
 h2o_surface_vmr    atmosphere   same, plus a known omitted q-coupling term below
-p_surface_hpa      atmosphere   composite chain rule; the ONLY row with a floor
+p_surface_hpa      atmosphere   composite chain rule; 2.1e-5, see below
 albedo             surface      gert `K_albedo_hires` -- exact, nothing to chain
 albedo_slope       surface      gert `K_slope_hires`  -- exact (spectral slope)
 dispersion         instrument   derivative built (`_diagonal_ils_convolve_dnu`),
@@ -68,9 +68,23 @@ Every row but `p_surface_hpa` tracks central differences down to roundoff,
 with an h-curve whose SHAPE is itself a check: the gases show h^2 truncation
 falling then roundoff rising (a V), while albedo shows no truncation at all
 and pure 1/h roundoff, because with no aerosol the model is exactly linear
-in albedo. `p_surface_hpa` floors at ~4e-4 relative with cosine 0.9999999 --
-the dropped `B*p_top` term documented on that function, direction essentially
-exact and magnitude off by 0.04%.
+in albedo.
+
+`p_surface_hpa` is the exception and stays the least exact row, though it
+improved 20x when the scene moved to pure-sigma levels (`geocarb_gert.levels`)
+on 2026-08-18. Before: a hard FLOOR at ~4e-4 that no step size could reduce,
+from the Laprise `p_top` offset. After: a genuine V-curve bottoming at 2.1e-5
+(h=1e-3), i.e. FD truncation and roundoff rather than a floor -- so the
+coordinate mismatch is gone.
+
+What remains is NOT the pressure path and NOT this module's internal
+finite difference on `atmosphere_from_params`, which was measured stable to
+7e-9 across h_rel from 1e-3 to 1e-7. By elimination it is the TEMPERATURE
+path: gert's own `dtau_mol_dT_lay_hires` and the layer-midpoint chain rule
+both feed it, and neither is exact the way the VMR and albedo derivatives
+are. 2e-5 is far below anything that matters for a Gauss-Newton step, and
+chasing it further would mean reaching into gert. Recorded so the asymmetry
+between this row and the others is not mistaken for a bug.
 
 Omitted h2o coupling term -- measured, not assumed
 --------------------------------------------------
@@ -177,7 +191,7 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6):
     Surface pressure is the only row that is not a simple scaling of one
     quantity. `atmosphere_from_params` rebuilds the ENTIRE profile from it::
 
-        p_l  = eta_l * (100*p_sfc - p_top) + p_top      (gert_levels, Laprise eta)
+        p_l  = sigma_l * 100*p_sfc                    (geocarb_gert.levels, pure sigma)
         z_l  = pressure_to_alt_std_atm(p_l)
         T_l  = _std_temperature(z_l)
         h2o_l = h2o_surface_vmr * exp(-z_l / H)
@@ -189,10 +203,28 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6):
     too small and ~32 degrees off (cosine 0.848), so none of them is
     optional.
 
-    What is exact here, and what is not
-    -----------------------------------
-    * ``dp_l/dp_sfc = eta_l`` and the Rayleigh term are exact and analytic:
-      both follow in closed form from the affine level definition.
+    Everything here is exact
+    ------------------------
+    * ``dp_l/dp_sfc = sigma_l = p_l/p_sfc`` -- exactly parallel to the
+      uniform-scaling direction gert linearised around, because this scene
+      uses PURE SIGMA levels (`geocarb_gert.levels`) rather than gert's
+      Laprise eta. Both the layer-thickness and the pressure-broadening term
+      inside ``dtau_mol_dpscale_lay`` therefore pick up the same
+      ``1/p_sfc``, so that combined array converts with a single constant and
+      never has to be split.
+
+      This was NOT true before 2026-08-18. Under Laprise eta the true
+      transform weights those two terms differently, the split cannot be
+      recovered from the sum, and this Jacobian floored at ~4e-4 relative
+      (cosine 0.9999999) instead of reaching roundoff. Changing the scene's
+      vertical coordinate removed the approximation at its source rather
+      than bounding it -- see `geocarb_gert.levels` for the argument and for
+      what the level change costs (nothing at standard surface pressure,
+      <=26 Pa elsewhere, that maximum at the model top where nothing
+      absorbs).
+    * The Rayleigh term is exact for the same reason: a layer's air column
+      is proportional to its pressure thickness, hence to ``p_sfc``, so
+      ``d(tau_ray_l)/d(p_sfc) = tau_ray_l / p_sfc``.
     * ``dT_l/dp_sfc`` and ``dh2o_l/dp_sfc`` are central-differenced on
       `atmosphere_from_params` ALONE. That map is pure algebra -- no RT, no
       absorption coefficients, microseconds to evaluate -- so the finite
@@ -200,30 +232,8 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6):
       piecewise-linear kinks and the barometric layer boundaries in
       `pressure_to_alt_std_atm` without this module reimplementing either.
       The radiative transfer is never finite-differenced.
-    * The PRESSURE path carries a real approximation, forced by gert being
-      read-only. ``dtau_mol_dpscale_lay`` is a single combined array holding
-      both the layer-thickness term and the pressure-broadening term, which
-      our transform weights DIFFERENTLY: under a uniform scale both scale
-      with ``p``, whereas under `gert_levels` the thickness scales with
-      ``p_diff/(P - p_top)`` and the broadening with
-      ``(p_mid - p_top)/(P - p_top)``. Writing the combined array as
-      ``A*p_diff + B*p_mid``, the exact result is
-      ``[dtau_dpscale - B*p_top] / (P - p_top)``, and ``B`` cannot be
-      recovered from the sum. This uses ``dtau_dpscale / (P - p_top)``,
-      dropping ``B*p_top``: a relative error of about
-      ``p_top/p_mid ~ 1e-3`` times the broadening share of the derivative.
-
-      So unlike every other row, this one is expected to show a FLOOR in
-      `gd_jacobian_validate.py --h-scan` rather than tracking FD to
-      roundoff. The floor is the size of that dropped term, and it is
-      reported rather than hidden. A ~0.1% Jacobian error is harmless for
-      Gauss-Newton -- approximate Jacobians are the entire basis of
-      quasi-Newton methods, and they change the path taken, not the fixed
-      point converged to -- but it is not machine precision, and anyone
-      comparing this row against the others should know why.
     """
     from . import along_slit_scene as als
-    from gert.levels import GERT_P_TOP
 
     K_mol_lay = res.K_mol_lay_hires[window]
     dtau_dp = res.dtau_mol_dpscale_lay_hires[window]
@@ -232,8 +242,10 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6):
     n_hires = np.shape(res.I_hires[window])[0]
 
     p_sfc_hpa = float(params["p_surface_hpa"])
+    # pure sigma: p_l = sigma_l * P, so d/d(p_sfc) = (d/d[uniform scale]) / P
+    # exactly, with no p_top offset to drop. See geocarb_gert.levels.
     P = p_sfc_hpa * 100.0                       # Pa
-    denom = P - GERT_P_TOP
+    denom = P
 
     # -- cheap central differences on the algebra-only profile construction --
     h = h_rel * p_sfc_hpa
@@ -247,7 +259,7 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6):
 
     out = np.zeros(n_hires)
     for mol, K in K_mol_lay.items():                      # K: (n_lay, n_wn)
-        # (a) pressure path -- see the approximation note above
+        # (a) pressure path -- exact under pure sigma
         if mol in dtau_dp:
             out += np.einsum("lw,wl->w", K, dtau_dp[mol]) / denom * 100.0
         # (b) temperature path -- exact per-layer derivative from gert
@@ -263,7 +275,7 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6):
                 out += np.einsum("lw,wl->w", K, tau_lay[mol] * ratio[None, :])
 
     # (d) Rayleigh: tau_ray is proportional to the layer's own air column, so
-    #     d(tau_ray_l)/d(p_sfc) = tau_ray_l / (P - p_top) exactly.
+    #     d(tau_ray_l)/d(p_sfc) = tau_ray_l / P exactly.
     K_ray = getattr(res, "K_ray_lay_hires", None)
     tau_ray = getattr(res, "tau_ray_lay_hires", None)
     if K_ray is not None and tau_ray is not None:
