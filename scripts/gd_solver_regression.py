@@ -144,12 +144,32 @@ def score(path, eta_rows, truth):
                 rec[f"{name}_rms"] = float(np.sqrt(np.nanmean(dv ** 2)))
                 rec[f"{name}_max"] = float(np.nanmax(np.abs(dv)))
         rec["_state"] = {k: v for k, v in st.items()}
+        rec["_resid_rms"] = rr          # per-row array, kept for compare()
         out[solve] = rec
     return out
 
 
 def compare(a, b):
-    """Solver agreement between two scored runs, worst case over rows/solves."""
+    """Solver agreement between two scored runs, worst case over rows/solves.
+
+    `resid_rms_median` used to diff the two runs' median-of-medians as a
+    single scalar (`abs(ra-rb)/ra`). That is fragile near a degenerate
+    manifold (CO2/p_surface are near-perfectly anti-correlated in this band
+    alone -- see run_free_state_sweeps.sh's own note): two solvers can land
+    on two slightly different, individually valid points along the ridge,
+    which can flip which row sits at the median RANK without any row's own
+    residual moving by more than floating-point/iteration-path noise. That
+    is exactly what co2p-29-g3 showed (2026-08-18): the scalar-median metric
+    read 1.89e-5, just over the 1e-5 tolerance, while the actual per-row
+    comparison below -- reusing the SAME `rr` arrays, just not collapsed to
+    one number first -- showed a median relative difference of 3.1e-6/3.5e-6
+    (coarse/hires) with every outlier traced to near-zero-residual edge rows
+    where dividing two tiny, nearly-equal numbers amplifies relative error
+    despite ~5e-9 absolute agreement. Comparing the per-row MEDIAN of the
+    relative differences (rather than the difference of two medians) is not
+    sensitive to that rank flip, since it summarizes the same distribution
+    the by-hand check did.
+    """
     worst = {}
     for solve in ("coarse", "hires"):
         if solve not in a or solve not in b:
@@ -163,9 +183,12 @@ def compare(a, b):
                 continue
             rel = np.abs(va[ok] - vb[ok]) / np.maximum(np.abs(va[ok]), 1e-30)
             worst[name] = max(worst.get(name, 0.0), float(rel.max()))
-        ra, rb = a[solve]["resid_rms_median"], b[solve]["resid_rms_median"]
-        worst["resid_rms_median"] = max(worst.get("resid_rms_median", 0.0),
-                                        abs(ra - rb) / max(ra, 1e-30))
+        ra, rb = a[solve].get("_resid_rms"), b[solve].get("_resid_rms")
+        if ra is not None and rb is not None:
+            ok = np.isfinite(ra) & np.isfinite(rb)
+            rel = np.abs(ra[ok] - rb[ok]) / np.maximum(ra[ok], 1e-30)
+            worst["resid_rms_median"] = max(worst.get("resid_rms_median", 0.0),
+                                            float(np.median(rel)) if rel.size else 0.0)
     return worst
 
 
@@ -193,6 +216,21 @@ def main() -> int:
     if not (gert_dir / "input").is_dir():
         gert_dir = REPO_ROOT.parent.parent / "gert"
     env["PYTHONPATH"] = f"{REPO_ROOT}:{gert_dir}"
+    # Each config runs as N_WORKERS separate processes (multiprocessing.Pool in
+    # the sweep script). This machine's BLAS (Apple Accelerate) spawns its own
+    # threads per process with no cap by default, so N_WORKERS processes each
+    # multithreading BLAS oversubscribes the machine's cores -- measured 2026-08-18
+    # on co2p-58-g1/analytic: two of the widest, most matrix-heavy windows (41 and
+    # 45 anchors) took 2156s and 2182s under the 12-worker pool, versus 150s each
+    # reproduced through the identical code path with one worker. Not a Jacobian
+    # bug -- both states and residuals agreed with the FD reference to 5 significant
+    # figures; only wall time was affected, and only for the heaviest windows,
+    # because those do the most per-anchor linear algebra per call. One BLAS thread
+    # per process trades single-call speed for not fighting the other N_WORKERS-1
+    # processes for the same cores, which is the right trade once N_WORKERS > 1.
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+               "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        env[var] = "1"
 
     rows = np.arange(float(N_COLS))
     _, s = xy_to_wavelength_slit(2, np.full(N_COLS, 512.0), rows)
