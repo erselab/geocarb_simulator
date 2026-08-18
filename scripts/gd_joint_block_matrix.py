@@ -86,20 +86,36 @@ def parse_bool_list(s):
 
 # ------------------------------------------------------------ config identity --
 
-def config_id(free_key, nwin, gratio, adens, si):
-    """`{free}-{nwin}-g{gratio}[-ad{adens}][-nosi]`.
+#: scene name -> gd_joint_block_whole_slit_sweep.py flags it needs, and
+#: whether the true composition is spatially flat (drives which `truth`
+#: dict score() must compare against -- see `truth_for`).
+SCENES = {
+    "realistic": {"uniform": False, "barcode": False, "realistic_barcode": False, "flat": False},
+    "uniform": {"uniform": True, "barcode": False, "realistic_barcode": False, "flat": True},
+    "barcode": {"uniform": False, "barcode": True, "realistic_barcode": False, "flat": True},
+    "realistic-barcode": {"uniform": False, "barcode": False, "realistic_barcode": True, "flat": False},
+}
 
-    Elides `-ad{adens}` when `adens==1` and `-nosi` when `si` is True, so a
-    config at the closed regression's own defaults gets EXACTLY that
-    regression's own id (`co2p-58-g1`, no suffix) -- which is what makes the
-    archive-reuse lookup in `resolve_existing` a simple path check rather
-    than a translation table.
+
+def config_id(free_key, nwin, gratio, adens, si, scene="realistic", barcode_bars=32):
+    """`{free}-{nwin}-g{gratio}[-ad{adens}][-nosi][-{scene}[bars]]`.
+
+    Elides every non-default piece (`adens==1`, `si=True`,
+    `scene="realistic"`) so a config at the closed regression's own defaults
+    gets EXACTLY that regression's own id (`co2p-58-g1`, no suffix) --
+    which is what makes the archive-reuse lookup in `resolve_existing` a
+    simple path check rather than a translation table.
     """
     cid = f"{free_key}-{nwin}-g{gratio:g}"
     if adens != 1:
         cid += f"-ad{adens}"
     if not si:
         cid += "-nosi"
+    if scene != "realistic":
+        tag = scene.replace("-", "")
+        if scene in ("barcode", "realistic-barcode"):
+            tag += str(barcode_bars)
+        cid += f"-{tag}"
     return cid
 
 
@@ -107,21 +123,27 @@ def parse_config(cid):
     """Inverse of `config_id`, best-effort (used only for display)."""
     parts = cid.split("-")
     free_key, nwin, gtag = parts[0], parts[1], parts[2]
-    adens = 1
-    si = True
+    adens, si, scene, barcode_bars = 1, True, "realistic", 32
     for p in parts[3:]:
         if p.startswith("ad"):
             adens = int(p[2:])
         elif p == "nosi":
             si = False
-    return free_key, int(nwin), float(gtag[1:]), adens, si
+        elif p.startswith("uniform"):
+            scene = "uniform"
+        elif p.startswith("realisticbarcode"):
+            scene, barcode_bars = "realistic-barcode", int(p[len("realisticbarcode"):])
+        elif p.startswith("barcode"):
+            scene, barcode_bars = "barcode", int(p[len("barcode"):])
+    return free_key, int(nwin), float(gtag[1:]), adens, si, scene, barcode_bars
 
 
 def is_bare(cid: str) -> bool:
     """True iff this id matches the closed regression's own naming exactly
-    (anchor_density=1, state_interp=True) -- the only case an archive
-    lookup is meaningful."""
-    return "-ad" not in cid and "-nosi" not in cid
+    (anchor_density=1, state_interp=True, scene=realistic) -- the only case
+    an archive lookup is meaningful (the archive has no barcode/uniform
+    runs at all)."""
+    return "-ad" not in cid and "-nosi" not in cid and parse_config(cid)[5] == "realistic"
 
 
 # ---------------------------------------------------------------- running --
@@ -141,7 +163,7 @@ def resolve_existing(cid, jacobian, tag_dir):
 
 
 def run_one(cid, jacobian, n_workers, env, tag_dir, force=False):
-    free_key, nwin, gratio, adens, si = parse_config(cid)
+    free_key, nwin, gratio, adens, si, scene, barcode_bars = parse_config(cid)
     path, source = (None, None) if force else resolve_existing(cid, jacobian, tag_dir)
     if path is not None:
         tag = "archive (already validated)" if source == "archive" else "exists"
@@ -156,6 +178,13 @@ def run_one(cid, jacobian, n_workers, env, tag_dir, force=False):
           "--out", str(out_path)]
     if si:
         cmd.append("--state-interp")
+    sc = SCENES[scene]
+    if sc["uniform"]:
+        cmd.append("--uniform")
+    if sc["barcode"]:
+        cmd += ["--barcode", "--barcode-bars", str(barcode_bars)]
+    if sc["realistic_barcode"]:
+        cmd += ["--realistic-barcode", "--barcode-bars", str(barcode_bars)]
     if env.get("_HIRES_ONLY") == "1":
         cmd.append("--hires-only")
     print(f"  {cid:26s} {jacobian:8s} running ...", flush=True)
@@ -259,6 +288,17 @@ def main() -> int:
                     help="comma list of true/false (default: true)")
     ap.add_argument("--jacobian", default="analytic,fd",
                     help="comma list from {analytic,fd} (default: both)")
+    ap.add_argument("--scene", default="realistic",
+                    help="comma list from {realistic,uniform,barcode,realistic-barcode} "
+                         "(default: realistic). 'barcode': fixed atmosphere, reflectance-"
+                         "only bars -- isolated test of a sharp reflectance boundary. "
+                         "'realistic-barcode': real along-slit composition PLUS the same "
+                         "reflectance bars on top. 'uniform'/'barcode' both score against "
+                         "a FLAT truth (their composition genuinely is uniform); "
+                         "'realistic'/'realistic-barcode' score against the normal "
+                         "along-slit truth.")
+    ap.add_argument("--barcode-bars", type=int, default=32,
+                    help="bars for barcode/realistic-barcode scenes (default 32)")
     ap.add_argument("--hires-only", action="store_true",
                     help="skip coarse -- correct whenever only anchor_density is swept, "
                          "since coarse cannot depend on it at all")
@@ -280,9 +320,14 @@ def main() -> int:
     for j in jacobians:
         if j not in ("analytic", "fd"):
             ap.error(f"--jacobian: {j!r} not in ('analytic','fd')")
+    scenes = parse_list(args.scene, str)
+    for sc in scenes:
+        if sc not in SCENES:
+            ap.error(f"--scene: {sc!r} not in {list(SCENES)}")
 
-    cids = [config_id(f, n, g, a, s)
-           for f, n, g, a, s in itertools.product(frees, nwins, gratios, adenss, sis)]
+    cids = [config_id(f, n, g, a, s, scene, args.barcode_bars)
+           for f, n, g, a, s, scene
+           in itertools.product(frees, nwins, gratios, adenss, sis, scenes)]
     n_workers = args.n_workers or max(1, (os.cpu_count() or 4) - 2)
 
     tag_dir = REPO_ROOT / "results" / "config_matrix" / args.tag
@@ -304,17 +349,27 @@ def main() -> int:
     _, s = xy_to_wavelength_slit(2, np.full(N_COLS, 512.0), rows)
     eta_rows = s / s_max(2)
     x_km = eta_rows * als.SLIT_HALF_KM
-    truth = {n: np.asarray(f(x_km), dtype=float) for n, f in als.STATE_FIELDS.items()}
+    # Two truth dicts, picked per-config by SCENES[scene]["flat"]: uniform/
+    # barcode's true composition really is spatially constant (matching
+    # state_spec_from_scene(uniform=True)'s own priors), so scoring those
+    # against the along-slit-varying truth would just measure the ambient
+    # gradient, not retrieval error. realistic/realistic-barcode keep the
+    # normal along-slit truth -- realistic-barcode's composition genuinely
+    # varies, only reflectance gets a pattern on top.
+    truth_varying = {n: np.asarray(f(x_km), dtype=float) for n, f in als.STATE_FIELDS.items()}
+    truth_flat = {n: np.full(N_COLS, float(f(np.zeros(1))[0])) for n, f in als.STATE_FIELDS.items()}
 
     print(f"tag: {args.tag}   {len(cids)} configs x {len(jacobians)} solvers, "
          f"{n_workers} workers, hires_only={args.hires_only}")
     print(f"axes: free={frees} n_windows={nwins} g_ratio={gratios} "
-         f"anchor_density={adenss} state_interp={sis}")
+         f"anchor_density={adenss} state_interp={sis} scene={scenes}")
     print(f"gert: {gert_dir}\n")
 
     scored, timings, sources = {}, {}, {}
     for cid in cids:
         print(f"{cid}:", flush=True)
+        cfg_scene = parse_config(cid)[5]
+        truth = truth_flat if SCENES[cfg_scene]["flat"] else truth_varying
         for j in jacobians:
             path, dt, source = run_one(cid, j, n_workers, env, tag_results, force=args.force)
             scored[(cid, j)] = score(path, eta_rows, truth)
@@ -332,7 +387,7 @@ def main() -> int:
     emit(f"# Config matrix -- tag `{args.tag}`\n")
     emit(f"Axes: free={frees}, n_windows={nwins}, g_ratio={gratios}, "
         f"anchor_density={adenss}, state_interp={sis}, jacobian={jacobians}, "
-        f"hires_only={args.hires_only}\n")
+        f"scene={scenes}, hires_only={args.hires_only}\n")
     emit("## Accuracy against truth\n")
     hdr = (f"| {'config':26s} | jac(req) | solve  | jac(used) | {'CO2 rms':>9s} | "
           f"{'CO2 max':>9s} | {'dP rms':>8s} | {'dP max':>8s} | {'residRMS':>10s} | src |")

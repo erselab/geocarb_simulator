@@ -48,11 +48,7 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import gd_test as gdt  # noqa: E402
-from gd_joint_block_retrieve import (  # noqa: E402
-    FPA, GERT_ROOT, _eta_of, band_basics, build_forward,
-    gauss_newton_regularized, make_spectrum_fn,
-)
-from gd_joint_block_hires_test import build_forward_hires  # noqa: E402
+from gd_joint_block_retrieve import FPA, GERT_ROOT, _eta_of, band_basics  # noqa: E402
 from gd_joint_block_diagnostics import pixel_density_bin_centers  # noqa: E402
 
 import geosat_geometry as gg  # noqa: E402
@@ -138,7 +134,15 @@ def _solve_window(row_lo: int, row_hi: int):
     absco, wide_inst, geo, solar, albedo = (_SWEEP["absco"], _SWEEP["wide_inst"],
                                             _SWEEP["geo"], _SWEEP["solar"], _SWEEP["albedo"])
     wn_hires, ils, gamma, sigma_abs = _SWEEP["wn_hires"], _SWEEP["ils"], _SWEEP["gamma"], _SWEEP["sigma_abs"]
-    uniform, atm_center = _SWEEP["uniform"], _SWEEP["atm_center"]
+    # `uniform_priors` -- NOT the same as the sweep's own `--uniform` flag by
+    # itself: it is set whenever the TRUE composition is spatially constant,
+    # which is also the case under `--barcode` (fixed atmosphere, only
+    # reflectance varies). `--realistic-barcode` does NOT set it -- its
+    # composition genuinely varies along the slit, same as the plain
+    # realistic scene, only with a reflectance pattern multiplied on top.
+    # See `state_spec_from_scene`'s own `uniform` docstring for why this
+    # has to reach the StateSpec priors, not just the rendered image.
+    uniform_priors = _SWEEP["uniform_priors"]
     g_ratio = _SWEEP.get("g_ratio", G_RATIO)
     hires_only = _SWEEP.get("hires_only", False)
     anchor_density = int(_SWEEP.get("anchor_density", 1))
@@ -150,20 +154,13 @@ def _solve_window(row_lo: int, row_hi: int):
     cols = np.arange(1024.0)
     eta_all = np.stack([_eta_of(FPA, cols, np.full(1024, float(i))) for i in rows_win])
     bin_centers = pixel_density_bin_centers(eta_all.ravel(), G)
-    if uniform:
-        # true scene really is constant everywhere -- every bin's own
-        # "local truth" prior is the SAME shared atm_center, not a
-        # position-dependent one, so there is no legitimate resolution-
-        # floor/quantization effect possible: any nonzero bias below is
-        # unambiguously a bug, not a real physical ceiling.
-        prior_atms = [atm_center] * G
-        prior_co2_ppm_bins = np.full(G, float(als.xco2_ppm(0.0)))
-    else:
-        x_km_bins = bin_centers * als.SLIT_HALF_KM
-        prior_atms = [als.atmosphere_at(float(xk)) for xk in x_km_bins]
-        prior_co2_ppm_bins = np.array([float(als.xco2_ppm(xk)) for xk in x_km_bins])
+    # kept only for gd_joint_block_whole_slit_plot.py's own backward-compat
+    # reconstruction (prior_co2_ppm_bins * x_coarse); the real solve below
+    # gets its priors from state_spec_from_scene(..., uniform=uniform_priors)
+    prior_co2_ppm_bins = (np.full(G, float(als.xco2_ppm(0.0))) if uniform_priors
+                          else np.array([float(als.xco2_ppm(xk))
+                                        for xk in bin_centers * als.SLIT_HALF_KM]))
 
-    spectrum_for = make_spectrum_fn(absco, wide_inst, geo, solar, albedo)
     y_true = band["A"][rows_win, :].ravel()
     y_scale = float(np.mean(np.abs(y_true)))
     Sy_inv_diag = np.full(y_true.size, 1.0 / y_scale ** 2)
@@ -210,7 +207,7 @@ def _solve_window(row_lo: int, row_hi: int):
     if not hires_only:
         t0 = time.time()
         spec_c = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length,
-                                       prior_form=prior_form)
+                                       prior_form=prior_form, uniform=uniform_priors)
         # coarse: scene positions ARE the state positions, so interpolation is
         # the identity either way -- state_interp is genuinely a no-op here.
         fwd_c = build_forward_state(FPA, rows_win, bin_centers, spec_c, spectrum,
@@ -238,7 +235,7 @@ def _solve_window(row_lo: int, row_hi: int):
     t0 = time.time()
     # HI-RES: scene on the finer anchor grid, every row interpolated there.
     spec_h = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length,
-                                   prior_form=prior_form)
+                                   prior_form=prior_form, uniform=uniform_priors)
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
                                 wn_hires, ils, pad=PAD, state_interp=state_interp)
     x_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
@@ -276,6 +273,30 @@ def main() -> int:
                     "genuinely uniform truth, correct bias is EXACTLY zero everywhere "
                     "(no bin-quantization/resolution-floor effect is even possible), so "
                     "any nonzero structure here is unambiguously implementation, not physics.")
+    ap.add_argument("--barcode", action="store_true",
+                    help="fixed-atmosphere scene with a barcode REFLECTANCE pattern (sharp "
+                         "brightness bars alternating along the slit, composition held at "
+                         "the single center atmosphere) -- an isolated test of whether a "
+                         "sharp reflectance-only boundary corrupts the retrieval via "
+                         "keystone/PSF cross-row mixing, with no real composition signal "
+                         "also in play. Implies uniform=True state priors automatically "
+                         "(the true composition IS uniform here), independent of whether "
+                         "--uniform was also passed. Mutually exclusive with "
+                         "--realistic-barcode.")
+    ap.add_argument("--realistic-barcode", action="store_true",
+                    help="the normal realistic along-slit composition scene (real "
+                         "als.atmosphere_at variation, same priors as a plain run) with a "
+                         "barcode reflectance pattern multiplied on top -- tests whether a "
+                         "sharp reflectance boundary makes bias WORSE on top of the "
+                         "mechanisms already present in the realistic scene, rather than in "
+                         "isolation. Do not combine with --uniform: this scene's true "
+                         "composition is deliberately non-uniform, so uniform priors would "
+                         "be a real prior/truth mismatch, not a simplification. Mutually "
+                         "exclusive with --barcode.")
+    ap.add_argument("--barcode-bars", type=int, default=32,
+                    help="number of alternating-brightness bars across the slit for "
+                         "--barcode/--realistic-barcode (default 32, matching gd_test.py's "
+                         "own default). Ignored otherwise.")
     ap.add_argument("--g-ratio", type=float, default=G_RATIO, help="G = max(2, round(width/"
                     "g_ratio)) per window -- default matches the production convention "
                     "(G_RATIO=3). Pass 1.0 for 'one bin per row' (ground-footprint-tied "
@@ -336,8 +357,24 @@ def main() -> int:
     args = ap.parse_args()
     if (args.task_id is None) != (args.n_tasks is None):
         ap.error("--task-id and --n-tasks must be given together")
+    if args.barcode and args.realistic_barcode:
+        ap.error("--barcode and --realistic-barcode are mutually exclusive "
+                 "(gd_test._band_setup's own if/elif -- fixed atmosphere+brightness only, "
+                 "vs. real composition variation+brightness on top; pick one)")
+    if args.realistic_barcode and args.uniform:
+        ap.error("--realistic-barcode's whole point is non-uniform composition; "
+                 "--uniform would force flat state priors against a truth that "
+                 "deliberately is not flat -- a real prior/truth mismatch, not a "
+                 "simplification. Drop --uniform.")
+    # NOT just args.uniform: --barcode's true composition is also spatially constant
+    # (only reflectance varies), so it needs the same flat StateSpec priors --
+    # see state_spec_from_scene's own `uniform` docstring for why this has to reach
+    # the actual solve, not just the rendered image.
+    uniform_priors = args.uniform or args.barcode
 
-    scene_label = "uniform" if args.uniform else "realistic"
+    scene_label = ("barcode" if args.barcode else
+                  "realistic-barcode" if args.realistic_barcode else
+                  "uniform" if args.uniform else "realistic")
     print(f"Building {scene_label}-scene FPA{FPA} band (renders the real 1024x1024 detector image)...", flush=True)
     block = gg.geocarb_demo(verbose=False)["blocks"][0]
     _, _, geo = sample_geometries(block, n=1, seed=0)[0]
@@ -347,7 +384,8 @@ def main() -> int:
     gdt._G.update(dict(atm=atm_center, absco=absco, geo=geo, solar=solar))
     snr = gdt.DEFAULT_SNR_BY_FPA[FPA]
     band = gdt._band_setup(FPA, atm_center, absco, geo, solar, snr, 400, None,
-                           args.uniform, False, 32, False, 0)
+                           args.uniform, args.barcode, args.barcode_bars, False, 0,
+                           args.realistic_barcode)
     wide_win, wide_inst, albedo = band_basics(FPA, atm_center, absco, geo, solar)
     print("done.\n", flush=True)
 
@@ -376,7 +414,7 @@ def main() -> int:
     _SWEEP.update(dict(band=band, absco=absco, wide_inst=wide_inst, geo=geo, solar=solar,
                        albedo=albedo, wn_hires=band["wn_hires"], ils=band["ils"],
                        gamma=args.gamma, sigma_abs=args.sigma_abs, g_ratio=args.g_ratio,
-                       uniform=args.uniform, atm_center=atm_center,
+                       uniform=args.uniform, uniform_priors=uniform_priors, atm_center=atm_center,
                        hires_only=args.hires_only, anchor_density=args.anchor_density,
                        state_interp=args.state_interp,
                        free=tuple(x.strip() for x in args.free.split(',')),
@@ -407,6 +445,10 @@ def main() -> int:
     print(f"\nall done ({time.time()-t0:.0f}s): {n_ok}/{len(tiles)} windows solved successfully", flush=True)
 
     suffix = "_uniform" if args.uniform else ""
+    if args.barcode:
+        suffix += f"_barcode{args.barcode_bars}"
+    elif args.realistic_barcode:
+        suffix += f"_realisticbarcode{args.barcode_bars}"
     suffix += f"_gratio{args.g_ratio:g}"
     if args.anchor_density != 1:
         suffix += f"_adens{args.anchor_density}"
@@ -420,6 +462,9 @@ def main() -> int:
     if args.jacobian != "fd":
         suffix += f"_{args.jacobian}"
     payload = {"results": results, "tiles": all_tiles, "fpa": FPA, "uniform": args.uniform,
+              "barcode": args.barcode, "realistic_barcode": args.realistic_barcode,
+              "barcode_bars": args.barcode_bars if (args.barcode or args.realistic_barcode) else None,
+              "uniform_priors": uniform_priors,
               "gamma": args.gamma, "sigma_abs": args.sigma_abs,
               "g_ratio": args.g_ratio, "min_window": MIN_WINDOW, "pad": PAD,
               "hires_only": args.hires_only, "anchor_density": args.anchor_density,

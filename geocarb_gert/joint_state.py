@@ -417,7 +417,7 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                           sigmas=None, corr_length=None, kinds=None,
                           prior_form="exponential", gamma=3.0,
                           band_label=None, surface_positions=None,
-                          surface_density: int = 3) -> StateSpec:
+                          surface_density: int = 3, uniform: bool = False) -> StateSpec:
     """Build a :class:`StateSpec` whose priors are the truth scene's own
     values at `bin_centers` -- the joint block's existing "local-truth
     nuisance idealization", but now with every quantity present as a real,
@@ -439,12 +439,30 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
     own denser grid (`surface_positions`, or `albedo_positions_for(
     bin_centers, surface_density)`). Omitting it reproduces the pre-2026-08-18
     atmosphere-only state exactly, so every existing caller is unaffected.
+
+    `uniform=True` evaluates every field at a single fixed position
+    (`x_km=0.0`, matching `along_slit_scene.atmosphere_at(0.0)`'s own
+    convention for "the" center atmosphere) instead of each bin's own
+    `x_km`, so every bin gets the SAME prior -- the correct state-side
+    counterpart to a truth scene whose composition genuinely does not vary
+    along the slit (`--uniform` / `--barcode` on
+    `gd_joint_block_whole_slit_sweep.py`).
+
+    Found 2026-08-19: before this parameter existed, nothing in this
+    function read `uniform` at all -- the sweep script's own `--uniform`
+    flag only reached a `prior_atms`/`prior_co2_ppm_bins` pair that fed
+    NOTHING (`state_spec_from_scene` was always called with no `uniform`
+    argument), so every StateSpec-era `--uniform` run was silently
+    regularized toward the real, non-uniform along-slit truth while
+    rendering a genuinely flat detector image -- exactly the kind of
+    prior/truth mismatch a `--uniform` run exists to rule out. Confirmed
+    directly: `state_spec_from_scene(bc, free=('co2_ppm',))` at six
+    different bin centres returned six different priors before this fix.
     """
     from . import along_slit_scene as als
 
     fields = als.STATE_FIELDS if fields is None else fields
     bin_centers = np.atleast_1d(np.asarray(bin_centers, dtype=float))
-    x_km = bin_centers * als.SLIT_HALF_KM
     default_sigma = {"co2_ppm": 0.10, "ch4_ppb": 0.10, "co_ppb": 0.20,
                      "h2o_surface_vmr": 0.25, "p_surface_hpa": 0.02,
                      "albedo": 0.20}
@@ -459,7 +477,10 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
         return cl
 
     def _row(name, fn, positions, target):
-        xk = positions * als.SLIT_HALF_KM
+        # under uniform=True every bin gets x_km=0.0 -- see the `uniform`
+        # branch above; `positions` (eta) still vary, only the physical
+        # position fed to the truth function is pinned
+        xk = (np.zeros_like(positions) if uniform else positions * als.SLIT_HALF_KM)
         prior = (fn(xk, band_label) if target == "surface" else fn(xk))
         return ParamSpec(name=name, positions=positions,
                          prior=np.asarray(prior, dtype=float),

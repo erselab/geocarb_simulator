@@ -139,7 +139,9 @@ def bin_edges_of(bin_centers: np.ndarray) -> np.ndarray:
 
 # ------------------------------------------------------------- continuum --
 
-def load_band_image(fpa: int, uniform: bool = False, cache_dir: Path | None = None):
+def load_band_image(fpa: int, uniform: bool = False, cache_dir: Path | None = None,
+                    barcode: bool = False, realistic_barcode: bool = False,
+                    barcode_bars: int = 32):
     """The sweep's own rendered detector image `band["A"]`, from the .npy
     cache written by `scripts/gd_cache_band_image.py`, or None if absent.
 
@@ -149,9 +151,19 @@ def load_band_image(fpa: int, uniform: bool = False, cache_dir: Path | None = No
     once and caches. Verified there (via `--check-against`) to reproduce the
     sweep's own `y_true`: residRMS/mean|y| came out 0.000-0.003% on the
     gratio1 windows, i.e. the render matches what the sweep actually fitted.
+
+    `barcode`/`realistic_barcode`/`barcode_bars` must match the sweep's own
+    flags -- pass the sweep pickle's own `d.get("barcode")` etc., not a
+    guess, or this silently loads the wrong scene's continuum against a
+    barcode run's residuals.
     """
     cache_dir = cache_dir or (REPO_ROOT / "results" / "band_cache")
-    p = Path(cache_dir) / f"band_image_fpa{fpa}{'_uniform' if uniform else ''}.npy"
+    tag = "_uniform" if uniform else ""
+    if barcode:
+        tag += f"_barcode{barcode_bars}"
+    elif realistic_barcode:
+        tag += f"_realisticbarcode{barcode_bars}"
+    p = Path(cache_dir) / f"band_image_fpa{fpa}{tag}.npy"
     if not p.exists():
         return None, p
     return np.load(p), p
@@ -582,12 +594,19 @@ def main() -> int:
     # mislabelling raw radiance as a percentage.
     norm, unit_label, unit_short = None, RAD_UNITS_LABEL, RAD_UNITS
     if args.units == "percent":
-        A, cache_p = load_band_image(fpa, uniform=bool(d.get("uniform", False)))
+        A, cache_p = load_band_image(fpa, uniform=bool(d.get("uniform", False)),
+                                     barcode=bool(d.get("barcode", False)),
+                                     realistic_barcode=bool(d.get("realistic_barcode", False)),
+                                     barcode_bars=int(d.get("barcode_bars") or 32))
         if A is None:
+            hint = " --uniform" if d.get("uniform") else ""
+            if d.get("barcode"):
+                hint += f" --barcode --barcode-bars {d.get('barcode_bars') or 32}"
+            elif d.get("realistic_barcode"):
+                hint += f" --realistic-barcode --barcode-bars {d.get('barcode_bars') or 32}"
             print(f"WARNING: no cached band image at {cache_p} -- falling back to raw "
                   f"radiance units. Generate it with:\n"
-                  f"  PYTHONPATH=. python3 scripts/gd_cache_band_image.py --fpa {fpa}"
-                  f"{' --uniform' if d.get('uniform') else ''}")
+                  f"  PYTHONPATH=. python3 scripts/gd_cache_band_image.py --fpa {fpa}{hint}")
         else:
             cont = continuum_of(A)
             norm = 100.0 / cont

@@ -48,11 +48,19 @@ from geocarb_gert import gert_root  # noqa: E402
 DEFAULT_GERT_ROOT = str(gert_root())
 
 
-def cache_path(cache_dir: Path, fpa: int, uniform: bool) -> Path:
-    return cache_dir / f"band_image_fpa{fpa}{'_uniform' if uniform else ''}.npy"
+def cache_path(cache_dir: Path, fpa: int, uniform: bool,
+               barcode: bool = False, realistic_barcode: bool = False,
+               barcode_bars: int = 32) -> Path:
+    tag = ("_uniform" if uniform else "")
+    if barcode:
+        tag += f"_barcode{barcode_bars}"
+    elif realistic_barcode:
+        tag += f"_realisticbarcode{barcode_bars}"
+    return cache_dir / f"band_image_fpa{fpa}{tag}.npy"
 
 
-def render(fpa: int, uniform: bool, gert_root: Path):
+def render(fpa: int, uniform: bool, gert_root: Path,
+          barcode: bool = False, realistic_barcode: bool = False, barcode_bars: int = 32):
     import gd_test as gdt
     import geosat_geometry as gg
     import gert
@@ -69,9 +77,13 @@ def render(fpa: int, uniform: bool, gert_root: Path):
     gdt._G.update(dict(atm=atm_center, absco=absco, geo=geo, solar=solar))
     snr = gdt.DEFAULT_SNR_BY_FPA[fpa]
     print(f"rendering FPA{fpa} 1024x1024 detector image "
-          f"(uniform={uniform}) -- this is the slow part ...", flush=True)
+          f"(uniform={uniform}, barcode={barcode}, realistic_barcode={realistic_barcode}) "
+          f"-- this is the slow part ...", flush=True)
+    # positional order must match gd_joint_block_whole_slit_sweep.py's own
+    # _band_setup call exactly, or the cache silently stops being bit-identical
+    # to what a sweep actually fitted against
     band = gdt._band_setup(fpa, atm_center, absco, geo, solar, snr, 400, None,
-                           uniform, False, 32, False, 0)
+                           uniform, barcode, barcode_bars, False, 0, realistic_barcode)
     A = np.asarray(band["A"], dtype=float)
     print(f"done in {time.time() - t0:.0f}s -- A {A.shape}, "
           f"range [{A.min():.4g}, {A.max():.4g}] W/m2/sr/um", flush=True)
@@ -118,22 +130,34 @@ def main() -> int:
     ap.add_argument("--fpa", type=int, default=2)
     ap.add_argument("--uniform", action="store_true",
                     help="render the constant-atmosphere scene instead of the realistic one")
+    ap.add_argument("--barcode", action="store_true",
+                    help="render the fixed-atmosphere barcode-reflectance scene "
+                         "(matches gd_joint_block_whole_slit_sweep.py's own --barcode)")
+    ap.add_argument("--realistic-barcode", action="store_true",
+                    help="render the realistic-composition scene with a barcode "
+                         "reflectance pattern on top (matches --realistic-barcode there)")
+    ap.add_argument("--barcode-bars", type=int, default=32,
+                    help="only meaningful with --barcode/--realistic-barcode")
     ap.add_argument("--gert-root", type=str, default=DEFAULT_GERT_ROOT)
     ap.add_argument("--cache-dir", type=str, default=str(REPO_ROOT / "results" / "band_cache"))
     ap.add_argument("--check-against", type=str, default=None,
                     help="a sweep pickle to sanity-check the render against")
     ap.add_argument("--force", action="store_true", help="re-render even if cached")
     args = ap.parse_args()
+    if args.barcode and args.realistic_barcode:
+        ap.error("--barcode and --realistic-barcode are mutually exclusive")
 
     cache_dir = Path(args.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    out = cache_path(cache_dir, args.fpa, args.uniform)
+    out = cache_path(cache_dir, args.fpa, args.uniform, args.barcode,
+                     args.realistic_barcode, args.barcode_bars)
 
     if out.exists() and not args.force:
         print(f"already cached: {out} (use --force to re-render)")
         A = np.load(out)
     else:
-        A = render(args.fpa, args.uniform, Path(args.gert_root))
+        A = render(args.fpa, args.uniform, Path(args.gert_root), args.barcode,
+                  args.realistic_barcode, args.barcode_bars)
         np.save(out, A)
         print(f"saved {out}  ({out.stat().st_size / 1e6:.1f} MB)")
 

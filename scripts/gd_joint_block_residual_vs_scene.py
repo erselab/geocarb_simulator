@@ -258,13 +258,20 @@ def main() -> int:
     # chi2 and %-of-continuum both need the rendered radiance the sweep fitted
     # against, which no pickle carries. Skip those panels loudly rather than
     # substituting raw radiance and mislabelling it.
-    A, cache_p = load_band_image(fpa, uniform=bool(d.get("uniform", False)))
+    A, cache_p = load_band_image(fpa, uniform=bool(d.get("uniform", False)),
+                                 barcode=bool(d.get("barcode", False)),
+                                 realistic_barcode=bool(d.get("realistic_barcode", False)),
+                                 barcode_bars=int(d.get("barcode_bars") or 32))
     cont = continuum_of(A) if A is not None else None
     if A is None:
+        hint = " --uniform" if d.get("uniform") else ""
+        if d.get("barcode"):
+            hint += f" --barcode --barcode-bars {d.get('barcode_bars') or 32}"
+        elif d.get("realistic_barcode"):
+            hint += f" --realistic-barcode --barcode-bars {d.get('barcode_bars') or 32}"
         print(f"WARNING: no cached band image at {cache_p} -- chi2 and %-of-continuum "
               f"panels will be blank. Generate it with:\n"
-              f"  PYTHONPATH=. python3 scripts/gd_cache_band_image.py --fpa {fpa}"
-              f"{' --uniform' if d.get('uniform') else ''}")
+              f"  PYTHONPATH=. python3 scripts/gd_cache_band_image.py --fpa {fpa}{hint}")
 
     resid, chi2, pct, state = {}, {}, {}, {}
     for sv in solves:
