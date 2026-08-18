@@ -363,6 +363,13 @@ def full_detector_figure(results: dict, fpa: int, solve: str,
     finite = np.isfinite(img)
     if not finite.any():
         return None, 0
+    # Window boundaries: the row right after each window's own row_hi -- the
+    # seam between two independently-regularized solves. Derived from
+    # `results` itself (every window's own row_lo/row_hi), not a separate
+    # `tiles` argument, so this never drifts out of sync with what was
+    # actually stitched into `img` above.
+    lo_hi = sorted((int(w["row_lo"]), int(w["row_hi"])) for w in results.values())
+    win_bounds = [hi + 0.5 for _, hi in lo_hi[:-1]]
     amax = float(np.nanmax(np.abs(img)))
     # linear threshold at the median per-row RMS: below this the scale is
     # linear, above it logarithmic, so both the near-null low-row windows
@@ -380,6 +387,8 @@ def full_detector_figure(results: dict, fpa: int, solve: str,
     ax.set_title(f"raw residual (symlog, linthresh={lin:.2g})", fontsize=10.5)
     ax.set_xlabel("detector column")
     ax.set_ylabel("detector row")
+    for b in win_bounds:
+        ax.axhline(b, color="0.3", lw=0.3, alpha=0.4, zorder=3)
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03, label=unit_label)
 
     ax = fig.add_subplot(gs[0, 1])
@@ -388,10 +397,14 @@ def full_detector_figure(results: dict, fpa: int, solve: str,
     ax.set_title("each window normalised by its own RMS "
                  "(structure, not amplitude)", fontsize=10.5)
     ax.set_xlabel("detector column")
+    for b in win_bounds:
+        ax.axhline(b, color="0.2", lw=0.3, alpha=0.5, zorder=3)
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03, label="resid / window RMS")
 
     ax = fig.add_subplot(gs[1, :])
     ax.semilogy(np.arange(n_rows_full), row_rms, lw=0.8, color=SOLVE_COLOR[solve])
+    for b in win_bounds:
+        ax.axvline(b, color="0.6", lw=0.4, alpha=0.5, zorder=0.5)
     ax.set_xlim(0, n_rows_full)
     ax.set_xlabel("detector row")
     ax.set_ylabel("per-row residual RMS")
@@ -399,7 +412,8 @@ def full_detector_figure(results: dict, fpa: int, solve: str,
     ax.grid(alpha=0.25, lw=0.5)
 
     fig.suptitle(f"FPA{fpa} joint block -- FULL-DETECTOR post-fit residual ({solve}), "
-                 f"{len(results)} windows stitched, {covered}/{n_rows_full} rows covered",
+                 f"{len(results)} windows stitched, {covered}/{n_rows_full} rows covered, "
+                 f"{len(win_bounds)} window boundaries marked",
                  fontsize=13)
     fig.subplots_adjust(left=0.055, right=0.965, top=0.93, bottom=0.07)
     return fig, covered

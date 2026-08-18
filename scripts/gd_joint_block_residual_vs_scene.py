@@ -215,6 +215,12 @@ def main() -> int:
     ap.add_argument("--scatter-solve", default=None, choices=["coarse", "hires"],
                     help="solve used for the bottom covariation scatters "
                          "(default: hires if present, else coarse)")
+    ap.add_argument("--no-window-bounds", action="store_true",
+                    help="don't mark each independent window's own boundary (from the "
+                         "pickle's own `tiles` list) -- on by default, since each window "
+                         "is a separately regularized solve and a real boundary artifact "
+                         "should show as a kink in the residual right at these marks, not "
+                         "smoothly through them")
     ap.add_argument("--x-axis", choices=["row", "eta", "km"], default="row",
                     help="along-slit coordinate (default: row, matching the "
                          "detector-space residual plots)")
@@ -333,6 +339,14 @@ def main() -> int:
     for ax in line_axes[1:]:
         ax.sharex(line_axes[0])
 
+    # Window boundaries: the row right after each tile's own row_hi, i.e. the
+    # seam between two independently-regularized solves (tiles are built
+    # contiguous/non-overlapping, row_start = previous row_end + 1 -- see
+    # build_window_tiles -- so this is exact, not inferred from spacing).
+    tiles = sorted(d.get("tiles", []))
+    win_bounds = [hi + 0.5 for lo, hi in tiles[:-1]] if tiles else []
+    win_bounds_x = [np.interp(b, rows, xv) for b in win_bounds]
+
     def mark(ax, hatch_failed=True):
         ax.axvline(x_bottom, color="crimson", lw=1.0, ls="--", zorder=1)
         ax.axvspan(*x_mtn, color="crimson", alpha=0.06, zorder=0)
@@ -340,6 +354,9 @@ def main() -> int:
             for lo, hi, _ in failed:
                 ax.axvspan(xv[lo], xv[min(hi, N_COLS - 1)], facecolor="0.85",
                            edgecolor="0.55", hatch="///", lw=0.0, alpha=0.55, zorder=0)
+        if not args.no_window_bounds:
+            for b in win_bounds_x:
+                ax.axvline(b, color="0.6", lw=0.4, alpha=0.5, zorder=0.5)
         ax.grid(alpha=0.25, lw=0.5)
 
     k = 0
@@ -506,8 +523,11 @@ def main() -> int:
     free_tag = ", ".join(free_rows)
     fail_tag = (f"   [{len(failed)}/{len(results)} windows failed -- hatched]"
                 if failed else "")
+    bounds_tag = (f"   [{len(win_bounds)} window boundaries marked, thin gray]"
+                 if win_bounds and not args.no_window_bounds else "")
     fig.suptitle(f"FPA{fpa} joint block -- residual vs. true AND retrieved scene "
-                 f"(free: {free_tag}){fail_tag}\n{in_path.stem}", fontsize=12.5, y=0.995)
+                 f"(free: {free_tag}){fail_tag}{bounds_tag}\n{in_path.stem}",
+                fontsize=12.5, y=0.995)
     out_dir = REPO_ROOT / "plots" / "joint_block"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{in_path.stem}_residual_vs_scene.png"
