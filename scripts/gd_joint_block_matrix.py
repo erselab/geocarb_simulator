@@ -42,10 +42,19 @@ Run (defaults to ONE cheap config x 2 solvers, both already archived --
 a safe, fast no-op smoke test):
     PYTHONPATH=. python3 scripts/gd_joint_block_matrix.py --tag smoketest
 
-The "targeted 4" anchor-density check this was built for:
+The "targeted 4" anchor-density check this was built for (run 2026-08-19,
+result: anchor_density=4 cut CO2/p_surface rms 70-80% at both window counts
+-- see results/config_matrix/anchor_density_v1/REPORT.md):
     PYTHONPATH=. python3 scripts/gd_joint_block_matrix.py \\
         --tag anchor_density_v1 --free co2p --n-windows 58,29 --g-ratio 1 \\
         --anchor-density 1,4 --hires-only --jacobian analytic,fd
+
+`--jacobian` now DEFAULTS to analytic-only (2026-08-19) -- FD agreement is
+already established across every axis this tool sweeps (see `--jacobian`'s
+own help). Pass `--jacobian analytic,fd` explicitly, as the example above
+still does, only when actually re-validating -- e.g. the barcode scene
+(new state-priors code path) is exactly that kind of case, worth one FD
+cross-check before treating it as routine too.
 
 Output: results/config_matrix/<tag>/results/<config>_<jacobian>.pkl
         results/config_matrix/<tag>/results/summary.pkl
@@ -286,8 +295,15 @@ def main() -> int:
     ap.add_argument("--anchor-density", default="1", help="comma list of ints (default: 1)")
     ap.add_argument("--state-interp", default="true",
                     help="comma list of true/false (default: true)")
-    ap.add_argument("--jacobian", default="analytic,fd",
-                    help="comma list from {analytic,fd} (default: both)")
+    ap.add_argument("--jacobian", default="analytic",
+                    help="comma list from {analytic,fd} (default: analytic only -- FD's "
+                         "own agreement with it is already established: PASS on all 16 "
+                         "closed-regression configs plus both anchor_density=4 configs, "
+                         "state agreement 1e-7..1e-8 everywhere. Pass 'analytic,fd' or "
+                         "'fd' explicitly to re-run the comparison, e.g. after a real "
+                         "change to geocarb_gert/jacobians.py or joint_state.py, or to "
+                         "exercise a state target (dispersion, albedo) neither of those "
+                         "matrices covered.")
     ap.add_argument("--scene", default="realistic",
                     help="comma list from {realistic,uniform,barcode,realistic-barcode} "
                          "(default: realistic). 'barcode': fixed atmosphere, reflectance-"
