@@ -331,12 +331,22 @@ def main() -> int:
                          "own physical scale (co2 ~10km hot-spot, p_surface ~140km "
                          "topography, etc). A single shared value is rarely right, since "
                          "surface pressure and a CO2 hot spot do not share a scale.")
-    ap.add_argument("--jacobian", type=str, default="fd", choices=["fd", "analytic"],
-                    help="'fd' (default) finite-differences the forward model, "
-                         "n_free+1 evaluations per iteration. 'analytic' uses "
-                         "geocarb_gert.jacobians.linearize -- derivatives assembled "
-                         "from gert's per-layer arrays, one evaluation per iteration, "
-                         "no step size. Validated per row by gd_jacobian_validate.py.")
+    ap.add_argument("--jacobian", type=str, default="analytic", choices=["fd", "analytic"],
+                    help="'analytic' (default since 2026-08-19) uses "
+                         "geocarb_gert.jacobians.linearize -- derivatives assembled from "
+                         "gert's per-layer arrays, one evaluation per iteration, no step "
+                         "size. Agreement with 'fd' is established (16/16 PASS in the "
+                         "closed regression, plus both anchor_density=4 configs; state "
+                         "agreement 1e-7..1e-8 throughout), so this is no longer opt-in. "
+                         "Coarse always gets analytic regardless of --state-interp; hires "
+                         "only does when --state-interp is also passed (otherwise it "
+                         "falls back to 'fd', printed as a NOTE below and recorded per-"
+                         "solve in jacobian_used -- validated bit-identical to a plain "
+                         "'fd' run of the same config). 'fd' finite-differences the "
+                         "forward model instead, n_free+1 evaluations per iteration -- "
+                         "pass it explicitly to re-validate after a real change to "
+                         "geocarb_gert/jacobians.py or joint_state.py, or to exercise a "
+                         "state target (dispersion, albedo) neither matrix covered.")
     ap.add_argument("--n-windows", type=int, default=None,
                     help="target number of slit windows; solved for via "
                          "scale_for_window_count. Default (None) keeps the historical "
