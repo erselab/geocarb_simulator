@@ -124,6 +124,34 @@ def gas_dI_dparam(res, mol: str, param_value: float, window: int = 0):
     return np.einsum("lw,wl->w", K_lay[mol], tau_lay[mol]) / float(param_value)
 
 
+#: `surface`-target rows and the `ForwardResult` field holding their exact
+#: hi-res derivative. These come free with ``jacobians=True`` -- no chain
+#: rule, no approximation: gert differentiates the surface term directly.
+SURFACE_ROW_JACOBIAN = {
+    "albedo": "K_albedo_hires",
+    "albedo_slope": "K_slope_hires",
+}
+
+
+def surface_dI_dparam(res, row: str, window: int = 0):
+    """``dI_hires/d(param)`` for a `surface` row, straight from gert.
+
+    Unlike the gas rows there is nothing to chain: ``K_albedo_hires`` IS
+    ``dI/d(albedo)`` at the hi-res grid, before any ILS. (gert's own
+    ``K_albedo = I_direct/albedo`` for the single-scatter solver, but this
+    reads the returned array rather than re-deriving it, so it stays correct
+    if the solver changes.)
+    """
+    field = SURFACE_ROW_JACOBIAN.get(row)
+    if field is None:
+        raise NotImplementedError(f"no surface derivative for row {row!r}")
+    arr = getattr(res, field, None)
+    if arr is None:
+        raise RuntimeError(f"{field} is None -- was the ForwardModel run with "
+                           f"jacobians=True and a jacobian-enabled solver?")
+    return np.asarray(arr[window], dtype=float)
+
+
 def make_spectrum_jac(absco, wide_inst, geo, solar, albedo):
     """``spectrum_jac(params, rows) -> (S_hires, {row: dS/d(param)})``.
 
@@ -139,36 +167,44 @@ def make_spectrum_jac(absco, wide_inst, geo, solar, albedo):
 
     from . import along_slit_scene as als
 
-    def spectrum_jac(params: dict, rows):
+    def spectrum_jac(params: dict, rows, surface: dict | None = None):
         atm = als.atmosphere_from_params(**params)
+        # a free albedo row overrides the fixed scalar this factory was built
+        # with; without one, behaviour is identical to `_make_state_spectrum`
+        alb = float((surface or {}).get("albedo", albedo))
+        slope = float((surface or {}).get("albedo_slope", 0.0))
         fm = ForwardModel(atm, absco, wide_inst, geo,
                           solver=SingleScatterSolver(jacobians=True),
                           solar_spectrum=solar)
-        res = fm.run(albedo=np.array([albedo]), albedo_slope=np.zeros(1),
+        res = fm.run(albedo=np.array([alb]), albedo_slope=np.array([slope]),
                      jacobians=True)
         S = np.asarray(res.I_hires[0], dtype=float)
         d = {}
         for row in rows:
-            mol = GAS_ROW_MOLECULE.get(row)
-            if mol is None:
+            if row in SURFACE_ROW_JACOBIAN:
+                d[row] = surface_dI_dparam(res, row)
+            elif row in GAS_ROW_MOLECULE:
+                d[row] = gas_dI_dparam(res, GAS_ROW_MOLECULE[row], params[row])
+            else:
                 raise NotImplementedError(f"no analytic derivative for row {row!r}")
-            d[row] = gas_dI_dparam(res, mol, params[row])
         return S, d
 
     return spectrum_jac
 
 
-def anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed):
+def anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
+                              surface_at_anchor=None):
     """Run the forward model once per anchor, returning radiance and the
     hi-res derivative of each requested row.
 
-    `spectrum_jac(params) -> (S, {row_name: dS/d(param)})` is supplied by the
-    caller (see `scripts/gd_joint_block_whole_slit_sweep._make_state_spectrum_jac`)
-    so this module stays independent of how the band was configured.
+    `spectrum_jac(params, rows, surface) -> (S, {row_name: dS/d(param)})` is
+    supplied by the caller (see :func:`make_spectrum_jac`) so this module
+    stays independent of how the band was configured.
     """
     S, dS = [], []
-    for p in params_at_anchor:
-        s, d = spectrum_jac(p, rows_needed)
+    for g, p in enumerate(params_at_anchor):
+        surf = surface_at_anchor[g] if surface_at_anchor else None
+        s, d = spectrum_jac(p, rows_needed, surf)
         S.append(np.asarray(s, dtype=float))
         dS.append(d)
     return S, dS
@@ -192,24 +228,28 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
     scene_etas = scene_etas[order]
 
     free = spec.free_params
-    unsupported = [p.name for p in free
-                   if not (p.target == "atmosphere" and p.name in GAS_ROW_MOLECULE)]
+    supported = set(GAS_ROW_MOLECULE) | set(SURFACE_ROW_JACOBIAN)
+    unsupported = [p.name for p in free if p.name not in supported]
     if unsupported:
         raise NotImplementedError(
             f"analytic Jacobian not implemented for {unsupported}. Implemented: "
-            f"{sorted(GAS_ROW_MOLECULE)}. p_surface_hpa (composite chain rule), "
-            f"albedo (surface target) and dispersion (instrument target) are the "
-            f"remaining steps -- until then run those rows with finite differences.")
+            f"{sorted(supported)}. p_surface_hpa (composite chain rule) and "
+            f"dispersion (instrument target) are the remaining steps -- until "
+            f"then run those rows with finite differences.")
     for p in free:
         if p.kind != "scale":
             raise NotImplementedError(f"{p.name}: kind={p.kind!r} not yet wired here")
 
     atm_names = [p.name for p in spec.rows_for("atmosphere")]
+    surf_names = [p.name for p in spec.rows_for("surface")]
     vals = spec.interp_to(scene_etas, x)
     params_at_anchor = [{n: float(vals[n][g]) for n in atm_names}
                         for g in range(scene_etas.size)]
+    surf_at_anchor = [{n: float(vals[n][g]) for n in surf_names}
+                      for g in range(scene_etas.size)]
     rows_needed = [p.name for p in free]
-    S, dS = anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed)
+    S, dS = anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
+                                      surf_at_anchor)
 
     def L(field):
         """The detector operator applied to a per-anchor hi-res field."""

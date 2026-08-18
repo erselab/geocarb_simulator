@@ -222,6 +222,42 @@ def albedo_at(x_km, labels):
     return out[:, 0] if scalar else out
 
 
+def albedo_for_label(x_km, label):
+    """`albedo_at` for a single band, returning a plain scalar/1-D array.
+
+    The shape `albedo_at` returns is ``(n_labels, n_x)``, which is right for
+    a multi-band caller but awkward for a state row, whose prior is one
+    number per bin centre in one band. Kept as a thin wrapper rather than
+    changing `albedo_at`, since the multi-band shape is what
+    `JOINT_BLOCK_MIGRATION_PLAN.md` Sec.5's per-band albedo retrieval needs.
+    """
+    scalar = np.isscalar(x_km) or np.asarray(x_km).ndim == 0
+    out = np.atleast_2d(albedo_at(np.atleast_1d(x_km), [label]))[0]
+    return float(out[0]) if scalar else out
+
+
+#: Truth-state parameters that are NOT part of `AtmosphericProfile` and so
+#: cannot live in `STATE_FIELDS`: they are passed separately to
+#: `ForwardModel.run`. Keyed by the argument name that call expects.
+#:
+#: Each entry takes ``(x_km, band_label)`` rather than just ``x_km``, because
+#: surface reflectance is per-band in a way composition is not -- one
+#: land-cover patch is dark at 2.06 um and bright at 0.76 um. That is exactly
+#: the coupling that makes a shared surface across FPAs meaningful, and it is
+#: why these could not simply be appended to `STATE_FIELDS`.
+#:
+#: CAVEAT (2026-08-18): the joint-block truth images rendered so far all use
+#: a single CONSTANT albedo -- `gd_test._band_setup`'s `vary_albedo` defaults
+#: to False and no joint-block caller passes it. So a free albedo row fitted
+#: against those bands is fitting a constant, and the patch/fine-scale
+#: structure below is present in this module but absent from the data. Render
+#: with ``vary_albedo=True`` (and re-cache the band image) before reading any
+#: albedo retrieval as a test of along-slit albedo recovery.
+SURFACE_FIELDS = {
+    "albedo": albedo_for_label,
+}
+
+
 def xco2_ppm(x_km):
     background = XCO2_BG_PPM + 2.0 * np.sin(2 * np.pi * (x_km + 1400) / 3200)
     plume = _gauss(x_km, x0=-500.0, width=60.0, amp=6.0)

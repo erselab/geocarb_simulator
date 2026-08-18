@@ -79,6 +79,13 @@ DEFAULT_CORR_LENGTH_ETA = {
     "co_ppb": 0.0393,             # ~55 km  -- its own broad plume width
     "h2o_surface_vmr": 0.357,     # ~500 km -- the smooth climatological tanh gradient
     "p_surface_hpa": 0.100,       # ~140 km -- the topographic depression width
+    # Surface albedo is the one row whose structure is SHORTER than the gas
+    # features, not longer: `along_slit_scene.ALBEDO_CORR_KM` = 30 km of
+    # within-patch variability, on top of land-cover boundaries only
+    # ALBEDO_EDGE_KM ~ 3 km (about one detector row) wide. This is Sec.4.1's
+    # point that albedo wants denser bins and a shorter correlation length
+    # than a well-mixed gas -- see `albedo_positions_for` below.
+    "albedo": 0.0214,             # ~30 km -- ALBEDO_CORR_KM / SLIT_HALF_KM
 }
 
 
@@ -383,9 +390,34 @@ class StateSpec:
         return f"StateSpec({rows}; n_free={self.n_free})"
 
 
+def albedo_positions_for(bin_centers, density: int = 3) -> np.ndarray:
+    """A denser bin grid for the surface rows, spanning the same eta range.
+
+    Surface albedo is the one state row whose truth structure is SHORTER
+    than the gas features (`DEFAULT_CORR_LENGTH_ETA["albedo"]` ~ 30 km,
+    against 100-500 km for the gases and surface pressure), so sharing the
+    gas grid would under-resolve it by construction. `density` bins per gas
+    bin, uniformly spaced across the same span -- uniform rather than
+    pixel-density-weighted, because albedo structure is a property of the
+    GROUND, with no reason to cluster where the detector's own keystone
+    happens to put more pixels.
+
+    Note this raises the free-element count: `density=3` on a 31-bin window
+    adds 91 albedo elements to 31 CO2 ones. That is the honest cost of
+    resolving a short-correlation-length quantity, but it is worth knowing
+    before freeing albedo on a wide window.
+    """
+    bc = np.atleast_1d(np.asarray(bin_centers, dtype=float))
+    if bc.size == 1 or density <= 1:
+        return bc.copy()
+    return np.linspace(bc.min(), bc.max(), (bc.size - 1) * int(density) + 1)
+
+
 def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                           sigmas=None, corr_length=None, kinds=None,
-                          prior_form="exponential", gamma=3.0) -> StateSpec:
+                          prior_form="exponential", gamma=3.0,
+                          band_label=None, surface_positions=None,
+                          surface_density: int = 3) -> StateSpec:
     """Build a :class:`StateSpec` whose priors are the truth scene's own
     values at `bin_centers` -- the joint block's existing "local-truth
     nuisance idealization", but now with every quantity present as a real,
@@ -401,6 +433,12 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
     each row's own physical scale. Passing a single float is what the
     original bin-index prior effectively did and is usually NOT what you
     want, since surface pressure and a CO2 hot spot do not share a scale.
+
+    `band_label` (a `SpectralWindow.label`, e.g. "CO2_strong") adds the
+    `surface`-target rows from `along_slit_scene.SURFACE_FIELDS`, on their
+    own denser grid (`surface_positions`, or `albedo_positions_for(
+    bin_centers, surface_density)`). Omitting it reproduces the pre-2026-08-18
+    atmosphere-only state exactly, so every existing caller is unaffected.
     """
     from . import along_slit_scene as als
 
@@ -408,7 +446,8 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
     bin_centers = np.atleast_1d(np.asarray(bin_centers, dtype=float))
     x_km = bin_centers * als.SLIT_HALF_KM
     default_sigma = {"co2_ppm": 0.10, "ch4_ppb": 0.10, "co_ppb": 0.20,
-                     "h2o_surface_vmr": 0.25, "p_surface_hpa": 0.02}
+                     "h2o_surface_vmr": 0.25, "p_surface_hpa": 0.02,
+                     "albedo": 0.20}
     sigmas = {**default_sigma, **(sigmas or {})}
     kinds = kinds or {}
 
@@ -419,14 +458,24 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
             return cl.get(name, DEFAULT_CORR_LENGTH_ETA.get(name, 0.05))
         return cl
 
-    return StateSpec([
-        ParamSpec(name=name, positions=bin_centers, prior=np.asarray(fn(x_km), dtype=float),
-                  sigma=float(sigmas.get(name, 0.10)),
-                  corr_length=float(_corr_for(name, corr_length)),
-                  free=(name in free), kind=kinds.get(name, "scale"),
-                  prior_form=prior_form, gamma=float(gamma))
-        for name, fn in fields.items()
-    ])
+    def _row(name, fn, positions, target):
+        xk = positions * als.SLIT_HALF_KM
+        prior = (fn(xk, band_label) if target == "surface" else fn(xk))
+        return ParamSpec(name=name, positions=positions,
+                         prior=np.asarray(prior, dtype=float),
+                         sigma=float(sigmas.get(name, 0.10)),
+                         corr_length=float(_corr_for(name, corr_length)),
+                         free=(name in free), kind=kinds.get(name, "scale"),
+                         prior_form=prior_form, gamma=float(gamma), target=target)
+
+    rows = [_row(name, fn, bin_centers, "atmosphere") for name, fn in fields.items()]
+    if band_label is not None:
+        pos = (albedo_positions_for(bin_centers, surface_density)
+               if surface_positions is None
+               else np.atleast_1d(np.asarray(surface_positions, dtype=float)))
+        rows += [_row(name, fn, pos, "surface")
+                 for name, fn in als.SURFACE_FIELDS.items()]
+    return StateSpec(rows)
 
 
 def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
@@ -541,6 +590,13 @@ def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
     spectrum : callable
         ``spectrum(params: dict) -> hi-res radiance``, where ``params`` is
         keyed exactly as :data:`geocarb_gert.along_slit_scene.STATE_FIELDS`.
+
+        When the spec carries `surface`-target rows, it is called instead as
+        ``spectrum(params, surface: dict)`` with the second dict keyed as
+        :data:`geocarb_gert.along_slit_scene.SURFACE_FIELDS` -- i.e. the
+        second argument appears only when there is something to put in it, so
+        every pre-2026-08-18 one-argument `spectrum` keeps working untouched
+        rather than needing a signature change it has no use for.
     """
     from . import gd_render
     from .focalplane import nearest_bin_scene
@@ -549,11 +605,14 @@ def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
     order = np.argsort(scene_etas)
     scene_etas = scene_etas[order]
     n_scene = scene_etas.size
-    # atmosphere rows only: `spectrum` builds an AtmosphericProfile, so a
-    # `surface` or `instrument` row passed here would be an unexpected keyword.
-    # Those targets are consumed elsewhere (ForwardModel.run / the ILS centring).
+    # atmosphere rows only: `spectrum`'s first dict builds an
+    # AtmosphericProfile, so a `surface` row there would be an unexpected
+    # keyword. `instrument` rows are consumed at the ILS centring, not here.
     names = [p.name for p in spec.rows_for("atmosphere")]
-    cache_key = np.full((n_scene, len(names)), np.nan)
+    surf_names = [p.name for p in spec.rows_for("surface")]
+    # the cache key must span BOTH, or a move in albedo alone would reuse a
+    # stale spectrum computed at the previous albedo
+    cache_key = np.full((n_scene, len(names) + len(surf_names)), np.nan)
     cache_S = [None] * n_scene
 
     exact = None
@@ -567,10 +626,12 @@ def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
         vals = spec.interp_to(scene_etas, x)
         if exact:
             vals.update(exact)          # frozen rows at exact truth, not interpolated
-        key = np.column_stack([vals[n] for n in names])
+        key = np.column_stack([vals[n] for n in names + surf_names])
         for g in range(n_scene):
             if cache_S[g] is None or not np.array_equal(key[g], cache_key[g]):
-                cache_S[g] = spectrum({n: float(vals[n][g]) for n in names})
+                atm_p = {n: float(vals[n][g]) for n in names}
+                cache_S[g] = (spectrum(atm_p, {n: float(vals[n][g]) for n in surf_names})
+                              if surf_names else spectrum(atm_p))
                 cache_key[g] = key[g]
         radiance = nearest_bin_scene(scene_etas, cache_S)
         return gd_render.predict_neighborhood(fpa, rows_win, wn_hires, radiance,

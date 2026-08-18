@@ -74,6 +74,9 @@ def main() -> int:
                     help="repeat over several h to show whether disagreement is FD "
                          "truncation error (falls with h) or a real analytic error "
                          "(floors out)")
+    ap.add_argument("--surface-density", type=int, default=3,
+                    help="albedo bins per gas bin (its correlation length is ~30 km "
+                         "against 100-500 km for the gases, so it needs a denser grid)")
     ap.add_argument("--max-columns", type=int, default=8,
                     help="cap the number of FD columns (they are the expensive part)")
     args = ap.parse_args()
@@ -100,11 +103,16 @@ def main() -> int:
     anchor_etas = np.sort(_eta_of(FPA, np.full(len(anchor_rows), 512.0),
                                   anchor_rows.astype(float)))
 
-    spec = state_spec_from_scene(bin_centers, free=free)
+    # band_label adds the `surface` rows (albedo) on their own denser grid;
+    # harmless when albedo is not among `free`, since frozen rows cost nothing
+    spec = state_spec_from_scene(bin_centers, free=free, band_label=wide_win.label,
+                                 surface_density=args.surface_density)
     x0 = spec.x0()
     print(f"FPA{FPA} rows {row_lo}-{row_hi} (width {width}), G={G}, "
           f"{len(anchor_etas)} anchors, free={free} -> {spec.n_free} elements")
-    print(f"band molecules: {wide_win.molecules}")
+    print(f"band molecules: {wide_win.molecules}   label: {wide_win.label}")
+    print("rows: " + ", ".join(f"{p.name}[{p.n}]/{p.target}{'' if p.free else ' frozen'}"
+                               for p in spec.params))
 
     # analytic
     spectrum_jac = jac.make_spectrum_jac(absco, wide_inst, geo, solar, albedo)
@@ -119,12 +127,15 @@ def main() -> int:
         from gert.forward_model import ForwardModel
         from gert.rt_solver import SingleScatterSolver
 
-        def spectrum(params: dict):
+        def spectrum(params: dict, surface: dict | None = None):
             atm = als.atmosphere_from_params(**params)
+            alb = float((surface or {}).get("albedo", albedo))
+            slope = float((surface or {}).get("albedo_slope", 0.0))
             fm = ForwardModel(atm, absco, wide_inst, geo,
                               solver=SingleScatterSolver(), solar_spectrum=solar)
-            return np.asarray(fm.run(albedo=np.array([albedo]),
-                                     albedo_slope=np.zeros(1)).I_hires[0], dtype=float)
+            return np.asarray(fm.run(albedo=np.array([alb]),
+                                     albedo_slope=np.array([slope])).I_hires[0],
+                              dtype=float)
         return spectrum
 
     forward = build_forward_state(FPA, rows_win, anchor_etas, spec, make_spectrum(),
