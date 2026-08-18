@@ -137,6 +137,67 @@ def _diagonal_ils_convolve(wn_hires: np.ndarray, S_row: np.ndarray,
     return out
 
 
+def _diagonal_ils_convolve_dnu(wn_hires: np.ndarray, S_row: np.ndarray,
+                               nu_row: np.ndarray, ils: ILS) -> np.ndarray:
+    """``d/d(nu_c)`` of :func:`_diagonal_ils_convolve`, per output column.
+
+    The analytic Jacobian of a DISPERSION state element. Dispersion moves
+    each column's ILS centre ``nu_c``; it never touches the atmosphere or
+    the scene, so its derivative lives entirely here rather than coming
+    from ``gert`` (whose own note is that "dispersion acts at the ILS
+    layer"). A dispersion coefficient's column then follows by the chain
+    rule ``dY/da_k = (dY/dnu_c) * (dnu_c/da_k)``, and for the usual
+    polynomial parameterisation ``dnu_c/da_k = (col - col_ref)**k`` is a
+    pure reweighting -- so every coefficient of every order reuses this one
+    evaluation instead of needing its own.
+
+    With ``out = sum_i G_i S_i / sum_i G_i`` and
+    ``G_i = exp(-(wn_i - nu_c)^2 / 2 sigma^2)``, ``dG_i/d(nu_c) =
+    G_i * delta_i / sigma^2``, so
+
+        d(out)/d(nu_c) = [sum_i G_i d_i S_i / sum_i G_i
+                          - out * sum_i G_i d_i / sum_i G_i] / sigma^2
+
+    i.e. the ILS-weighted mean of ``delta*S`` minus ``out`` times the
+    ILS-weighted mean of ``delta``, all over ``sigma^2``. The second term
+    does not vanish: the kernel is truncated, so its discrete weights are
+    not exactly symmetric about ``nu_c``.
+
+    Approximation, stated rather than hidden: the truncation boundary
+    ``|delta| <= half`` is itself a function of ``nu_c``, and this ignores
+    that (the kernel is differentiated, the mask is not). The neglected
+    term is the kernel's value AT the cutoff, ``exp(-half^2/2 sigma^2)``
+    with ``half = ils_half_width * sigma`` -- for the default half-width
+    that is ~1e-4 of the peak and enters only via one hi-res sample at each
+    edge. `scripts/gd_jacobian_validate.py` measures the resulting FD
+    disagreement directly rather than relying on that estimate.
+    """
+    sig = ils.sigma
+    half = ils.ils_half_width * sig
+    spacing = wn_hires[1] - wn_hires[0]
+    half_idx = max(1, int(np.ceil(half / spacing)) + 1)
+    n_hires = len(wn_hires)
+    wn0 = wn_hires[0]
+
+    out = np.empty(len(nu_row))
+    for j, wn_c in enumerate(nu_row):
+        idx_c = int(round((wn_c - wn0) / spacing))
+        lo = max(0, idx_c - half_idx)
+        hi = min(n_hires, idx_c + half_idx + 1)
+        delta = wn_hires[lo:hi] - wn_c
+        mask = np.abs(delta) <= half
+        d = delta[mask]
+        G = np.exp(-0.5 * (d / sig) ** 2)
+        Gsum = G.sum()
+        if Gsum <= 0:
+            out[j] = 0.0
+            continue
+        S = S_row[j, lo:hi][mask]
+        mean_S = (G * S).sum() / Gsum
+        out[j] = ((G * d * S).sum() / Gsum - mean_S * (G * d).sum() / Gsum) / sig ** 2
+    return out
+
+
 # -- globals populated in image() before the Pool is forked, so every worker
 # -- inherits them (including the arbitrary `radiance` closure, which isn't
 # -- generally picklable) via copy-on-write instead of needing IPC transfer --
