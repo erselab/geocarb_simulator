@@ -54,10 +54,23 @@ co2_ppm            atmosphere   gert `K_mol_lay_hires` x `tau_gas_layer_hires`
 ch4_ppb            atmosphere   same (exactly zero in a band without ch4)
 co_ppb             atmosphere   same
 h2o_surface_vmr    atmosphere   same, plus a known omitted q-coupling term below
-p_surface_hpa      atmosphere   NOT YET -- composite chain rule, next step
-albedo             surface      NOT YET -- gert `K_albedo_hires`
-dispersion         instrument   NOT YET -- `_diagonal_ils_convolve_dnu`
+p_surface_hpa      atmosphere   composite chain rule; the ONLY row with a floor
+albedo             surface      gert `K_albedo_hires` -- exact, nothing to chain
+albedo_slope       surface      gert `K_slope_hires`  -- exact (spectral slope)
+dispersion         instrument   derivative built (`_diagonal_ils_convolve_dnu`),
+                                but the forward model does not yet APPLY a
+                                dispersion perturbation, so there is no row to
+                                differentiate. That wiring is the next step.
 =================  ===========  ==================================================
+
+Validation status, measured by `scripts/gd_jacobian_validate.py --h-scan`.
+Every row but `p_surface_hpa` tracks central differences down to roundoff,
+with an h-curve whose SHAPE is itself a check: the gases show h^2 truncation
+falling then roundoff rising (a V), while albedo shows no truncation at all
+and pure 1/h roundoff, because with no aerosol the model is exactly linear
+in albedo. `p_surface_hpa` floors at ~4e-4 relative with cosine 0.9999999 --
+the dropped `B*p_top` term documented on that function, direction essentially
+exact and magnitude off by 0.04%.
 
 Omitted h2o coupling term -- measured, not assumed
 --------------------------------------------------
@@ -152,6 +165,113 @@ def surface_dI_dparam(res, row: str, window: int = 0):
     return np.asarray(arr[window], dtype=float)
 
 
+def _layer_mid(a):
+    """Level array (n_lev,) -> layer array (n_lev-1,) by midpoint."""
+    a = np.asarray(a, dtype=float)
+    return 0.5 * (a[:-1] + a[1:])
+
+
+def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6):
+    """``dI_hires/d(p_surface_hpa)`` -- the composite chain rule.
+
+    Surface pressure is the only row that is not a simple scaling of one
+    quantity. `atmosphere_from_params` rebuilds the ENTIRE profile from it::
+
+        p_l  = eta_l * (100*p_sfc - p_top) + p_top      (gert_levels, Laprise eta)
+        z_l  = pressure_to_alt_std_atm(p_l)
+        T_l  = _std_temperature(z_l)
+        h2o_l = h2o_surface_vmr * exp(-z_l / H)
+
+    so three separate paths reach the optical depth: pressure directly
+    (layer amount and pressure broadening), temperature, and the H2O volume
+    mixing ratio. Measured earlier, ignoring the T and H2O paths -- i.e.
+    using gert's own ``p_scale`` Jacobian as-is -- gives a derivative 38%
+    too small and ~32 degrees off (cosine 0.848), so none of them is
+    optional.
+
+    What is exact here, and what is not
+    -----------------------------------
+    * ``dp_l/dp_sfc = eta_l`` and the Rayleigh term are exact and analytic:
+      both follow in closed form from the affine level definition.
+    * ``dT_l/dp_sfc`` and ``dh2o_l/dp_sfc`` are central-differenced on
+      `atmosphere_from_params` ALONE. That map is pure algebra -- no RT, no
+      absorption coefficients, microseconds to evaluate -- so the finite
+      difference is cheap and clean, and it handles `_std_temperature`'s
+      piecewise-linear kinks and the barometric layer boundaries in
+      `pressure_to_alt_std_atm` without this module reimplementing either.
+      The radiative transfer is never finite-differenced.
+    * The PRESSURE path carries a real approximation, forced by gert being
+      read-only. ``dtau_mol_dpscale_lay`` is a single combined array holding
+      both the layer-thickness term and the pressure-broadening term, which
+      our transform weights DIFFERENTLY: under a uniform scale both scale
+      with ``p``, whereas under `gert_levels` the thickness scales with
+      ``p_diff/(P - p_top)`` and the broadening with
+      ``(p_mid - p_top)/(P - p_top)``. Writing the combined array as
+      ``A*p_diff + B*p_mid``, the exact result is
+      ``[dtau_dpscale - B*p_top] / (P - p_top)``, and ``B`` cannot be
+      recovered from the sum. This uses ``dtau_dpscale / (P - p_top)``,
+      dropping ``B*p_top``: a relative error of about
+      ``p_top/p_mid ~ 1e-3`` times the broadening share of the derivative.
+
+      So unlike every other row, this one is expected to show a FLOOR in
+      `gd_jacobian_validate.py --h-scan` rather than tracking FD to
+      roundoff. The floor is the size of that dropped term, and it is
+      reported rather than hidden. A ~0.1% Jacobian error is harmless for
+      Gauss-Newton -- approximate Jacobians are the entire basis of
+      quasi-Newton methods, and they change the path taken, not the fixed
+      point converged to -- but it is not machine precision, and anyone
+      comparing this row against the others should know why.
+    """
+    from . import along_slit_scene as als
+    from gert.levels import GERT_P_TOP
+
+    K_mol_lay = res.K_mol_lay_hires[window]
+    dtau_dp = res.dtau_mol_dpscale_lay_hires[window]
+    dtau_dT = res.dtau_mol_dT_lay_hires[window]
+    tau_lay = res.tau_gas_layer_hires[window]
+    n_hires = np.shape(res.I_hires[window])[0]
+
+    p_sfc_hpa = float(params["p_surface_hpa"])
+    P = p_sfc_hpa * 100.0                       # Pa
+    denom = P - GERT_P_TOP
+
+    # -- cheap central differences on the algebra-only profile construction --
+    h = h_rel * p_sfc_hpa
+    a_p = als.atmosphere_from_params(**{**params, "p_surface_hpa": p_sfc_hpa + h})
+    a_m = als.atmosphere_from_params(**{**params, "p_surface_hpa": p_sfc_hpa - h})
+    a_0 = als.atmosphere_from_params(**params)
+    dT_lay = _layer_mid((a_p.T_levels - a_m.T_levels) / (2.0 * h))
+    dvmr_lay = {m: _layer_mid((a_p.gases[m] - a_m.gases[m]) / (2.0 * h))
+                for m in a_0.gases}
+    vmr_lay = {m: _layer_mid(a_0.gases[m]) for m in a_0.gases}
+
+    out = np.zeros(n_hires)
+    for mol, K in K_mol_lay.items():                      # K: (n_lay, n_wn)
+        # (a) pressure path -- see the approximation note above
+        if mol in dtau_dp:
+            out += np.einsum("lw,wl->w", K, dtau_dp[mol]) / denom * 100.0
+        # (b) temperature path -- exact per-layer derivative from gert
+        if mol in dtau_dT:
+            out += np.einsum("lw,wl->w", K, dtau_dT[mol] * dT_lay[None, :])
+        # (c) VMR path -- only H2O's profile moves with p_surface (via z);
+        #     tau is linear in vmr, so dtau/dvmr = tau/vmr
+        if mol in tau_lay and mol in dvmr_lay:
+            dv = dvmr_lay[mol]
+            if np.any(dv != 0.0):
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    ratio = np.where(vmr_lay[mol] > 0, dv / vmr_lay[mol], 0.0)
+                out += np.einsum("lw,wl->w", K, tau_lay[mol] * ratio[None, :])
+
+    # (d) Rayleigh: tau_ray is proportional to the layer's own air column, so
+    #     d(tau_ray_l)/d(p_sfc) = tau_ray_l / (P - p_top) exactly.
+    K_ray = getattr(res, "K_ray_lay_hires", None)
+    tau_ray = getattr(res, "tau_ray_lay_hires", None)
+    if K_ray is not None and tau_ray is not None:
+        out += np.einsum("lw,l->w", K_ray[window],
+                         np.asarray(tau_ray[window], dtype=float)) / denom * 100.0
+    return out
+
+
 def make_spectrum_jac(absco, wide_inst, geo, solar, albedo):
     """``spectrum_jac(params, rows) -> (S_hires, {row: dS/d(param)})``.
 
@@ -183,6 +303,8 @@ def make_spectrum_jac(absco, wide_inst, geo, solar, albedo):
         for row in rows:
             if row in SURFACE_ROW_JACOBIAN:
                 d[row] = surface_dI_dparam(res, row)
+            elif row == "p_surface_hpa":
+                d[row] = p_surface_dI_dparam(res, params)
             elif row in GAS_ROW_MOLECULE:
                 d[row] = gas_dI_dparam(res, GAS_ROW_MOLECULE[row], params[row])
             else:
@@ -228,14 +350,13 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
     scene_etas = scene_etas[order]
 
     free = spec.free_params
-    supported = set(GAS_ROW_MOLECULE) | set(SURFACE_ROW_JACOBIAN)
+    supported = set(GAS_ROW_MOLECULE) | set(SURFACE_ROW_JACOBIAN) | {"p_surface_hpa"}
     unsupported = [p.name for p in free if p.name not in supported]
     if unsupported:
         raise NotImplementedError(
             f"analytic Jacobian not implemented for {unsupported}. Implemented: "
-            f"{sorted(supported)}. p_surface_hpa (composite chain rule) and "
-            f"dispersion (instrument target) are the remaining steps -- until "
-            f"then run those rows with finite differences.")
+            f"{sorted(supported)}. dispersion (instrument target) is the "
+            f"remaining step -- until then run that row with finite differences.")
     for p in free:
         if p.kind != "scale":
             raise NotImplementedError(f"{p.name}: kind={p.kind!r} not yet wired here")
