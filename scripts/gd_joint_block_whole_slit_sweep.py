@@ -146,7 +146,9 @@ def _solve_window(row_lo: int, row_hi: int):
     g_ratio = _SWEEP.get("g_ratio", G_RATIO)
     hires_only = _SWEEP.get("hires_only", False)
     anchor_density = int(_SWEEP.get("anchor_density", 1))
-    state_interp = bool(_SWEEP.get("state_interp", False))
+    state_interp = _SWEEP.get("state_interp", "linear")  # interp1d kind: "linear" or "nearest"
+    prior_fields = _SWEEP.get("prior_fields")            # None -> als.STATE_FIELDS (exact truth)
+    prior_anchor_density = _SWEEP.get("prior_anchor_density")  # None -> exact-per-bin (today's default)
 
     rows_win = np.arange(row_lo, row_hi + 1)
     width = len(rows_win)
@@ -176,45 +178,40 @@ def _solve_window(row_lo: int, row_hi: int):
     # Analytic Jacobians: derivatives from gert's per-layer arrays composed with
     # the detector operator, rather than n_free+1 forward evaluations.
     #
-    # `linearize` unconditionally does state-space interpolation for every row
-    # (`spec.interp_to`), with no equivalent of `build_forward_state`'s
-    # `state_interp=False` "exact truth at anchor" override for frozen rows.
-    # That is fine for COARSE regardless of the sweep's own `state_interp`
-    # flag -- `fwd_c` below is itself always built with `state_interp=True`,
-    # since `scene_etas = bin_centers` there makes interpolation the identity
-    # (see that call's own comment) -- but it is a REAL mismatch for HIRES
-    # whenever `state_interp=False`: `linearize` would silently interpolate a
-    # frozen row that `fwd_h` evaluates at exact truth, changing what the
-    # `adens4`-style configs are actually testing. So analytic is used for
-    # hires only when the sweep also requested `state_interp=True`; otherwise
-    # hires falls back to FD and `jacobian_used` records that per solve below,
-    # rather than the top-level `jacobian` flag silently overstating it.
+    # `linearize` and `build_forward_state` both take the same `state_interp`
+    # kind and both apply it to EVERY row, free or frozen, with no bypass --
+    # the old asymmetry (frozen rows silently exact-at-anchor while free rows
+    # interpolated, which `linearize` had no equivalent for) is gone along
+    # with `state_interp=False`'s old exact-truth override. So analytic is
+    # available for hires unconditionally now, the same as coarse always was.
     use_analytic = _SWEEP.get("jacobian", "fd") == "analytic"
-    use_analytic_hires = use_analytic and state_interp
+    use_analytic_hires = use_analytic
     spectrum_jac = (jac.make_spectrum_jac(absco, wide_inst, geo, solar, albedo)
                     if use_analytic else None)
 
-    def _linearizer(spec_, scene_etas_, enabled):
+    def _linearizer(spec_, scene_etas_, enabled, interp_kind):
         if not enabled:
             return None
         def lin(x):
             return jac.linearize(FPA, rows_win, scene_etas_, spec_, spectrum_jac,
-                                 wn_hires, ils, x, pad=PAD)
+                                 wn_hires, ils, x, pad=PAD, state_interp=interp_kind)
         return lin
 
     # COARSE: scene evaluated at the state's own bin centres, so
-    # interp_to() is the identity -- --state-interp has no content here.
+    # interp_to() is the identity -- state_interp's kind has no content here.
     if not hires_only:
         t0 = time.time()
         spec_c = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length,
-                                       prior_form=prior_form, uniform=uniform_priors)
+                                       prior_form=prior_form, uniform=uniform_priors,
+                                       fields=prior_fields,
+                                       prior_anchor_density=prior_anchor_density)
         # coarse: scene positions ARE the state positions, so interpolation is
-        # the identity either way -- state_interp is genuinely a no-op here.
+        # the identity regardless of kind -- state_interp is genuinely a no-op here.
         fwd_c = build_forward_state(FPA, rows_win, bin_centers, spec_c, spectrum,
-                                    wn_hires, ils, pad=PAD, state_interp=True)
+                                    wn_hires, ils, pad=PAD, state_interp="linear")
         x_c = gauss_newton_state(fwd_c, y_true, spec_c, Sy_inv_diag,
                                  label=f"[{row_lo}-{row_hi}] coarse", verbose=False,
-                                 jacobian_fn=_linearizer(spec_c, bin_centers, use_analytic))
+                                 jacobian_fn=_linearizer(spec_c, bin_centers, use_analytic, "linear"))
         resid_c = y_true - fwd_c(x_c)
         # Standing rule: save the ENTIRE state vector (free AND frozen) and
         # the FULL residual field, never just summary scalars. `jacobian_used`
@@ -235,12 +232,15 @@ def _solve_window(row_lo: int, row_hi: int):
     t0 = time.time()
     # HI-RES: scene on the finer anchor grid, every row interpolated there.
     spec_h = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length,
-                                   prior_form=prior_form, uniform=uniform_priors)
+                                   prior_form=prior_form, uniform=uniform_priors,
+                                   fields=prior_fields,
+                                   prior_anchor_density=prior_anchor_density)
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
                                 wn_hires, ils, pad=PAD, state_interp=state_interp)
     x_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
                              label=f"[{row_lo}-{row_hi}] hires", verbose=False,
-                             jacobian_fn=_linearizer(spec_h, anchor_etas, use_analytic_hires))
+                             jacobian_fn=_linearizer(spec_h, anchor_etas, use_analytic_hires,
+                                                     state_interp))
     resid_h = y_true - fwd_h(x_h)
     out["hires"] = spec_h.snapshot(x_h, resid=resid_h,
                                    resid_rms=float(np.sqrt(np.mean(resid_h ** 2))),
@@ -316,11 +316,21 @@ def main() -> int:
                          "(default 1 = the original one-per-row). >1 places anchors at "
                          "fractional row positions, shrinking the nearest-anchor step "
                          "error ~(1/4)|f'|h proportionally. Cost scales with it.")
-    ap.add_argument("--state-interp", action="store_true",
-                    help="build each hi-res anchor's atmosphere from state parameters "
-                         "linearly interpolated from the G bin centres (CO2, CH4, CO, H2O, "
-                         "p_surface alike) instead of exact truth at the anchor's own eta. "
-                         "State-space interpolation + fresh RT per anchor; no spectrum blending.")
+    ap.add_argument("--state-interp", type=str, default="linear",
+                    choices=["linear", "nearest"],
+                    help="how each hi-res anchor's atmosphere is built from the G bin "
+                         "centres (CO2, CH4, CO, H2O, p_surface alike) -- a "
+                         "scipy.interpolate.interp1d kind. 'linear' (default): the usual "
+                         "state-space blend between the two nearest bins, fresh RT per "
+                         "anchor, no spectrum ever blended. 'nearest': piecewise-constant, "
+                         "each anchor takes its single nearest bin's own value -- the other "
+                         "natural downscaling scheme, now a real forward-model choice with "
+                         "a matching analytic Jacobian (geocarb_gert.jacobians.linearize), "
+                         "not just a diagnostic. Found 2026-08-19 (user): there is "
+                         "deliberately no 'exact truth at anchor' option any more -- every "
+                         "row, free or frozen, always goes through this same interpolation; "
+                         "a row that should be as-good-as-truth gets that via the PRIOR "
+                         "(--free, or a densely-constructed fields=) instead.")
     ap.add_argument("--free", type=str, default="co2_ppm",
                     help="comma-separated state rows to retrieve; everything else is "
                          "frozen at local truth. Names from als.STATE_FIELDS, e.g. "
@@ -337,16 +347,18 @@ def main() -> int:
                          "gert's per-layer arrays, one evaluation per iteration, no step "
                          "size. Agreement with 'fd' is established (16/16 PASS in the "
                          "closed regression, plus both anchor_density=4 configs; state "
-                         "agreement 1e-7..1e-8 throughout), so this is no longer opt-in. "
-                         "Coarse always gets analytic regardless of --state-interp; hires "
-                         "only does when --state-interp is also passed (otherwise it "
-                         "falls back to 'fd', printed as a NOTE below and recorded per-"
-                         "solve in jacobian_used -- validated bit-identical to a plain "
-                         "'fd' run of the same config). 'fd' finite-differences the "
-                         "forward model instead, n_free+1 evaluations per iteration -- "
+                         "agreement 1e-7..1e-8 throughout) for --state-interp linear, so "
+                         "this is no longer opt-in. Coarse and hires both always get "
+                         "analytic now, for either --state-interp kind -- 'linear' and "
+                         "'nearest' both have matching analytic Jacobians (no more free/"
+                         "frozen asymmetry to fall back to FD for). 'fd' finite-differences "
+                         "the forward model instead, n_free+1 evaluations per iteration -- "
                          "pass it explicitly to re-validate after a real change to "
-                         "geocarb_gert/jacobians.py or joint_state.py, or to exercise a "
-                         "state target (dispersion, albedo) neither matrix covered.")
+                         "geocarb_gert/jacobians.py or joint_state.py, to validate the "
+                         "'nearest' kind's own analytic Jacobian (see "
+                         "scripts/gd_jacobian_validate.py --interp-kind nearest), or to "
+                         "exercise a state target (dispersion, albedo) neither matrix "
+                         "covered.")
     ap.add_argument("--n-windows", type=int, default=None,
                     help="target number of slit windows; solved for via "
                          "scale_for_window_count. Default (None) keeps the historical "
@@ -364,6 +376,33 @@ def main() -> int:
                          "PHYSICAL eta, correct under non-uniform bin spacing. "
                          "'tikhonov': the original gamma*(L^T L)+I/sigma^2 in bin index, "
                          "bit-identical to pre-2026-08-17 results.")
+    ap.add_argument("--realistic-prior", action="store_true",
+                    help="new experiment class (2026-08): priors come from "
+                         "als.STATE_FIELDS_PRIOR (background/topography-aware, never the "
+                         "localized plume/hot-spot/synoptic content) instead of the exact "
+                         "local truth. Orthogonal to --uniform/--barcode/--realistic-barcode, "
+                         "which flatten the TRUTH scene -- this only changes what the prior "
+                         "knows, truth stays fully realistic. Defaults --n-lookup-samples to "
+                         "5600 and --out-root to results/realistic_prior unless overridden.")
+    ap.add_argument("--n-lookup-samples", type=int, default=None,
+                    help="along-slit samples for build_lookup_radiance (default: 400, or "
+                         "5600 under --realistic-prior). Governs how well the rendered TRUTH "
+                         "image resolves the ~10km-wide hot spots (400 -> 7km spacing, ~3 "
+                         "samples/FWHM; 5600 -> 0.5km spacing, ~20 samples/FWHM). One-time "
+                         "forward-rendering cost, not paid per-solve.")
+    ap.add_argument("--out-root", type=str, default=None,
+                    help="root directory for output files, replacing 'results' (default: "
+                         "'results', or 'results/realistic_prior' under --realistic-prior).")
+    ap.add_argument("--prior-anchor-density", type=float, default=None,
+                    help="resolution knob for the prior, independent of --realistic-prior: "
+                         "None (default) samples the prior fields exactly at each bin's own "
+                         "position (today's mechanism). 1.0 is an explicit way to ask for "
+                         "the same thing ('just bin centers'). <1.0 builds the prior from "
+                         "fewer anchor points than bins, spread evenly across the window and "
+                         "linearly interpolated -- a genuinely coarser prior that smooths "
+                         "away sub-anchor-spacing structure even if the underlying field is "
+                         "exact truth. >1.0 oversamples. See "
+                         "geocarb_gert.joint_state.state_spec_from_scene's own docstring.")
     args = ap.parse_args()
     if (args.task_id is None) != (args.n_tasks is None):
         ap.error("--task-id and --n-tasks must be given together")
@@ -376,6 +415,14 @@ def main() -> int:
                  "--uniform would force flat state priors against a truth that "
                  "deliberately is not flat -- a real prior/truth mismatch, not a "
                  "simplification. Drop --uniform.")
+    if args.realistic_prior and (args.uniform or args.barcode or args.realistic_barcode):
+        ap.error("--realistic-prior changes what the PRIOR knows; --uniform/--barcode/"
+                 "--realistic-barcode flatten the TRUTH scene -- combining them mixes two "
+                 "different kinds of idealization/de-idealization in one run. Drop one.")
+    n_lookup_samples = (args.n_lookup_samples if args.n_lookup_samples is not None
+                        else 5600 if args.realistic_prior else 400)
+    out_root = Path(args.out_root if args.out_root is not None
+                    else "results/realistic_prior" if args.realistic_prior else "results")
     # NOT just args.uniform: --barcode's true composition is also spatially constant
     # (only reflectance varies), so it needs the same flat StateSpec priors --
     # see state_spec_from_scene's own `uniform` docstring for why this has to reach
@@ -393,7 +440,7 @@ def main() -> int:
     atm_center = als.atmosphere_at(0.0)
     gdt._G.update(dict(atm=atm_center, absco=absco, geo=geo, solar=solar))
     snr = gdt.DEFAULT_SNR_BY_FPA[FPA]
-    band = gdt._band_setup(FPA, atm_center, absco, geo, solar, snr, 400, None,
+    band = gdt._band_setup(FPA, atm_center, absco, geo, solar, snr, n_lookup_samples, None,
                            args.uniform, args.barcode, args.barcode_bars, False, 0,
                            args.realistic_barcode)
     wide_win, wide_inst, albedo = band_basics(FPA, atm_center, absco, geo, solar)
@@ -409,11 +456,6 @@ def main() -> int:
     widths = [hi - lo + 1 for lo, hi in all_tiles]
     print(f"{len(all_tiles)} windows total, widths min={min(widths)} max={max(widths)} "
          f"mean={np.mean(widths):.1f}, total rows={sum(widths)}", flush=True)
-    if args.jacobian == "analytic" and not args.state_interp:
-        print("NOTE: --jacobian analytic without --state-interp -- coarse uses analytic, "
-             "hires falls back to fd (linearize has no state_interp=False equivalent for "
-             "frozen rows). Each solve's snapshot records its own jacobian_used.", flush=True)
-
     if args.task_id is not None:
         tiles = all_tiles[args.task_id::args.n_tasks]
         print(f"task {args.task_id}/{args.n_tasks}: {len(tiles)} windows assigned "
@@ -429,7 +471,9 @@ def main() -> int:
                        state_interp=args.state_interp,
                        free=tuple(x.strip() for x in args.free.split(',')),
                        corr_length=args.corr_length, prior_form=args.prior_form,
-                       jacobian=args.jacobian))
+                       jacobian=args.jacobian,
+                       prior_fields=(als.STATE_FIELDS_PRIOR if args.realistic_prior else None),
+                       prior_anchor_density=args.prior_anchor_density))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
     print(f"solving with {n_workers} workers...", flush=True)
@@ -462,8 +506,8 @@ def main() -> int:
     suffix += f"_gratio{args.g_ratio:g}"
     if args.anchor_density != 1:
         suffix += f"_adens{args.anchor_density}"
-    if args.state_interp:
-        suffix += "_stateinterp"
+    if args.state_interp != "linear":
+        suffix += f"_{args.state_interp}"
     free_t = tuple(x.strip() for x in args.free.split(","))
     if free_t != ("co2_ppm",):
         suffix += "_free-" + "-".join(n.split("_")[0] for n in free_t)
@@ -471,6 +515,10 @@ def main() -> int:
         suffix += f"_nwin{len(all_tiles)}"
     if args.jacobian != "fd":
         suffix += f"_{args.jacobian}"
+    if args.realistic_prior:
+        suffix += "_realisticprior"
+    if args.prior_anchor_density is not None:
+        suffix += f"_prad{args.prior_anchor_density:g}"
     payload = {"results": results, "tiles": all_tiles, "fpa": FPA, "uniform": args.uniform,
               "barcode": args.barcode, "realistic_barcode": args.realistic_barcode,
               "barcode_bars": args.barcode_bars if (args.barcode or args.realistic_barcode) else None,
@@ -481,15 +529,17 @@ def main() -> int:
               "state_interp": args.state_interp, "free": free_t,
               "corr_length": args.corr_length, "prior_form": args.prior_form,
               "jacobian": args.jacobian, "n_windows": len(all_tiles),
-              "window_scale": window_scale}
+              "window_scale": window_scale, "realistic_prior": args.realistic_prior,
+              "n_lookup_samples": n_lookup_samples,
+              "prior_anchor_density": args.prior_anchor_density}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
-        out_dir = REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}_parts"
+        out_dir = REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}_parts"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"task{args.task_id:03d}of{args.n_tasks}.pkl"
     else:
         out_path = (Path(args.out) if args.out else
-                    REPO_ROOT / "results" / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}.pkl")
+                    REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}.pkl")
         out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as f:
         pickle.dump(payload, f)

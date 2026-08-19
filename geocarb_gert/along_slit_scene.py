@@ -301,6 +301,41 @@ def p_surface_hpa(x_km):
     return background + mountain
 
 
+# -- "structural" priors for the realistic-prior experiment class --
+#
+# A real L2 prior is not the truth: it knows large-scale/climatological
+# structure and static, independently-known topography, but not localized,
+# unmodeled features (plumes, point-source hot spots, today's synoptic
+# weather). These mirror the truth functions above, keeping only the
+# background term (plus, for p_surface, the topographic `mountain` term via
+# a hypsometric-style adjustment) and dropping everything else. Each
+# reproduces its sibling's `background` formula exactly -- a change to
+# XCO2_BG_PPM, an amplitude, a period, etc. above needs the matching edit
+# here too.
+
+def xco2_ppm_prior(x_km):
+    return XCO2_BG_PPM + 2.0 * np.sin(2 * np.pi * (x_km + 1400) / 3200)
+
+
+def xch4_ppb_prior(x_km):
+    return XCH4_BG_PPB + 15.0 * np.sin(2 * np.pi * (x_km + 1400) / 2200 + 2.5)
+
+
+def xco_ppb_prior(x_km):
+    return XCO_BG_PPB + 10.0 * np.sin(2 * np.pi * (x_km + 1400) / 2600 + 1.0)
+
+
+def p_surface_hpa_prior(x_km):
+    # Topography (the `mountain` term) is static and knowable via a
+    # hypsometric adjustment, so it's kept exactly. The synoptic sinusoid is
+    # day-to-day weather a static prior would not have, so it's replaced by
+    # its own midline (the sinusoid averages to (P_BG_HPA - P_HEADROOM_HPA)
+    # - 3.0 over a full period).
+    background_ref = P_BG_HPA - P_HEADROOM_HPA - 3.0
+    mountain = _gauss(x_km, x0=-250.0, width=140.0, amp=-250.0)
+    return np.full_like(np.asarray(x_km, dtype=float), background_ref) + mountain
+
+
 # The canonical truth-state parameter table: one row per along-slit-varying
 # quantity, keyed by the exact keyword `atmosphere_from_params` takes. Every
 # consumer (truth generation, state interpolation, forward-model anchors)
@@ -319,6 +354,18 @@ STATE_FIELDS = {
     "co_ppb": lambda x: xco_ppb(x),
     "h2o_surface_vmr": lambda x: h2o_surface_vmr(x),
     "p_surface_hpa": lambda x: p_surface_hpa(x),
+}
+
+# Same shape as STATE_FIELDS, but each field is the "structural" prior
+# defined above -- background/topography-aware, never the localized plume/
+# hot-spot/synoptic content. h2o has no such content to begin with (a single
+# smooth climatological gradient), so it's unchanged from STATE_FIELDS.
+STATE_FIELDS_PRIOR = {
+    "co2_ppm": lambda x: xco2_ppm_prior(x),
+    "ch4_ppb": lambda x: xch4_ppb_prior(x),
+    "co_ppb": lambda x: xco_ppb_prior(x),
+    "h2o_surface_vmr": lambda x: h2o_surface_vmr(x),
+    "p_surface_hpa": lambda x: p_surface_hpa_prior(x),
 }
 
 

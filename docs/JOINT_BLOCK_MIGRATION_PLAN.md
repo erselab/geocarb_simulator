@@ -1,5 +1,14 @@
 # Plan: migrating the joint multi-atmosphere block into `geocarb_gert`, and what that migration needs to accommodate
 
+> **Archived 2026-08-19.** Superseded by `docs/PROJECT_STATUS.md`, which
+> gives a fresh, current description of the design this plan produced
+> (`StateSpec`/`build_forward_state` in `geocarb_gert/joint_state.py`).
+> Some goals sketched here (noise injection, multi-FPA joint retrieval
+> within `StateSpec`) were never carried out -- not reflected as done in
+> the new document either. Kept in place, unedited, since current code
+> (e.g. `geocarb_gert/joint_state.py`'s own docstring) cites it by section
+> number, including its still-accurate §4.0 regularization rationale.
+
 Sketch only — not started. Written 2026-08-13, after the whole-slit sweep
 (`scripts/gd_joint_block_whole_slit_sweep.py`), the hi-res forward model
 (`scripts/gd_joint_block_hires_test.py`), and the keystone-free ceiling

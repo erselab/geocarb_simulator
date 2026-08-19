@@ -11,12 +11,12 @@ closed regression's own files.
 
 Why generic rather than another fixed matrix: the closed regression proved
 the analytic solver agrees with FD across free-rows x windows x G, always at
-`anchor_density=1`, `state_interp=True` -- two axes that were never varied
-at all (`analytic_jacobian_testing/README.md` Sec.5's explicit gap). The
-next questions (does more anchors help enough to be worth the RT cost, does
-`state_interp=False` change anything) are each a small, targeted slice of a
-much bigger space than is worth hard-coding -- hence one tool with knobs,
-not a second fixed script per question.
+`anchor_density=1`, `state_interp="linear"` -- two axes that were never
+varied at all (`analytic_jacobian_testing/README.md` Sec.5's explicit gap).
+The next questions (does more anchors help enough to be worth the RT cost,
+does `state_interp="nearest"` downscaling change anything) are each a small,
+targeted slice of a much bigger space than is worth hard-coding -- hence one
+tool with knobs, not a second fixed script per question.
 
 Cost-aware by construction, not just by convention:
   * `--hires-only` skips coarse entirely -- correct to do whenever only
@@ -24,7 +24,7 @@ Cost-aware by construction, not just by convention:
     directly and never touches `anchor_etas`, so it cannot depend on
     `anchor_density` at all. Re-running it would be pure waste.
   * A config whose axis values are ALL at the closed regression's own
-    defaults (`anchor_density=1`, `state_interp=True`) is looked up in
+    defaults (`anchor_density=1`, `state_interp="linear"`) is looked up in
     `analytic_jacobian_testing/results/` before running anything fresh --
     that matrix already paid for those points once. Reused configs are
     marked as such in the report rather than silently re-timed as if fresh.
@@ -32,11 +32,12 @@ Cost-aware by construction, not just by convention:
 Solver agreement is scored PER SOLVE from each snapshot's own
 `jacobian_used` (falls back to the sweep's requested `--jacobian` for
 archives that predate that field), not assumed to equal the requested
-solver -- required for correctness now that this tool can request
-`state_interp=False`, where `gauss_newton_state`'s per-solve gating makes
-hires silently fall back to FD even when `--jacobian analytic` was asked
-for (coarse does not fall back -- see `gd_joint_block_whole_slit_sweep.py`'s
-own note on `use_analytic_hires`).
+solver. Found 2026-08-19 (user): `state_interp`'s old boolean form and
+`build_forward_state`'s exact-truth bypass at `False` are both retired --
+every row, free or frozen, always goes through the same interpolation now,
+`"linear"` or `"nearest"`, and analytic Jacobians are unconditionally
+available for hires (no more falling back to FD there -- see
+`gd_joint_block_whole_slit_sweep.py`'s own note on `use_analytic_hires`).
 
 Run (defaults to ONE cheap config x 2 solvers, both already archived --
 a safe, fast no-op smoke test):
@@ -89,10 +90,6 @@ def parse_list(s, cast):
     return [cast(x.strip()) for x in s.split(",")]
 
 
-def parse_bool_list(s):
-    return [x.strip().lower() in ("1", "true", "t", "yes") for x in s.split(",")]
-
-
 # ------------------------------------------------------------ config identity --
 
 #: scene name -> gd_joint_block_whole_slit_sweep.py flags it needs, and
@@ -107,19 +104,26 @@ SCENES = {
 
 
 def config_id(free_key, nwin, gratio, adens, si, scene="realistic", barcode_bars=32):
-    """`{free}-{nwin}-g{gratio}[-ad{adens}][-nosi][-{scene}[bars]]`.
+    """`{free}-{nwin}-g{gratio}[-ad{adens}][-{si}][-{scene}[bars]]`.
 
-    Elides every non-default piece (`adens==1`, `si=True`,
+    Elides every non-default piece (`adens==1`, `si="linear"`,
     `scene="realistic"`) so a config at the closed regression's own defaults
     gets EXACTLY that regression's own id (`co2p-58-g1`, no suffix) --
     which is what makes the archive-reuse lookup in `resolve_existing` a
     simple path check rather than a translation table.
+
+    `si` is the `state_interp` kind string (`"linear"`/`"nearest"`) --
+    found 2026-08-19 (user): the boolean `state_interp` this used to encode
+    (`True`/`False`, tagging `False` as `-nosi`) is retired along with
+    `build_forward_state`'s old exact-truth bypass. The closed regression
+    only ever archived `state_interp=True` (today's `"linear"`), so archive
+    reuse is unaffected -- `-nosi` configs were never actually archived.
     """
     cid = f"{free_key}-{nwin}-g{gratio:g}"
     if adens != 1:
         cid += f"-ad{adens}"
-    if not si:
-        cid += "-nosi"
+    if si != "linear":
+        cid += f"-{si}"
     if scene != "realistic":
         tag = scene.replace("-", "")
         if scene in ("barcode", "realistic-barcode"):
@@ -132,12 +136,12 @@ def parse_config(cid):
     """Inverse of `config_id`, best-effort (used only for display)."""
     parts = cid.split("-")
     free_key, nwin, gtag = parts[0], parts[1], parts[2]
-    adens, si, scene, barcode_bars = 1, True, "realistic", 32
+    adens, si, scene, barcode_bars = 1, "linear", "realistic", 32
     for p in parts[3:]:
         if p.startswith("ad"):
             adens = int(p[2:])
-        elif p == "nosi":
-            si = False
+        elif p == "nearest":
+            si = "nearest"
         elif p.startswith("uniform"):
             scene = "uniform"
         elif p.startswith("realisticbarcode"):
@@ -149,10 +153,11 @@ def parse_config(cid):
 
 def is_bare(cid: str) -> bool:
     """True iff this id matches the closed regression's own naming exactly
-    (anchor_density=1, state_interp=True, scene=realistic) -- the only case
-    an archive lookup is meaningful (the archive has no barcode/uniform
+    (anchor_density=1, state_interp="linear", scene=realistic) -- the only
+    case an archive lookup is meaningful (the archive has no barcode/uniform
     runs at all)."""
-    return "-ad" not in cid and "-nosi" not in cid and parse_config(cid)[5] == "realistic"
+    parsed = parse_config(cid)
+    return "-ad" not in cid and parsed[4] == "linear" and parsed[5] == "realistic"
 
 
 # ---------------------------------------------------------------- running --
@@ -185,8 +190,8 @@ def run_one(cid, jacobian, n_workers, env, tag_dir, force=False):
           "--n-windows", str(nwin), "--anchor-density", str(adens),
           "--jacobian", jacobian, "--n-workers", str(n_workers),
           "--out", str(out_path)]
-    if si:
-        cmd.append("--state-interp")
+    if si != "linear":
+        cmd += ["--state-interp", si]
     sc = SCENES[scene]
     if sc["uniform"]:
         cmd.append("--uniform")
@@ -293,8 +298,9 @@ def main() -> int:
     ap.add_argument("--n-windows", default="58", help="comma list of ints (default: 58)")
     ap.add_argument("--g-ratio", default="1", help="comma list of floats (default: 1)")
     ap.add_argument("--anchor-density", default="1", help="comma list of ints (default: 1)")
-    ap.add_argument("--state-interp", default="true",
-                    help="comma list of true/false (default: true)")
+    ap.add_argument("--state-interp", default="linear",
+                    help="comma list of state_interp kinds, linear/nearest "
+                         "(default: linear)")
     ap.add_argument("--jacobian", default="analytic",
                     help="comma list from {analytic,fd} (default: analytic only -- FD's "
                          "own agreement with it is already established: PASS on all 16 "
@@ -328,7 +334,10 @@ def main() -> int:
     nwins = parse_list(args.n_windows, int)
     gratios = parse_list(args.g_ratio, float)
     adenss = parse_list(args.anchor_density, int)
-    sis = parse_bool_list(args.state_interp)
+    sis = parse_list(args.state_interp, str)
+    for si in sis:
+        if si not in ("linear", "nearest"):
+            ap.error(f"--state-interp: {si!r} not in ('linear','nearest')")
     jacobians = parse_list(args.jacobian, str)
     for f in frees:
         if f not in FREE_SETS:

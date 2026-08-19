@@ -345,12 +345,21 @@ def anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
 
 
 def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
-              wn_hires, ils, x, pad: int = 4):
+              wn_hires, ils, x, pad: int = 4, state_interp: str = "linear"):
     """``(y, K)`` -- the predicted sub-image and its analytic Jacobian.
 
     `K` has one column per free element, ordered exactly as
     :meth:`StateSpec.slices` packs them, so it drops straight into the
     Rodgers step in `gauss_newton_state` with no reordering.
+
+    `state_interp` is the same `interp1d` `kind` string `build_forward_state`
+    takes, and MUST match whatever the forward model this Jacobian is
+    differentiating was built with -- passed to both `spec.interp_to` (the
+    anchor values, below) and `spec.interp_weights` (the chain-rule weights,
+    in the loop below), so the two can never silently disagree about which
+    kind is in effect. There is no separate "exact truth" mode to reconcile
+    here (retired from `build_forward_state` itself) -- every row, free or
+    frozen, goes through the identical interpolation.
 
     Only `atmosphere` gas rows are handled so far; a free row this module
     cannot yet differentiate raises rather than silently contributing a zero
@@ -375,7 +384,7 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
 
     atm_names = [p.name for p in spec.rows_for("atmosphere")]
     surf_names = [p.name for p in spec.rows_for("surface")]
-    vals = spec.interp_to(scene_etas, x)
+    vals = spec.interp_to(scene_etas, x, state_interp=state_interp)
     params_at_anchor = [{n: float(vals[n][g]) for n in atm_names}
                         for g in range(scene_etas.size)]
     surf_at_anchor = [{n: float(vals[n][g]) for n in surf_names}
@@ -394,7 +403,7 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
     K = np.empty((y.size, spec.n_free))
     slices = spec.slices()
     for p in free:
-        W = spec.interp_weights(scene_etas, p.name)      # (n_scene, p.n)
+        W = spec.interp_weights(scene_etas, p.name, state_interp=state_interp)  # (n_scene, p.n)
         dS_row = np.asarray([d[p.name] for d in dS])     # (n_scene, n_hires)
         sl = slices[p.name]
         for k in range(p.n):

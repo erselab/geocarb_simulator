@@ -50,17 +50,20 @@ DEFAULT_GERT_ROOT = str(gert_root())
 
 def cache_path(cache_dir: Path, fpa: int, uniform: bool,
                barcode: bool = False, realistic_barcode: bool = False,
-               barcode_bars: int = 32) -> Path:
+               barcode_bars: int = 32, n_lookup_samples: int = 400) -> Path:
     tag = ("_uniform" if uniform else "")
     if barcode:
         tag += f"_barcode{barcode_bars}"
     elif realistic_barcode:
         tag += f"_realisticbarcode{barcode_bars}"
+    if n_lookup_samples != 400:
+        tag += f"_nls{n_lookup_samples}"
     return cache_dir / f"band_image_fpa{fpa}{tag}.npy"
 
 
 def render(fpa: int, uniform: bool, gert_root: Path,
-          barcode: bool = False, realistic_barcode: bool = False, barcode_bars: int = 32):
+          barcode: bool = False, realistic_barcode: bool = False, barcode_bars: int = 32,
+          n_lookup_samples: int = 400):
     import gd_test as gdt
     import geosat_geometry as gg
     import gert
@@ -81,8 +84,10 @@ def render(fpa: int, uniform: bool, gert_root: Path,
           f"-- this is the slow part ...", flush=True)
     # positional order must match gd_joint_block_whole_slit_sweep.py's own
     # _band_setup call exactly, or the cache silently stops being bit-identical
-    # to what a sweep actually fitted against
-    band = gdt._band_setup(fpa, atm_center, absco, geo, solar, snr, 400, None,
+    # to what a sweep actually fitted against -- including n_lookup_samples,
+    # which must match that sweep's own --n-lookup-samples (400 unless it
+    # was run with --realistic-prior or an explicit override)
+    band = gdt._band_setup(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples, None,
                            uniform, barcode, barcode_bars, False, 0, realistic_barcode)
     A = np.asarray(band["A"], dtype=float)
     print(f"done in {time.time() - t0:.0f}s -- A {A.shape}, "
@@ -138,6 +143,11 @@ def main() -> int:
                          "reflectance pattern on top (matches --realistic-barcode there)")
     ap.add_argument("--barcode-bars", type=int, default=32,
                     help="only meaningful with --barcode/--realistic-barcode")
+    ap.add_argument("--n-lookup-samples", type=int, default=400,
+                    help="must match the sweep's own --n-lookup-samples (400 unless it was "
+                         "run with --realistic-prior [5600] or an explicit override), or the "
+                         "cache silently stops being bit-identical to what that sweep fitted "
+                         "against.")
     ap.add_argument("--gert-root", type=str, default=DEFAULT_GERT_ROOT)
     ap.add_argument("--cache-dir", type=str, default=str(REPO_ROOT / "results" / "band_cache"))
     ap.add_argument("--check-against", type=str, default=None,
@@ -150,14 +160,14 @@ def main() -> int:
     cache_dir = Path(args.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     out = cache_path(cache_dir, args.fpa, args.uniform, args.barcode,
-                     args.realistic_barcode, args.barcode_bars)
+                     args.realistic_barcode, args.barcode_bars, args.n_lookup_samples)
 
     if out.exists() and not args.force:
         print(f"already cached: {out} (use --force to re-render)")
         A = np.load(out)
     else:
         A = render(args.fpa, args.uniform, Path(args.gert_root), args.barcode,
-                  args.realistic_barcode, args.barcode_bars)
+                  args.realistic_barcode, args.barcode_bars, args.n_lookup_samples)
         np.save(out, A)
         print(f"saved {out}  ({out.stat().st_size / 1e6:.1f} MB)")
 

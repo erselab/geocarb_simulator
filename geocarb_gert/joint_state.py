@@ -47,6 +47,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+from scipy.interpolate import interp1d
 
 
 #: Default prior correlation length per state row, in eta (1 eta = 1400 km,
@@ -114,6 +115,22 @@ TARGETS = ("atmosphere", "surface", "instrument")
 #: Targets whose rows live in eta and are interpolated onto scene positions.
 #: `instrument` is deliberately absent -- see TARGETS.
 ETA_TARGETS = ("atmosphere", "surface")
+
+
+def _row_interp1d(positions, values, kind: str, axis: int = -1):
+    """One row's own `scipy.interpolate.interp1d`, `kind`-agnostic, clamped
+    at the ends (matches `np.interp`'s own behaviour there, unlike
+    `interp1d`'s default of raising outside the data range). Shared by
+    :meth:`StateSpec.interp_to` and :meth:`StateSpec.interp_weights` so the
+    two can never disagree about what a given `kind` does -- the weights
+    method calls this on the identity matrix instead of real values, not on
+    a separately-derived formula.
+    """
+    values = np.asarray(values)
+    lo = values[0] if axis == -1 else values[0, ...]
+    hi = values[-1] if axis == -1 else values[-1, ...]
+    return interp1d(positions, values, kind=kind, axis=axis,
+                    bounds_error=False, fill_value=(lo, hi))
 
 
 @dataclass
@@ -304,10 +321,17 @@ class StateSpec:
         """The rows belonging to the given targets, in state order."""
         return [p for p in self.params if p.target in targets]
 
-    def interp_to(self, etas, x, targets=ETA_TARGETS) -> dict:
-        """`{name: value}` linearly interpolated onto `etas`, for the
-        eta-positioned rows -- the state-space interpolation a forward model
-        needs to build one atmosphere per anchor.
+    def interp_to(self, etas, x, targets=ETA_TARGETS, state_interp: str = "linear") -> dict:
+        """`{name: value}` interpolated onto `etas`, for the eta-positioned
+        rows -- the state-space interpolation a forward model needs to build
+        one atmosphere per anchor.
+
+        `state_interp` names a `scipy.interpolate.interp1d` `kind` --
+        `"linear"` (default, today's behaviour) or `"nearest"` (piecewise-
+        constant: each anchor takes its single nearest row-position's own
+        value, no blending). Any other `interp1d`-supported kind (e.g.
+        `"quadratic"`, `"cubic"`) works too with no code change here -- see
+        :func:`_row_interp1d`.
 
         `instrument` rows are EXCLUDED by default and must be: their
         `positions` are not along-slit coordinates, so interpolating them
@@ -322,7 +346,7 @@ class StateSpec:
                 continue
             v = vals[p.name]
             out[p.name] = (np.full(etas.shape, v[0]) if p.n == 1
-                           else np.interp(etas, p.positions, v))
+                           else _row_interp1d(p.positions, v, state_interp)(etas))
         return out
 
     def values_for(self, x, *targets) -> dict:
@@ -333,15 +357,20 @@ class StateSpec:
         vals = self.unpack(x)
         return {p.name: vals[p.name] for p in self.params if p.target in targets}
 
-    def interp_weights(self, etas, name) -> np.ndarray:
+    def interp_weights(self, etas, name, state_interp: str = "linear") -> np.ndarray:
         """`(len(etas), n)` matrix `W` with `W[g, k] = d(param at etas[g]) /
         d(this row's value at position k)`.
 
-        The linear-interpolation operator written out as a matrix, built by
-        interpolating the basis vectors rather than by rederiving np.interp's
-        weight formula -- so it cannot drift from what :meth:`interp_to`
-        actually does, including at and beyond the end points, where np.interp
-        clamps rather than extrapolating.
+        The interpolation operator written out as a matrix, built by
+        interpolating the basis vectors (the `n x n` identity, one column per
+        position) in a single vectorized `interp1d` call rather than
+        rederiving each kind's own weight formula -- so it cannot drift from
+        what :meth:`interp_to` actually does, including at and beyond the end
+        points (clamped, not extrapolated, matching `interp_to`), and
+        including non-local kinds: `interp1d` is linear in its `y` data for
+        any fixed `kind`, so interpolating the identity matrix always gives
+        the exact weight matrix, whether that kind's support is 2 points
+        (linear/nearest) or the whole row (a spline).
 
         This is the whole chain rule from a row's own elements to the anchor
         values a forward model sees. Combined with `d(value)/dx = prior` for
@@ -351,12 +380,8 @@ class StateSpec:
         etas = np.asarray(etas, dtype=float)
         if p.n == 1:
             return np.ones((etas.size, 1))
-        W = np.empty((etas.size, p.n))
-        for k in range(p.n):
-            e_k = np.zeros(p.n)
-            e_k[k] = 1.0
-            W[:, k] = np.interp(etas, p.positions, e_k)
-        return W
+        basis = np.eye(p.n)
+        return _row_interp1d(p.positions, basis, state_interp, axis=0)(etas)
 
     def snapshot(self, x, **extra) -> dict:
         """A complete, self-describing record of this solve's state vector.
@@ -417,7 +442,8 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                           sigmas=None, corr_length=None, kinds=None,
                           prior_form="exponential", gamma=3.0,
                           band_label=None, surface_positions=None,
-                          surface_density: int = 3, uniform: bool = False) -> StateSpec:
+                          surface_density: int = 3, uniform: bool = False,
+                          prior_anchor_density: float | None = None) -> StateSpec:
     """Build a :class:`StateSpec` whose priors are the truth scene's own
     values at `bin_centers` -- the joint block's existing "local-truth
     nuisance idealization", but now with every quantity present as a real,
@@ -458,6 +484,22 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
     prior/truth mismatch a `--uniform` run exists to rule out. Confirmed
     directly: `state_spec_from_scene(bc, free=('co2_ppm',))` at six
     different bin centres returned six different priors before this fix.
+
+    `prior_anchor_density` (default None) controls the RESOLUTION at which
+    `fields` gets sampled to build the prior, independent of `fields` itself
+    -- a way to study sensitivity to prior quality directly. None (the
+    default) reproduces today's exact mechanism: every bin's prior is `fn`
+    evaluated at that bin's own position. Any float instead builds the prior
+    from `round(prior_anchor_density * len(positions))` anchor points spread
+    evenly across `positions`' own span, sampling `fields` only there and
+    linearly interpolating onto the actual bin positions -- 1.0 lands on
+    exactly `len(positions)` anchors and is special-cased to reuse
+    `positions` itself, so it reproduces the default exactly ("just bin
+    centers"); <1.0 is a coarser prior that smooths away sub-anchor-spacing
+    structure (hot spots included, even if `fields` is the exact truth);
+    >1.0 oversamples, giving the prior more along-slit structure than one
+    value per bin would on its own. Ignored when `uniform=True` (that
+    already collapses every bin to a single shared sample).
     """
     from . import along_slit_scene as als
 
@@ -477,11 +519,25 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
         return cl
 
     def _row(name, fn, positions, target):
-        # under uniform=True every bin gets x_km=0.0 -- see the `uniform`
-        # branch above; `positions` (eta) still vary, only the physical
-        # position fed to the truth function is pinned
-        xk = (np.zeros_like(positions) if uniform else positions * als.SLIT_HALF_KM)
-        prior = (fn(xk, band_label) if target == "surface" else fn(xk))
+        def _eval(xk):
+            return fn(xk, band_label) if target == "surface" else fn(xk)
+
+        if uniform:
+            # every bin gets x_km=0.0 -- prior_anchor_density is moot, this
+            # already collapses every bin to one shared sample
+            prior = _eval(np.zeros_like(positions))
+        elif prior_anchor_density is None:
+            # today's exact mechanism: fn evaluated at each bin's own position
+            prior = _eval(positions * als.SLIT_HALF_KM)
+        else:
+            n_anchor = max(2, int(round(prior_anchor_density * len(positions))))
+            # density landing on exactly len(positions) anchors reuses
+            # `positions` itself (not a uniform re-grid of the same span),
+            # so it reproduces the exact-mechanism prior bit-for-bit
+            anchor_pos = (positions if n_anchor == len(positions)
+                         else np.linspace(positions.min(), positions.max(), n_anchor))
+            anchor_vals = _eval(anchor_pos * als.SLIT_HALF_KM)
+            prior = np.interp(positions, anchor_pos, anchor_vals)
         return ParamSpec(name=name, positions=positions,
                          prior=np.asarray(prior, dtype=float),
                          sigma=float(sigmas.get(name, 0.10)),
@@ -579,7 +635,7 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
 
 
 def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
-                        wn_hires, ils, pad: int = 4, state_interp: bool = True):
+                        wn_hires, ils, pad: int = 4, state_interp: str = "linear"):
     """``forward(x) -> raveled sub-image`` for a :class:`StateSpec`, on an
     arbitrary set of scene positions.
 
@@ -588,14 +644,15 @@ def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
 
       coarse   ``scene_etas = bin_centers``  -- the state's own positions, so
                :meth:`StateSpec.interp_to` is the identity and no
-               interpolation happens at all. (This is why a ``--state-interp``
-               switch is meaningless for the coarse solve: there is nothing
-               between the state and the scene to interpolate.)
+               interpolation happens at all. (This is why ``state_interp``
+               is meaningless for the coarse solve: there is nothing between
+               the state and the scene to interpolate.)
       hi-res   ``scene_etas = anchor_etas``  -- a finer grid, so every row is
-               linearly interpolated from its own positions onto the anchors.
-               State-space interpolation followed by a fresh RT run per
-               anchor, exactly what ``nearest_bin_scene``'s docstring
-               prescribes; no spectrum is ever blended with another.
+               interpolated from its own positions onto the anchors, by
+               whatever `state_interp` kind names. State-space interpolation
+               followed by a fresh RT run per anchor, exactly what
+               ``nearest_bin_scene``'s docstring prescribes; no spectrum is
+               ever blended with another.
 
     Pixels are then assigned to scene positions by nearest
     (``nearest_bin_scene``), unchanged. That hard assignment is the source of
@@ -607,17 +664,19 @@ def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
     parameter vector, so an iteration re-runs RT only where the state
     actually moved.
 
-    ``state_interp=False`` reproduces the pre-StateSpec hi-res behaviour:
-    FROZEN rows are evaluated at their exact truth at each scene position
-    (``als.state_at(scene_etas)``) instead of being interpolated from the bin
-    grid, while free rows are still interpolated. That distinction is real
-    and measurable -- on a smooth, low-keystone window, exact-at-anchor beats
-    interpolated-from-bins by ~1.5x in residual RMS, because interpolation
-    can only add error to a quantity that was already exactly known. With
-    ``state_interp=True`` every row goes through the identical path, which is
-    the honest configuration when the nuisance state is meant to be treated
-    like any other (and the only sane one once those rows are actually
-    free, since a free row has no "truth" to be exact about).
+    ``state_interp`` names a :func:`scipy.interpolate.interp1d` ``kind`` --
+    ``"linear"`` (default) or ``"nearest"`` (piecewise-constant: each anchor
+    takes its single nearest bin's own value). EVERY row, free or frozen,
+    goes through the same interpolation, always -- there is deliberately no
+    bypass to exact truth here. If a row needs to be as-good-as-truth, that
+    is a PRIOR-construction decision (``fields=``, ``prior_anchor_density``,
+    ``native_res=True`` in ``state_spec_from_scene``/the diagnostic scripts),
+    never something the renderer silently substitutes. (Found 2026-08-19,
+    user: an earlier version of this function had a ``state_interp=False``
+    branch that overrode frozen rows to ``als.STATE_FIELDS`` truth directly,
+    ignoring whatever ``fields=`` built the prior with -- retired outright,
+    not renamed, because "the way the FPA is rendered should be independent
+    of the prior".)
 
     Parameters
     ----------
@@ -649,17 +708,8 @@ def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
     cache_key = np.full((n_scene, len(names) + len(surf_names)), np.nan)
     cache_S = [None] * n_scene
 
-    exact = None
-    if not state_interp:
-        from . import along_slit_scene as _als
-        frozen = [p.name for p in spec.params if not p.free]
-        exact = {n: np.asarray(_als.STATE_FIELDS[n](scene_etas * _als.SLIT_HALF_KM),
-                               dtype=float) for n in frozen if n in _als.STATE_FIELDS}
-
     def forward(x):
-        vals = spec.interp_to(scene_etas, x)
-        if exact:
-            vals.update(exact)          # frozen rows at exact truth, not interpolated
+        vals = spec.interp_to(scene_etas, x, state_interp=state_interp)
         key = np.column_stack([vals[n] for n in names + surf_names])
         for g in range(n_scene):
             if cache_S[g] is None or not np.array_equal(key[g], cache_key[g]):

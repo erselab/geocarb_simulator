@@ -79,6 +79,11 @@ def main() -> int:
                          "against 100-500 km for the gases, so it needs a denser grid)")
     ap.add_argument("--max-columns", type=int, default=8,
                     help="cap the number of FD columns (they are the expensive part)")
+    ap.add_argument("--interp-kind", type=str, default="linear", choices=["linear", "nearest"],
+                    help="state_interp kind passed to BOTH build_forward_state and "
+                         "linearize -- default 'linear' (today's validated path); pass "
+                         "'nearest' to validate the piecewise-constant downscaling's own "
+                         "analytic Jacobian against FD the same way.")
     args = ap.parse_args()
 
     row_lo, row_hi = args.rows
@@ -118,7 +123,7 @@ def main() -> int:
     spectrum_jac = jac.make_spectrum_jac(absco, wide_inst, geo, solar, albedo)
     t0 = time.time()
     y_ana, K_ana = jac.linearize(FPA, rows_win, anchor_etas, spec, spectrum_jac,
-                                 wn_hires, ils, x0, pad=PAD)
+                                 wn_hires, ils, x0, pad=PAD, state_interp=args.interp_kind)
     t_ana = time.time() - t0
     print(f"analytic: y {y_ana.shape}, K {K_ana.shape}  ({t_ana:.1f}s)")
 
@@ -139,7 +144,7 @@ def main() -> int:
         return spectrum
 
     forward = build_forward_state(FPA, rows_win, anchor_etas, spec, make_spectrum(),
-                                  wn_hires, ils, pad=PAD, state_interp=True)
+                                  wn_hires, ils, pad=PAD, state_interp=args.interp_kind)
     y_fd = forward(x0)
     dy = np.linalg.norm(y_ana - y_fd) / np.linalg.norm(y_fd)
     print(f"forward agreement (analytic path vs sweep path): rel L2 {dy:.3e}"

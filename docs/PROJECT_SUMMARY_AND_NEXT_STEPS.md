@@ -1,5 +1,12 @@
 # GeoCarb Keystone/Smile/Dispersion Bias Study — Project Summary and Next Steps
 
+> **Archived 2026-08-19.** Superseded by `docs/PROJECT_STATUS.md`. This
+> snapshot's §6 "next steps" were not the path actually taken — the project
+> pivoted to joint multi-row retrieval (`JOINT_ROW_INVERSION_PLAN.md`,
+> also archived) instead of the covariate-regression bias correction sketched
+> here. §1-4's findings are still accurate and are summarized in the new
+> document; kept in place, unedited, since it's cited elsewhere by section.
+
 **As of:** 2026-07-28. Written as a handoff summary before a break in active work.
 For full chronological detail and every number/plot behind the claims below, see
 `KEYSTONE_SMILE_BIAS_PLAN.md` (the running lab notebook this summarizes — search

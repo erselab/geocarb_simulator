@@ -1,5 +1,11 @@
 # Keystone & Line-Curvature Bias Study — Plan
 
+> **Archived 2026-08-19.** Superseded by `docs/PROJECT_STATUS.md`, which
+> summarizes this document's findings (the native/undistorted/rectified 1D
+> pipeline comparison, single- and multi-band) and points back here for full
+> detail. Kept in place, unedited going forward, since existing code and
+> docs cite it by section number.
+
 **Goal.** Quantify the bias in **XCO₂, XCH₄, and XCO** *along the slit* induced by the
 GeoCarb focal-plane distortions — **keystone** and **line curvature (smile)** — and
 examine the accompanying **systematic spectral residuals**. Built on the
@@ -22,7 +28,7 @@ The focal-plane model is scale-free in physical length: `slit_length_mm`,
 | slit → detector | 3000 km ground → **1024 spatial px** and **1024 spectral px** |
 | ground sampling (GSD) | 3000 / 1024 ≈ **2.93 km/pixel** (set by the telescope fore-optics, *upstream* of this model) |
 | keystone | slit **image** grows **20 px** blue→red = **1.95 %** (`keystone_px=20`); modeled symmetric about slit centre → each end grows 10 px. **Magnitude confirmed by ground-test GD characterization** (up to ~10 rows crossed at the slit ends, §9) — but the real curve is **not symmetric about centre**; each FPA's zero-keystone "sweet row" is offset by clocking, worst for FPA2 (see §9) |
-| N/S PSF | **1.5 px** FWHM (`spatial_psf_fwhm_px=1.5`) ≈ 4.4 km ground blur. **Confirmed** — ground test reports the same ~1.5 px FWHM for all four FPAs (§9), consistent with an along-slit PSF set mainly by the shared telescope/slit image rather than by each arm's own downstream optics (not diffraction-limited — a diffraction-limited system would scale with wavelength, roughly 3× wider for FPA3 than FPA0; see §11b) |
+| N/S PSF | **1.5 px** FWHM (`spatial_psf_fwhm_px=1.5`) ≈ 4.4 km ground blur. **Confirmed** — ground test reports the same ~1.5 px FWHM for all four FPAs (§9). **Revised 2026-08-19** (user, instrument-design input): this equality is a **calibrated outcome, not evidence of achromatic optics** — each FPA is individually focused relative to the slit via piston adjustment specifically to remove PSF-per-pixel differences between FPAs. It is NOT evidence the system is non-diffraction-limited (the earlier "not diffraction-limited, ~3× wider for FPA3 than FPA0 otherwise" argument in this doc drew a conclusion about the underlying optics from data that piston tuning would produce regardless of whether diffraction/chromatic aberration is actually present per band); see §11b/§11c |
 | smile | "pronounced", parabolic opening toward long-wave. **Confirmed from the real GD polynomials** (`geocarb_gert.gd_polynomials`, §9f): **~33–39 px** at each band's centre wavelength — a **15–20× correction** to the `SMILE_PX=2.0` placeholder. Not even constant across a band: e.g. FPA0 ~37 px at the short-wavelength edge vs. ~48 px at the long-wavelength edge |
 
 Physical translations at 2.93 km/px: keystone shifts a sounding's footprint **~29 km**
@@ -1769,18 +1775,35 @@ study.
 the two bands in a pair share one PSF kernel rather than needing two
 separately-calibrated ones. §1 already records ground test reporting the
 same ~1.5 px FWHM for all four FPAs — a single shared number, not four
-independently-measured ones that happen to agree — which is stronger
-evidence than "the telescope should dominate" would be on its own, since it
-also rules out the along-slit PSF being diffraction-limited (a
-diffraction-limited system would scale with wavelength, roughly 3× wider
-for FPA3 at 2.3 µm than FPA0 at 0.76 µm). Consistent with the shared
-telescope/slit architecture in §11b: the along-slit PSF is set mainly by
-the common front end, not by each arm's own downstream optics. The residual
-caveat is unit conversion, not physics — "same PSF" is exact in angular
-terms and only approximately so in pixels, since converting to a pixel
-FWHM needs each band's own plate scale. Given all four FPAs share the
-1024-row format and `s_max` values within ~0.6% of each other, this is a
-small, already-bounded correction, not a live risk.
+independently-measured ones that happen to agree.
+
+**Revised 2026-08-19** (user, instrument-design input; supersedes this
+section's earlier "rules out diffraction-limited" reasoning): the four FPAs
+are individually focused relative to the slit via **piston adjustment**,
+specifically to remove PSF-per-pixel differences between FPAs. The
+cross-band equality is therefore a **calibrated outcome**, not evidence the
+underlying optics are achromatic/non-diffraction-limited — piston tuning
+would flatten the ~1.5px-per-FPA number regardless of whether diffraction or
+other chromatic aberration is genuinely present and wavelength-dependent per
+band. "Same PSF" across bands is a design target that was hit, not a
+physical inevitability discovered by ground test.
+
+This still supports using one shared PSF kernel per band-pair for the
+alternatives above — piston tuning is exactly what makes that a good
+approximation, whatever the underlying reason. What it no longer supports is
+treating the fixed-pixel-width choice *within* a single FPA's own band as
+"small, already-bounded" by extension of the cross-band argument: piston is
+one adjustment per FPA (presumably tuned near each band's own reference/
+centre wavelength), not a per-wavelength correction, so it would not remove
+any residual chromatic PSF drift across that FPA's own wavelength range the
+way it removes the *cross-FPA* difference. That residual is smaller in
+scope (one band's range vs. four very different bands) but is now an open
+question rather than a settled one — not yet quantified in this doc. If it
+ever needs bounding, the natural check is whether ground test recorded any
+sub-band (not just cross-band) PSF variation, or whether a small,
+column-dependent pixel-width correction (tracking `stretch(λ)`, the same
+per-column plate-scale factor keystone uses) measurably changes any of this
+study's findings.
 
 ### 11d. Phasing
 

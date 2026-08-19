@@ -1,0 +1,669 @@
+<title>Sampling the Slit</title>
+<style>
+  :root {
+    --ground: #eef1f3;
+    --surface: #ffffff;
+    --surface-2: #e4e9ec;
+    --ink: #1e2a32;
+    --ink-soft: #4b5a63;
+    --ink-faint: #85939a;
+    --line: #aab4ba;
+    --line-soft: #ccd3d7;
+    --accent: #c1622b;
+    --accent-soft: #f0d9c8;
+    --accent-strong: #9c4d20;
+    --frozen: #2e7d74;
+    --frozen-soft: #d7eae7;
+    --shadow: 0 1px 2px rgba(30,42,50,0.06), 0 6px 20px rgba(30,42,50,0.05);
+    --font-display: "Neue Haas Grotesk Display Pro", "Helvetica Neue", Arial, sans-serif;
+    --font-body: Charter, "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+    --font-mono: "SF Mono", "IBM Plex Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #12181c;
+      --surface: #1b2328;
+      --surface-2: #232c32;
+      --ink: #e7ecee;
+      --ink-soft: #a9b7bc;
+      --ink-faint: #6b7980;
+      --line: #445059;
+      --line-soft: #333e45;
+      --accent: #e28a4e;
+      --accent-soft: #3a2a20;
+      --accent-strong: #f0a870;
+      --frozen: #57b3a6;
+      --frozen-soft: #17302c;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 10px 30px rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #12181c;
+    --surface: #1b2328;
+    --surface-2: #232c32;
+    --ink: #e7ecee;
+    --ink-soft: #a9b7bc;
+    --ink-faint: #6b7980;
+    --line: #445059;
+    --line-soft: #333e45;
+    --accent: #e28a4e;
+    --accent-soft: #3a2a20;
+    --accent-strong: #f0a870;
+    --frozen: #57b3a6;
+    --frozen-soft: #17302c;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 10px 30px rgba(0,0,0,0.35);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  main {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 36px 24px 64px;
+  }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent-strong);
+    margin: 0 0 10px;
+  }
+  h1 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: clamp(32px, 5vw, 44px);
+    letter-spacing: -0.01em;
+    line-height: 1.05;
+    margin: 0 0 14px;
+    text-wrap: balance;
+    color: var(--ink);
+  }
+  .dek {
+    font-family: var(--font-body);
+    font-size: 17.5px;
+    line-height: 1.48;
+    color: var(--ink-soft);
+    max-width: 62ch;
+    margin: 0 0 28px;
+  }
+  h2 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 20px;
+    letter-spacing: -0.005em;
+    margin: 42px 0 6px;
+    color: var(--ink);
+  }
+  h2 .num {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 14px;
+    color: var(--accent);
+    margin-right: 10px;
+  }
+  .section-dek {
+    font-size: 14.5px;
+    color: var(--ink-soft);
+    max-width: 68ch;
+    margin: 0 0 16px;
+  }
+  p { max-width: 68ch; }
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+    background: var(--surface-2);
+    padding: 0.1em 0.4em;
+    border-radius: 4px;
+    color: var(--ink);
+  }
+
+  /* -------- legend -------- */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 22px;
+    padding: 12px 18px;
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    margin: 0 0 24px;
+    box-shadow: var(--shadow);
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--ink-soft);
+  }
+  .legend-item svg { flex: none; }
+
+  /* -------- figures -------- */
+  figure { margin: 0 0 28px; }
+  .panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .panel-card {
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: 12px;
+    padding: 14px 14px 10px;
+    box-shadow: var(--shadow);
+    /* No overflow-x here: an svg with width:100% never needs horizontal
+       scroll, and setting overflow-x without overflow-y makes the 'visible'
+       y-axis compute to 'auto' too (CSS Overflow spec) -- silently clipping
+       the bottom of every diagram instead of letting the box grow to fit. */
+  }
+  .panel-title {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--ink);
+    margin: 0 0 4px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .panel-title .tag {
+    font-size: 11px;
+    color: var(--ink-faint);
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  figcaption {
+    font-size: 13.5px;
+    color: var(--ink-soft);
+    margin-top: 10px;
+    max-width: 72ch;
+  }
+  /* Scoped to the diagram panels only -- a blanket `svg { width:100% }`
+     also overrides the small legend icons' own width/height attributes
+     (CSS beats presentation attributes even at tag-selector specificity),
+     which both blew them up past their intended size (the reported overlap)
+     and, applied to the old hidden defs-holder svg, stopped its "hidden"
+     0x0 sizing from actually hiding anything (the reported stray glyphs). */
+  .panel-card svg { width: 100%; height: auto; display: block; overflow: visible; }
+  svg text { font-family: var(--font-mono); fill: var(--ink-soft); }
+  .lbl-strong { fill: var(--ink); font-weight: 600; }
+
+  .row-dot { fill: var(--ink-soft); }
+  .hop1 { stroke: var(--line); stroke-width: 1; }
+  .axis-line { stroke: var(--ink-soft); stroke-width: 1.2; }
+  .eta-tick { stroke: var(--ink-faint); stroke-width: 1.1; }
+  .hop2 { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 2.5 2.5; opacity: 0.85; }
+  .bin-marker { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.6; }
+  .anchor-marker { fill: var(--surface); stroke: var(--accent); stroke-width: 1.4; }
+  .anchor-marker.dense { fill: var(--accent); stroke: none; }
+  .stem { stroke: var(--line); stroke-width: 1; }
+  .glyph { stroke: var(--accent); stroke-width: 1.4; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .bin-faint { fill: none; stroke: var(--ink-faint); stroke-width: 1.2; opacity: 0.55; }
+  .bracket { stroke: var(--ink-faint); stroke-width: 1; stroke-dasharray: 1 3; opacity: 0.8; }
+
+  .free-fill { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.6; }
+  .frozen-fill { fill: var(--frozen-soft); stroke: var(--frozen); stroke-width: 1.6; }
+  .frozen-x { stroke: var(--ink-faint); stroke-width: 1.3; }
+  .arrow-free { stroke: var(--accent); stroke-width: 1.6; fill: none; }
+  .arrow-frozen { stroke: var(--frozen); stroke-width: 1.6; fill: none; }
+  .arrow-truth { stroke: var(--frozen); stroke-width: 1.6; fill: none; stroke-dasharray: 3 3; }
+  .truth-curve { stroke: var(--frozen); stroke-width: 1.4; fill: none; opacity: 0.8; }
+
+  /* -------- table -------- */
+  .knobs {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 6px 0 4px;
+    font-size: 14.5px;
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+  }
+  .knobs th, .knobs td {
+    text-align: left;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: top;
+  }
+  .knobs th {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    background: var(--surface-2);
+  }
+  .knobs tr:last-child td { border-bottom: none; }
+  .knobs td.knob-name {
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    color: var(--accent-strong);
+    white-space: nowrap;
+    font-weight: 600;
+  }
+  .knobs td.cost { font-family: var(--font-mono); font-size: 13px; color: var(--ink-soft); white-space: nowrap; }
+
+  .closing {
+    margin-top: 28px;
+    padding: 20px 22px;
+    background: var(--surface-2);
+    border-radius: 10px;
+    border: 1px solid var(--line-soft);
+  }
+  .closing p { margin: 0; max-width: 74ch; font-size: 15px; color: var(--ink-soft); }
+  .closing code { background: var(--surface); }
+
+  @media (max-width: 720px) {
+    .panels { grid-template-columns: 1fr; }
+  }
+</style>
+
+<main>
+
+  <p class="eyebrow">geocarb_gert &middot; joint-block retrieval &middot; one window</p>
+  <h1>Sampling the Slit</h1>
+  <p class="dek">
+    For a single window on the detector, four flags — <code>g_ratio</code>,
+    <code>state_interp</code>, <code>anchor_density</code>, and which solve
+    (<code>coarse</code> / <code>hires</code>) — decide two different grids:
+    where the state's own unknowns live, and where the forward model actually
+    runs radiative transfer. This is what each one changes.
+  </p>
+
+  <div class="legend" role="group" aria-label="Symbol legend">
+    <span class="legend-item">
+      <svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3" class="row-dot"/></svg>
+      real detector pixel
+    </span>
+    <span class="legend-item">
+      <svg width="16" height="16" viewBox="0 0 16 16"><polygon points="8,2 14,8 8,14 2,8" class="bin-marker"/></svg>
+      bin centre &mdash; state's own point
+    </span>
+    <span class="legend-item">
+      <svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3.6" class="anchor-marker"/></svg>
+      anchor &mdash; hi-res render point
+    </span>
+    <span class="legend-item">
+      <svg width="20" height="10" viewBox="0 0 20 10"><line x1="0" y1="5" x2="20" y2="5" class="hop1"/></svg>
+      true geometry (GD polynomial, exact)
+    </span>
+    <span class="legend-item">
+      <svg width="20" height="10" viewBox="0 0 20 10"><line x1="0" y1="5" x2="20" y2="5" class="hop2"/></svg>
+      nearest-neighbour assignment
+    </span>
+    <span class="legend-item">
+      <svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" class="free-fill"/></svg>
+      free (retrieved)
+    </span>
+    <span class="legend-item">
+      <svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" class="frozen-fill"/></svg>
+      frozen (held at prior)
+    </span>
+  </div>
+
+  <h2><span class="num">01</span>Coarse vs. hires, for one window</h2>
+  <p class="section-dek">
+    Keystone and smile mean a detector row's own along-slit position
+    (<code>&eta;</code>) is not evenly spaced with its neighbours — some rows
+    crowd into a narrow <code>&eta;</code> range, others spread out. Both
+    solves see the identical real pixels and the identical true geometry
+    (the upper half of each panel below is the same). They differ only in
+    <em>where radiative transfer gets evaluated</em> — the lower half.
+  </p>
+
+  <figure>
+    <div class="panels">
+
+      <div class="panel-card">
+        <p class="panel-title">Coarse<span class="tag">scene_etas = bin_centers</span></p>
+        <svg viewBox="0 0 460 300" role="img" aria-label="Coarse solve: 11 real detector pixels map through true keystone geometry onto an uneven eta axis, then each pixel is nearest-neighbour assigned directly to one of 4 bin centres, which are the only 4 points where radiative transfer is evaluated.">
+          <defs>
+            <symbol id="glyph" viewBox="0 0 24 20">
+              <polyline points="0,14 5,6 9,16 13,4 17,12 24,8" class="glyph"/>
+            </symbol>
+            <marker id="arrF" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L6,3 L0,6 Z" fill="var(--accent)"/>
+            </marker>
+            <marker id="arrZ" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L6,3 L0,6 Z" fill="var(--frozen)"/>
+            </marker>
+          </defs>
+          <g class="row-dot">
+            <circle cx="40" cy="30" r="3"/><circle cx="76" cy="30" r="3"/><circle cx="112" cy="30" r="3"/>
+            <circle cx="148" cy="30" r="3"/><circle cx="184" cy="30" r="3"/><circle cx="220" cy="30" r="3"/>
+            <circle cx="256" cy="30" r="3"/><circle cx="292" cy="30" r="3"/><circle cx="328" cy="30" r="3"/>
+            <circle cx="364" cy="30" r="3"/><circle cx="400" cy="30" r="3"/>
+          </g>
+          <text x="40" y="18" text-anchor="middle" font-size="11">r0</text>
+          <text x="220" y="18" text-anchor="middle" font-size="11">r5</text>
+          <text x="400" y="18" text-anchor="middle" font-size="11">r10</text>
+          <text x="4" y="34" font-size="11" class="lbl-strong">rows</text>
+
+          <!-- hop1: row -> true eta (uneven, keystone) -->
+          <g class="hop1">
+            <line x1="40" y1="33" x2="40" y2="107"/>
+            <line x1="76" y1="33" x2="52" y2="107"/>
+            <line x1="112" y1="33" x2="62" y2="107"/>
+            <line x1="148" y1="33" x2="70" y2="107"/>
+            <line x1="184" y1="33" x2="130" y2="107"/>
+            <line x1="220" y1="33" x2="190" y2="107"/>
+            <line x1="256" y1="33" x2="250" y2="107"/>
+            <line x1="292" y1="33" x2="290" y2="107"/>
+            <line x1="328" y1="33" x2="330" y2="107"/>
+            <line x1="364" y1="33" x2="365" y2="107"/>
+            <line x1="400" y1="33" x2="400" y2="107"/>
+          </g>
+          <!-- eta axis -->
+          <line x1="20" y1="110" x2="440" y2="110" class="axis-line"/>
+          <g class="eta-tick">
+            <line x1="40" y1="105" x2="40" y2="115"/><line x1="52" y1="105" x2="52" y2="115"/>
+            <line x1="62" y1="105" x2="62" y2="115"/><line x1="70" y1="105" x2="70" y2="115"/>
+            <line x1="130" y1="105" x2="130" y2="115"/><line x1="190" y1="105" x2="190" y2="115"/>
+            <line x1="250" y1="105" x2="250" y2="115"/><line x1="290" y1="105" x2="290" y2="115"/>
+            <line x1="330" y1="105" x2="330" y2="115"/><line x1="365" y1="105" x2="365" y2="115"/>
+            <line x1="400" y1="105" x2="400" y2="115"/>
+          </g>
+          <text x="4" y="114" font-size="11" class="lbl-strong">&eta;</text>
+          <text x="10" y="130" font-size="10.5">dense here &mdash;</text>
+          <text x="10" y="141" font-size="10.5">rows overlap</text>
+
+          <!-- hop2: eta -> nearest bin -->
+          <g class="hop2">
+            <line x1="40" y1="113" x2="50" y2="167"/>
+            <line x1="52" y1="113" x2="50" y2="167"/>
+            <line x1="62" y1="113" x2="50" y2="167"/>
+            <line x1="70" y1="113" x2="90" y2="167"/>
+            <line x1="130" y1="113" x2="90" y2="167"/>
+            <line x1="190" y1="113" x2="230" y2="167"/>
+            <line x1="250" y1="113" x2="230" y2="167"/>
+            <line x1="290" y1="113" x2="340" y2="167"/>
+            <line x1="330" y1="113" x2="340" y2="167"/>
+            <line x1="365" y1="113" x2="340" y2="167"/>
+            <line x1="400" y1="113" x2="340" y2="167"/>
+          </g>
+
+          <!-- bin centres: G = 4, RT evaluated here -->
+          <g>
+            <polygon points="50,161 58,169 50,177 42,169" class="bin-marker"/>
+            <polygon points="90,161 98,169 90,177 82,169" class="bin-marker"/>
+            <polygon points="230,161 238,169 230,177 222,169" class="bin-marker"/>
+            <polygon points="340,161 348,169 340,177 332,169" class="bin-marker"/>
+          </g>
+          <text x="270" y="196" text-anchor="middle" font-size="11.5" class="lbl-strong">G = 4 bins &mdash; the only RT points</text>
+
+          <!-- stems + spectrum glyphs -->
+          <g class="stem">
+            <line x1="50" y1="177" x2="50" y2="215"/><line x1="90" y1="177" x2="90" y2="215"/>
+            <line x1="230" y1="177" x2="230" y2="215"/><line x1="340" y1="177" x2="340" y2="215"/>
+          </g>
+          <use href="#glyph" x="38" y="218"/><use href="#glyph" x="78" y="218"/>
+          <use href="#glyph" x="218" y="218"/><use href="#glyph" x="328" y="218"/>
+          <text x="270" y="268" text-anchor="middle" font-size="11.5">4 RT calls &mdash; every pixel reuses one of these 4 spectra</text>
+        </svg>
+      </div>
+
+      <div class="panel-card">
+        <p class="panel-title">Hi-res<span class="tag">scene_etas = anchor_etas</span></p>
+        <svg viewBox="0 0 460 300" role="img" aria-label="Hires solve: the same 11 real pixels and same true geometry as coarse, but now nearest-neighbour assigned to 15 dense anchors spanning slightly wider than the window (padding for the PSF blur). The 4 state bin centres still exist above the anchors and are interpolated down onto them -- radiative transfer runs fresh at all 15 anchors.">
+          <g class="row-dot">
+            <circle cx="40" cy="30" r="3"/><circle cx="76" cy="30" r="3"/><circle cx="112" cy="30" r="3"/>
+            <circle cx="148" cy="30" r="3"/><circle cx="184" cy="30" r="3"/><circle cx="220" cy="30" r="3"/>
+            <circle cx="256" cy="30" r="3"/><circle cx="292" cy="30" r="3"/><circle cx="328" cy="30" r="3"/>
+            <circle cx="364" cy="30" r="3"/><circle cx="400" cy="30" r="3"/>
+          </g>
+          <text x="40" y="18" text-anchor="middle" font-size="11">r0</text>
+          <text x="220" y="18" text-anchor="middle" font-size="11">r5</text>
+          <text x="400" y="18" text-anchor="middle" font-size="11">r10</text>
+          <text x="4" y="34" font-size="11" class="lbl-strong">rows</text>
+
+          <g class="hop1">
+            <line x1="40" y1="33" x2="40" y2="107"/>
+            <line x1="76" y1="33" x2="52" y2="107"/>
+            <line x1="112" y1="33" x2="62" y2="107"/>
+            <line x1="148" y1="33" x2="70" y2="107"/>
+            <line x1="184" y1="33" x2="130" y2="107"/>
+            <line x1="220" y1="33" x2="190" y2="107"/>
+            <line x1="256" y1="33" x2="250" y2="107"/>
+            <line x1="292" y1="33" x2="290" y2="107"/>
+            <line x1="328" y1="33" x2="330" y2="107"/>
+            <line x1="364" y1="33" x2="365" y2="107"/>
+            <line x1="400" y1="33" x2="400" y2="107"/>
+          </g>
+          <line x1="20" y1="110" x2="440" y2="110" class="axis-line"/>
+          <g class="eta-tick">
+            <line x1="40" y1="105" x2="40" y2="115"/><line x1="52" y1="105" x2="52" y2="115"/>
+            <line x1="62" y1="105" x2="62" y2="115"/><line x1="70" y1="105" x2="70" y2="115"/>
+            <line x1="130" y1="105" x2="130" y2="115"/><line x1="190" y1="105" x2="190" y2="115"/>
+            <line x1="250" y1="105" x2="250" y2="115"/><line x1="290" y1="105" x2="290" y2="115"/>
+            <line x1="330" y1="105" x2="330" y2="115"/><line x1="365" y1="105" x2="365" y2="115"/>
+            <line x1="400" y1="105" x2="400" y2="115"/>
+          </g>
+          <text x="4" y="114" font-size="11" class="lbl-strong">&eta;</text>
+
+          <!-- faint bin centres (state's own G=4, unchanged) + interpolation bracket -->
+          <g class="bin-faint">
+            <polygon points="50,128 56,134 50,140 44,134"/>
+            <polygon points="90,128 96,134 90,140 84,134"/>
+            <polygon points="230,128 236,134 230,140 224,134"/>
+            <polygon points="340,128 346,134 340,140 334,134"/>
+          </g>
+          <line x1="44" y1="134" x2="346" y2="134" class="bracket"/>
+          <text x="270" y="150" text-anchor="middle" font-size="10.5">G = 4 state values, interpolated down &#8595;</text>
+
+          <!-- hop2: eta -> nearest ANCHOR (tight) -->
+          <g class="hop2">
+            <line x1="40" y1="113" x2="34" y2="167"/>
+            <line x1="52" y1="113" x2="50" y2="167"/>
+            <line x1="62" y1="113" x2="58" y2="167"/>
+            <line x1="70" y1="113" x2="74" y2="167"/>
+            <line x1="130" y1="113" x2="120" y2="167"/>
+            <line x1="190" y1="113" x2="200" y2="167"/>
+            <line x1="250" y1="113" x2="240" y2="167"/>
+            <line x1="290" y1="113" x2="280" y2="167"/>
+            <line x1="330" y1="113" x2="320" y2="167"/>
+            <line x1="365" y1="113" x2="360" y2="167"/>
+            <line x1="400" y1="113" x2="415" y2="167"/>
+          </g>
+
+          <!-- anchors: dense, RT evaluated at each -->
+          <g class="anchor-marker dense">
+            <circle cx="25" cy="169" r="3"/><circle cx="34" cy="169" r="3"/><circle cx="42" cy="169" r="3"/>
+            <circle cx="50" cy="169" r="3"/><circle cx="58" cy="169" r="3"/><circle cx="66" cy="169" r="3"/>
+            <circle cx="74" cy="169" r="3"/><circle cx="120" cy="169" r="3"/><circle cx="160" cy="169" r="3"/>
+            <circle cx="200" cy="169" r="3"/><circle cx="240" cy="169" r="3"/><circle cx="280" cy="169" r="3"/>
+            <circle cx="320" cy="169" r="3"/><circle cx="360" cy="169" r="3"/><circle cx="415" cy="169" r="3"/>
+          </g>
+          <g class="bracket">
+            <line x1="20" y1="180" x2="25" y2="180"/><line x1="25" y1="176" x2="25" y2="184"/>
+            <line x1="415" y1="176" x2="415" y2="184"/><line x1="415" y1="180" x2="440" y2="180"/>
+          </g>
+          <text x="270" y="196" text-anchor="middle" font-size="11.5" class="lbl-strong">15 anchors (density=1, &plusmn;4-row pad) &mdash; RT runs here</text>
+
+          <g class="stem" opacity="0.7">
+            <line x1="90" y1="172" x2="90" y2="215"/><line x1="180" y1="172" x2="180" y2="215"/>
+            <line x1="270" y1="172" x2="270" y2="215"/><line x1="360" y1="172" x2="360" y2="215"/>
+          </g>
+          <use href="#glyph" x="78" y="218"/><use href="#glyph" x="168" y="218"/>
+          <use href="#glyph" x="258" y="218"/><use href="#glyph" x="348" y="218"/>
+          <text x="270" y="268" text-anchor="middle" font-size="11.5">15 RT calls &mdash; every pixel gets a spectrum from a much closer point</text>
+        </svg>
+      </div>
+    </div>
+
+    <figcaption>
+      Illustrative window (11 rows, <code>G=4</code>) — real spacing along
+      <code>&eta;</code> comes from <code>xy_to_wavelength_slit</code> and
+      varies by FPA and row; a real column also has its own smile-shifted
+      <code>&eta;</code>, omitted here for one row per tick. What's identical
+      between the panels is the top half: same 11 real pixels, same true
+      geometry. What changes is only the bottom half — <strong>coarse</strong>
+      reuses the state's own <code>G</code> points as the entire rendering
+      grid, so a bin's nearest-neighbour cell can span a wide stretch of real
+      <code>&eta;</code> (see the right-hand bin above, absorbing four spread-out
+      pixels); <strong>hires</strong> keeps the same <code>G</code> unknowns but
+      renders on a separate, much denser <code>anchor</code> grid — uniform in
+      row space, then warped through the same true geometry — so nearest-neighbour
+      error shrinks without adding a single retrieved parameter.
+    </figcaption>
+  </figure>
+
+  <h2><span class="num">02</span>state_interp — only hires has a choice to make</h2>
+  <p class="section-dek">
+    Coarse's anchor grid <em>is</em> the state's own <code>bin_centers</code>,
+    so interpolating the state onto itself is the identity — the flag has
+    nothing to act on there. For hires, every anchor needs a value the state
+    doesn't have directly, and there are two ways to get one for a row that
+    isn't currently being retrieved.
+  </p>
+
+  <figure>
+    <div class="panels">
+      <div class="panel-card">
+        <p class="panel-title">state_interp = True<span class="tag">every row, same rule</span></p>
+        <svg viewBox="0 0 340 190" role="img" aria-label="With state_interp true, both the free row and the frozen row reach the anchor the same way: linear interpolation from their own G bin values.">
+          <circle cx="90" cy="34" r="15" class="free-fill"/>
+          <text x="90" y="38" text-anchor="middle" font-size="11" font-weight="600">free</text>
+          <circle cx="230" cy="34" r="15" class="frozen-fill"/>
+          <text x="230" y="38" text-anchor="middle" font-size="11" font-weight="600">frozen</text>
+          <circle cx="160" cy="150" r="6" class="anchor-marker dense"/>
+          <text x="160" y="172" text-anchor="middle" font-size="11" class="lbl-strong">anchor</text>
+          <path d="M 90 50 L 152 142" class="arrow-free" marker-end="url(#arrF)"/>
+          <path d="M 230 50 L 170 142" class="arrow-frozen" marker-end="url(#arrZ)"/>
+          <text x="55" y="95" font-size="10.5">interpolate</text>
+          <text x="205" y="95" font-size="10.5">interpolate</text>
+          <text x="160" y="18" text-anchor="middle" font-size="10.5" opacity="0.75">same rule, either row</text>
+        </svg>
+      </div>
+      <div class="panel-card">
+        <p class="panel-title">state_interp = False<span class="tag">frozen rows get real truth</span></p>
+        <svg viewBox="0 0 340 190" role="img" aria-label="With state_interp false, the free row still reaches the anchor by interpolation, but the frozen row is bypassed entirely: the anchor instead reads the exact true continuous field at its own along-slit position.">
+          <circle cx="90" cy="34" r="15" class="free-fill"/>
+          <text x="90" y="38" text-anchor="middle" font-size="11" font-weight="600">free</text>
+          <circle cx="230" cy="34" r="15" class="frozen-fill" opacity="0.35"/>
+          <text x="230" y="38" text-anchor="middle" font-size="11" font-weight="600" opacity="0.5">frozen</text>
+          <line x1="222" y1="26" x2="238" y2="42" class="frozen-x"/><line x1="238" y1="26" x2="222" y2="42" class="frozen-x"/>
+          <path d="M 255 20 Q 275 5 295 20 Q 310 32 300 45" class="truth-curve"/>
+          <text x="300" y="58" font-size="10" text-anchor="middle">true field</text>
+          <circle cx="160" cy="150" r="6" class="anchor-marker dense"/>
+          <text x="160" y="172" text-anchor="middle" font-size="11" class="lbl-strong">anchor</text>
+          <path d="M 90 50 L 152 142" class="arrow-free" marker-end="url(#arrF)"/>
+          <path d="M 290 55 Q 240 95 170 142" class="arrow-truth" marker-end="url(#arrZ)"/>
+          <text x="55" y="95" font-size="10.5">interpolate</text>
+          <text x="235" y="112" font-size="10.5">exact, at anchor's &eta;</text>
+        </svg>
+      </div>
+    </div>
+    <figcaption>
+      A frozen row under <code>state_interp=False</code> has zero representation
+      error — it is read straight from <code>als.state_at</code> at each
+      anchor's real position, never passed through the <code>G</code>-point
+      grid at all. That is the asymmetry <code>gd_joint_block_residual_vs_scene.py</code>
+      traces the CO2-only residual to: the one row actually being solved for
+      carries ordinary interpolation error while everything held fixed is
+      privileged with perfect knowledge. <code>state_interp=True</code> removes
+      the privilege — every row, free or frozen, is only as well known as its
+      own <code>G</code> points allow.
+    </figcaption>
+  </figure>
+
+  <h2><span class="num">03</span>anchor_density — how fine the render grid gets</h2>
+  <p class="section-dek">
+    Independent of both of the above: <code>anchor_density</code> only sets
+    how many anchors exist per detector row within the padded window. It
+    doesn't touch <code>G</code> (the unknowns) or which rule
+    <code>state_interp</code> applies — it just makes the hires rendering
+    grid finer or coarser.
+  </p>
+
+  <figure>
+    <div class="panels">
+      <div class="panel-card">
+        <p class="panel-title">anchor_density = 1<span class="tag">default</span></p>
+        <svg viewBox="0 0 340 150" role="img" aria-label="At anchor density 1, three consecutive detector rows each get exactly one anchor directly below them.">
+          <g class="row-dot"><circle cx="90" cy="30" r="3"/><circle cx="170" cy="30" r="3"/><circle cx="250" cy="30" r="3"/></g>
+          <text x="20" y="34" font-size="11" class="lbl-strong">rows</text>
+          <g class="stem"><line x1="90" y1="33" x2="90" y2="102"/><line x1="170" y1="33" x2="170" y2="102"/><line x1="250" y1="33" x2="250" y2="102"/></g>
+          <g class="anchor-marker dense"><circle cx="90" cy="106" r="4"/><circle cx="170" cy="106" r="4"/><circle cx="250" cy="106" r="4"/></g>
+          <text x="170" y="132" text-anchor="middle" font-size="12" class="lbl-strong">3 anchors, 3 rows</text>
+        </svg>
+      </div>
+      <div class="panel-card">
+        <p class="panel-title">anchor_density = 4<span class="tag">4&times; RT cost</span></p>
+        <svg viewBox="0 0 340 150" role="img" aria-label="At anchor density 4, the same three rows each get four anchors spaced within their own row interval, twelve anchors total.">
+          <g class="row-dot"><circle cx="90" cy="30" r="3"/><circle cx="170" cy="30" r="3"/><circle cx="250" cy="30" r="3"/></g>
+          <text x="20" y="34" font-size="11" class="lbl-strong">rows</text>
+          <g class="stem" opacity="0.6">
+            <line x1="90" y1="33" x2="90" y2="102"/><line x1="170" y1="33" x2="170" y2="102"/><line x1="250" y1="33" x2="250" y2="102"/>
+          </g>
+          <g class="anchor-marker dense">
+            <circle cx="78" cy="106" r="3.4"/><circle cx="86" cy="106" r="3.4"/><circle cx="94" cy="106" r="3.4"/><circle cx="102" cy="106" r="3.4"/>
+            <circle cx="158" cy="106" r="3.4"/><circle cx="166" cy="106" r="3.4"/><circle cx="174" cy="106" r="3.4"/><circle cx="182" cy="106" r="3.4"/>
+            <circle cx="238" cy="106" r="3.4"/><circle cx="246" cy="106" r="3.4"/><circle cx="254" cy="106" r="3.4"/><circle cx="262" cy="106" r="3.4"/>
+          </g>
+          <text x="170" y="132" text-anchor="middle" font-size="12" class="lbl-strong">12 anchors, 3 rows</text>
+        </svg>
+      </div>
+    </div>
+    <figcaption>
+      Cost scales linearly with density: 4&times; the anchors is 4&times; the
+      radiative-transfer calls for that solve. It buys a finer nearest-neighbour
+      grid the same way a smaller <code>g_ratio</code> buys a finer coarse grid —
+      but without adding a single free parameter to the Gauss-Newton solve.
+    </figcaption>
+  </figure>
+
+  <h2><span class="num">04</span>the three knobs, side by side</h2>
+  <table class="knobs">
+    <thead>
+      <tr><th>knob</th><th>changes</th><th>leaves untouched</th><th>cost</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="knob-name">g_ratio &rarr; G</td>
+        <td>unknowns per window (the state's own resolution) — <em>and</em>, for coarse only, the render grid itself, since they're the same points</td>
+        <td>hires' anchor grid, which is set by <code>anchor_density</code> independently</td>
+        <td class="cost">more free elements &rarr; bigger GN solve</td>
+      </tr>
+      <tr>
+        <td class="knob-name">anchor_density</td>
+        <td>hires' render-grid density only</td>
+        <td><code>G</code>, and which rule <code>state_interp</code> applies</td>
+        <td class="cost">RT calls scale linearly (hires only)</td>
+      </tr>
+      <tr>
+        <td class="knob-name">state_interp</td>
+        <td>how a <em>frozen</em> row gets its anchor value (interpolated vs. exact truth) &mdash; hires only</td>
+        <td>coarse (no-op); free rows (always interpolated either way)</td>
+        <td class="cost">no extra RT calls</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="closing">
+    <p>
+      A fourth axis in the current regression matrix — <code>jacobian_used</code>
+      (<code>fd</code> vs. <code>analytic</code>) — doesn't touch any grid at
+      all; it only changes how the Gauss-Newton step gets its derivatives once
+      both grids above are already fixed. That's why the 8-config matrix
+      (<code>co2</code>/<code>co2p</code> &times; 58/29 windows &times;
+      <code>g_ratio</code> 1/3) varies <em>G</em> and window count, always
+      with <code>state_interp=True</code> and <code>anchor_density=1</code> held
+      fixed — it's deliberately probing the first two knobs on this page, one
+      at a time, against a solver choice that shouldn't move the answer at all.
+    </p>
+  </div>
+
+</main>

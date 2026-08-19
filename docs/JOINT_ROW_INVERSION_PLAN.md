@@ -1,5 +1,13 @@
 # Plan: joint multi-row inversion to recover a decoupled spatial/spectral field from the distorted FPA
 
+> **Archived 2026-08-19.** Superseded by `docs/PROJECT_STATUS.md`. This is
+> the plan that motivated the pivot away from independent per-row (1D)
+> retrieval, in response to `KEYSTONE_SMILE_BIAS_PLAN.md` §11o/§11p (also
+> archived) — and unlike that pivot's own precursor, this one WAS carried
+> forward: it's the origin of the joint-block/`StateSpec` architecture the
+> current design is built on. Kept in place, unedited, for the record of
+> that motivation.
+
 Sketch only — not started. Written 2026-08-12 in response to a question
 about whether an ML model, given enough training data, could learn to
 invert the distorted FPA back into a decoupled spatial/spectral array.
