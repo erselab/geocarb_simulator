@@ -182,9 +182,19 @@ the actual limiting factor is prior *quality*, not grid resolution) are in
   mechanism setting the RT-resolution floor (`nearest_bin_scene`'s hard
   nearest-anchor assignment — never interpolated spectra — is first-order
   in anchor spacing with no inherent plateau).
-- The realistic-prior forward-only residual comparisons (`exact` /
-  `coarse<d>` / `oversample<d>` / `structural` / `highres` /
-  `native_ad<d>`), all cross-checked against the same dense truth image.
+- The realistic-prior forward-only residual comparisons: `bingrid_g<N>_
+  <kind>_ad<d>` (G-bin state, prior=truth at each bin, downscaled onto a
+  fixed anchor density) against `nativegrid_ad<d>`/`native_ad<d>` (no G-bin
+  layer, state built directly on the anchor grid) — all cross-checked
+  against the same dense truth image. `"nearest"` downscaling is rejected
+  (2026-08-19, `forward_check_g_ratio_sweep_fpa<N>.png`) — `"linear"` only
+  going forward; the `nearest` sweep data is kept for reference under
+  `results/realistic_prior/forward_check/nearest_deprecated/` and
+  `plots/realistic_prior/nearest_deprecated/`, out of the default glob.
+  `exact`/`coarse<d>`/`oversample<d>`/`structural`/`highres` (the
+  `prior_anchor_density` sweep and the structural-fields check) are
+  retired — superseded by the bingrid/nativegrid framing above, which
+  covers the same resolution question without a separate mechanism.
 
 ## 4. Where things live
 
@@ -203,7 +213,88 @@ the actual limiting factor is prior *quality*, not grid resolution) are in
 - **`geocarb_gert/jacobians.py`** — the analytic Jacobian (`linearize`).
 - **`scripts/gd_joint_block_whole_slit_sweep.py`** — the production
   retrieval sweep (real `gauss_newton_state` solves, not forward-only).
+- **`scripts/gd_joint_block_matrix.py`** — generic N-way config-matrix
+  runner around the whole-slit sweep (free rows × windows × `g_ratio` ×
+  `anchor_density` × `state_interp` × jacobian, each axis a CLI list) —
+  the tool §5's retrieval sweep runs through.
 - **`scripts/gd_realistic_prior_forward_check.py`** — forward-only
   diagnostics (no retrieval): residual comparisons, RT-resolution sweeps,
   the bin/anchor schematics.
 - **`scripts/gd_jacobian_validate.py`** — analytic-vs-FD validation.
+
+## 5. Retrieval plan (next steps)
+
+Everything in §3 is forward-only (`forward(spec.x0())`, prior against
+truth, never a solve) — it characterizes representation error, not
+retrieval error. The open question this phase answers: does adding
+measurement noise and an actual `gauss_newton_state` solve change the
+g_ratio/anchor_density story §3 already measured, or does conditioning
+(more free state than the data can actually constrain — see the "reason
+not to solve on the native grid" discussion, `analytic_jacobian_testing`'s
+own closed regression) become the dominant effect once real solves are in
+the loop?
+
+### Phase 1 — prior=truth at the bin scale, linear downscale
+
+Repeats the `bingrid_g<N>_linear_ad<d>` mechanism from §3 (prior=truth
+exactly at each G bin, `state_interp="linear"` downscale onto a fixed
+anchor grid), but now actually solving instead of forward-rendering the
+prior. Two free-parameter configs, both against the full 58-window FPA2
+tiling:
+
+- **CO2 only** (`--free co2` → `co2_ppm`).
+- **CO2 + surface pressure** (`--free co2p` → `co2_ppm,p_surface_hpa`) —
+  tests whether adding a second free row changes how much g_ratio/
+  anchor_density resolution is needed to reach the noise floor (two rows
+  competing for the same per-window information is a harder-conditioned
+  problem than one, independent of the H2O/p_surface degeneracy §2 found
+  joint-band retrieval fixes — this is a single-band, two-free-row case).
+
+Both swept across `g_ratio` and `anchor_density`, via
+`scripts/gd_joint_block_matrix.py` (`--hires-only`, since `coarse` never
+touches `anchor_etas` and so cannot depend on `anchor_density` at all —
+running it while sweeping that axis would be pure waste; `--jacobian
+analytic`, already established against FD everywhere this tool sweeps;
+`--state-interp linear`, the only kind still in use per §3):
+
+```
+PYTHONPATH=. python3 scripts/gd_joint_block_matrix.py \
+    --tag retrieval_bingrid_v1 --free co2,co2p \
+    --g-ratio 0.5,1,3,6,12 --anchor-density 1,4,16 \
+    --hires-only --jacobian analytic
+```
+
+`g_ratio`/`anchor_density` values above are a starting proposal, not
+fixed — chosen as a practically-costed subset of §3's own axes (dropping
+`g_ratio=0.125,0.25`/`anchor_density`∈{2,8} initially; each config here is
+a real 58-window GN solve, not a forward render — the closed
+`anchor_density_v1` check under `results/config_matrix/` timed a single
+`co2p`, `g_ratio=1`, `anchor_density=4` config at ~5-15 minutes, so the
+30-config grid above (2 free-sets × 5 g_ratios × 3 anchor-densities) is a
+real wall-clock commitment, worth timing one config before launching the
+rest). Score against: (a) §3's own forward-only representation-error
+ceiling at matching `(g_ratio, anchor_density)` — the floor retrieval RMS
+should approach if the solve is well-conditioned, since with prior=truth
+and no noise there's nothing else for the solve to correct; and (b) the
+instrument noise floor (`1/SNR`), same convention as every §3 plot.
+
+### Phase 2 — imperfect prior (after Phase 1)
+
+Repeats a subset of Phase 1's grid with `fields=STATE_FIELDS_PRIOR`
+(background/topography-aware, never plume/hot-spot content — see §3
+"Prior construction") instead of prior=truth, via
+`gd_joint_block_whole_slit_sweep.py`'s own `--realistic-prior` flag. This
+is the first time the "prior=truth and frozen state are two separate
+actions" design principle (settled earlier — no exact-truth bypass in the
+forward path, prior content is the only place truth-vs-degraded is
+decided) actually gets exercised in a real retrieval rather than a
+forward-only check.
+
+**Not yet wired**: `gd_joint_block_matrix.py`'s `run_one` doesn't forward
+a `--realistic-prior`-equivalent flag to the whole-slit sweep script (its
+own `--scene` axis controls atmosphere composition — uniform/barcode —
+not prior-field quality). Needs a small addition (a `--prior-fields`
+matrix axis, or reuse `--scene`) before Phase 2 can run through the same
+matrix tooling as Phase 1; until then, individual
+`gd_joint_block_whole_slit_sweep.py --realistic-prior ...` runs work
+directly.

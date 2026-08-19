@@ -12,28 +12,28 @@ to correct it", which is exactly what needs to be understood before
 committing to an expensive full retrieval sweep.
 
 Configs compared:
-  exact        prior_anchor_density=None, fields=STATE_FIELDS (today's exact
-               local-truth mechanism -- the baseline / sanity check: this
-               config's residual should be ~0, since prior==truth here)
-  coarse<d>    prior_anchor_density=<d> (<1), fields=STATE_FIELDS -- truth
-               field, sparsely interpolated -- smooths away hot spots
-  oversample<d> prior_anchor_density=<d> (>1), fields=STATE_FIELDS
-  structural   fields=STATE_FIELDS_PRIOR (background/topography-aware, never
-               plume/hot-spot/synoptic content), prior_anchor_density=None
-  highres      native_res=True, one exact-truth value per detector row (not
-               per coarse G bin) -- the RT-sweep's own density=1.0 point
-  native_ad<d> (--rt-sweep) native_res=True at anchor density <d> -- prior=
+  bingrid_g<N>_<kind>_ad<d> (--g-ratio-sweep) the G-bin state (g_ratio=<N>,
+               prior=truth exactly at each bin) downscaled onto the native
+               anchor grid at density <d> via state_interp=<kind> ("linear"
+               or "nearest"). Answers "how coarse can the bin grid be, and
+               does better reconstruction (linear vs. nearest) recover any
+               of that shortfall", at a FIXED (deep) anchor density -- see
+               forward_check_g_ratio_sweep_fpa<N>.png.
+  nativegrid_ad<d> (--rt-sweep) native_res=True at anchor density <d> -- prior=
                truth exactly, state built DIRECTLY on the anchor grid, no
-               G-bin layer at all. Answers "how far do we need to push RT/
-               state resolution before it stops helping", independent of
-               any retrieval -- see forward_check_rt_sweep_fpa<N>.png and
+               G-bin layer at all (d=1 is one exact-truth value per detector
+               row). Answers "how far do we need to push RT/state resolution
+               before it stops helping", independent of any retrieval, and
+               is the ceiling the bingrid sweep should converge onto as its
+               g_ratio shrinks -- see forward_check_rt_sweep_fpa<N>.png and
                docs/REALISTIC_PRIOR_EXPERIMENT_CLASS.md.
 
 Run:  PYTHONPATH=. python3 scripts/gd_realistic_prior_forward_check.py
       PYTHONPATH=. python3 scripts/gd_realistic_prior_forward_check.py \\
-        --prior-anchor-density 0.25,1,4 --no-structural --n-lookup-samples 400
+        --g-ratio-sweep 0.125,0.25,0.5,1,3,6,12 \\
+        --g-ratio-sweep-nearest-check 0.125,1,12 --g-ratio-sweep-anchor-density 16
       PYTHONPATH=. python3 scripts/gd_realistic_prior_forward_check.py \\
-        --rt-sweep 0.25,0.5,2,4,8,16
+        --rt-sweep 0.25,0.5,1,2,4,8,16
 Output: results/realistic_prior/forward_check/*.npy (truth + one per config)
         plots/realistic_prior/forward_check_*.png
 """
@@ -71,10 +71,14 @@ SMOOTH_ROW_BAND = (550, 650)
 
 
 def _rt_density_from_label(label):
-    """Inverse of the rt-sweep config labeling: 'highres' is density 1.0,
-    'native_ad<d>' is density <d>, anything else isn't part of the sweep."""
-    if label == "highres":
-        return 1.0
+    """Inverse of the rt-sweep config labeling: 'nativegrid_ad<d>' is density
+    <d> (including d=1, the former 'highres' point -- folded into this same
+    naming 2026-08-19), anything else isn't part of the sweep. 'native_ad<d>'
+    (the pre-2026-08-19 name, before "native grid" terminology was settled
+    on -- see docs/PROJECT_STATUS.md) is still recognized so existing
+    on-disk results from before the rename stay readable."""
+    if label.startswith("nativegrid_ad"):
+        return float(label[len("nativegrid_ad"):])
     if label.startswith("native_ad"):
         return float(label[len("native_ad"):])
     return None
@@ -152,44 +156,35 @@ def main() -> int:
     ap.add_argument("--n-windows", type=int, default=None,
                     help="target window count (default: historical keystone-only "
                          "tiling, 58 on FPA2)")
-    ap.add_argument("--prior-anchor-density", type=str, default="0.25,1,4",
-                    help="comma list of prior_anchor_density values to render with "
-                         "fields=STATE_FIELDS (exact truth field, resolution-limited "
-                         "prior). 1.0 reproduces today's exact mechanism exactly.")
-    ap.add_argument("--structural", dest="structural", action="store_true", default=True,
-                    help="also render the background/topography-aware structural "
-                         "prior (STATE_FIELDS_PRIOR, default on)")
-    ap.add_argument("--no-structural", dest="structural", action="store_false")
-    ap.add_argument("--highres", dest="highres", action="store_true", default=True,
-                    help="also render a genuinely higher-resolution prior: one exact-"
-                         "truth value PER DETECTOR ROW (not per coarse G bin), i.e. the "
-                         "state's own positions ARE the native-row anchor grid, so no "
-                         "bin->row interpolation happens at all. This is NOT the same as "
-                         "prior_anchor_density > 1 (which only changes how accurately the "
-                         "EXISTING G bin values are computed, and can only approach the "
-                         "exact-per-bin result from below, never add resolution beyond "
-                         "it). Shows the theoretical floor once G-bin coarseness is "
-                         "removed entirely. Default on.")
-    ap.add_argument("--no-highres", dest="highres", action="store_false")
-    ap.add_argument("--nearest-downscale", dest="nearest_downscale", action="store_true",
-                    default=True,
-                    help="also render 'exact_nearest': same bin content and g_ratio as "
-                         "'exact', but downscaled onto the native anchor grid with "
-                         "state_interp='nearest' (piecewise-constant) instead of 'linear' "
-                         "-- a real forward-model comparison of the two downscaling "
-                         "schemes, not just the bin-loci/bin-vs-native schematics. "
-                         "Default on.")
-    ap.add_argument("--no-nearest-downscale", dest="nearest_downscale", action="store_false")
-    ap.add_argument("--rt-sweep", type=str, default="0.25,0.5,2,4,8,16",
+    ap.add_argument("--g-ratio-sweep", type=str, default="",
+                    help="bin-grid convergence-to-truth sweep: comma list of g_ratio "
+                         "values (coarse to fine, e.g. '12,6,3,1,0.5,0.25,0.125'), each "
+                         "rendered at a FIXED --g-ratio-sweep-anchor-density and "
+                         "state_interp='linear' -- so any residual change across the "
+                         "sweep is attributable to G alone, not a second moving axis. "
+                         "As g_ratio shrinks, G grows toward the anchor count, and the "
+                         "sweep should converge onto the already-measured "
+                         "nativegrid_ad<N> residual at that same density (its own "
+                         "ceiling). Empty (default) skips this sweep entirely.")
+    ap.add_argument("--g-ratio-sweep-anchor-density", type=float, default=16.0,
+                    help="anchor density held fixed across --g-ratio-sweep (default 16, "
+                         "the deepest density already characterized by --rt-sweep, so "
+                         "results are directly comparable to that same nativegrid_ad16 "
+                         "point).")
+    ap.add_argument("--g-ratio-sweep-nearest-check", type=str, default="",
+                    help="comma list of a SUBSET of --g-ratio-sweep's own g_ratio values "
+                         "to also render with state_interp='nearest' -- a smaller side "
+                         "check of whether the linear/nearest gap shrinks as G grows, not "
+                         "a full second sweep. Empty (default) skips it.")
+    ap.add_argument("--rt-sweep", type=str, default="0.25,0.5,1,2,4,8,16",
                     help="RT-resolution convergence sweep: comma list of anchor "
                          "densities (1.0 = one anchor/row = 2.73km spacing on FPA2), "
                          "each rendered with native_res=True (state built directly on "
-                         "the anchor grid, prior=truth exactly, no G-bin layer at all -- "
-                         "see --highres). 1.0 is deliberately excluded from the default "
-                         "list since --highres already covers it; include it explicitly "
-                         "to recompute anyway. Answers 'how far do we need to push "
-                         "anchor resolution before it stops helping', independent of "
-                         "any retrieval -- see docs/REALISTIC_PRIOR_EXPERIMENT_CLASS.md.")
+                         "the anchor grid, prior=truth exactly, no G-bin layer at all). "
+                         "Answers 'how far do we need to push anchor resolution before "
+                         "it stops helping', independent of any retrieval, and is the "
+                         "ceiling the g_ratio sweep converges onto -- see "
+                         "docs/REALISTIC_PRIOR_EXPERIMENT_CLASS.md.")
     ap.add_argument("--no-rt-sweep", dest="rt_sweep", action="store_const", const="")
     ap.add_argument("--anchor-schematic", dest="anchor_schematic", action="store_true",
                     default=True,
@@ -273,6 +268,8 @@ def main() -> int:
         if rt_densities_all:
             _plot_rt_sweep(residual_rms_by_row, rt_densities_all, args.fpa, plot_dir,
                           snr=gdt.DEFAULT_SNR_BY_FPA.get(args.fpa))
+        _plot_g_ratio_sweep(residual_rms_by_row, args.fpa, plot_dir,
+                           snr=gdt.DEFAULT_SNR_BY_FPA.get(args.fpa))
         if args.anchor_schematic:
             _plot_anchor_schematic(truth_A, args.fpa, args.schematic_row, args.g_ratio, plot_dir)
         if args.bin_sample_counts:
@@ -311,35 +308,40 @@ def main() -> int:
     tiles = sw.build_window_tiles(args.fpa, window_scale=window_scale)
     print(f"{len(tiles)} windows, g_ratio={args.g_ratio:g}\n", flush=True)
 
-    configs = [("exact", als.STATE_FIELDS, None, False, 1.0, "linear")]
-    for d_str in args.prior_anchor_density.split(","):
-        d = float(d_str)
-        tag = "exact" if d == 1.0 else ("coarse" if d < 1.0 else "oversample")
-        configs.append((f"{tag}{d:g}" if d != 1.0 else "exact_ad1", als.STATE_FIELDS, d, False,
-                        1.0, "linear"))
-    if args.structural:
-        configs.append(("structural", als.STATE_FIELDS_PRIOR, None, False, 1.0, "linear"))
-    if args.highres:
-        configs.append(("highres", als.STATE_FIELDS, None, True, 1.0, "linear"))
-    if args.nearest_downscale:
-        # same bin content and g_ratio as 'exact', ONLY the downscaling kind
-        # differs -- linear vs. piecewise-constant, as a real forward render
-        # and residual, not just the bin-loci/bin-vs-native schematics.
-        configs.append(("exact_nearest", als.STATE_FIELDS, None, False, 1.0, "nearest"))
+    configs = []
     rt_sweep_densities = ([] if not args.rt_sweep else
                           [float(d) for d in args.rt_sweep.split(",")])
     for d in rt_sweep_densities:
-        configs.append((f"native_ad{d:g}", als.STATE_FIELDS, None, True, d, "linear"))
+        configs.append((f"nativegrid_ad{d:g}", als.STATE_FIELDS, None, True, d, "linear",
+                        args.g_ratio))
+
+    # bin-grid convergence-to-truth sweep: G varied broadly at FIXED anchor
+    # density and (primarily) fixed downscaling kind, so any change in
+    # residual is attributable to G alone -- see the conversation this was
+    # designed in. state_interp="nearest" gets a smaller side-check at a
+    # subset of the same g_ratio values, not a full second sweep.
+    if args.g_ratio_sweep:
+        g_ratios = [float(g) for g in args.g_ratio_sweep.split(",")]
+        ad = args.g_ratio_sweep_anchor_density
+        for g in g_ratios:
+            configs.append((f"bingrid_g{g:g}_linear_ad{ad:g}", als.STATE_FIELDS, None, False,
+                            ad, "linear", g))
+        if args.g_ratio_sweep_nearest_check:
+            check_ratios = [float(g) for g in args.g_ratio_sweep_nearest_check.split(",")]
+            for g in check_ratios:
+                configs.append((f"bingrid_g{g:g}_nearest_ad{ad:g}", als.STATE_FIELDS, None, False,
+                                ad, "nearest", g))
 
     residual_rms_by_row = {}
     resid_by_label = {}
-    for label, fields, density, native_res, rt_density, state_interp in configs:
+    for label, fields, density, native_res, rt_density, state_interp, g_ratio in configs:
         print(f"rendering prior config '{label}' "
              f"(fields={'STATE_FIELDS_PRIOR' if fields is als.STATE_FIELDS_PRIOR else 'STATE_FIELDS'}, "
              f"prior_anchor_density={density}, native_res={native_res}, "
-             f"rt_density={rt_density}, state_interp={state_interp!r})...", flush=True)
+             f"rt_density={rt_density}, state_interp={state_interp!r}, "
+             f"g_ratio={g_ratio:g})...", flush=True)
         A = render_prior_image(args.fpa, band, absco, wide_inst, geo, solar, albedo,
-                               tiles, args.g_ratio, fields, density, label,
+                               tiles, g_ratio, fields, density, label,
                                native_res=native_res, rt_density=rt_density,
                                state_interp=state_interp)
         np.save(out_root / f"prior_{label}_fpa{args.fpa}.npy", A)
@@ -354,10 +356,12 @@ def main() -> int:
 
     _plot(truth_A, residual_rms_by_row, args.fpa, plot_dir)
     _plot_2d(truth_A, resid_by_label, args.fpa, plot_dir)
-    rt_densities_all = sorted(set(rt_sweep_densities) | ({1.0} if args.highres else set()))
+    rt_densities_all = sorted(set(rt_sweep_densities))
     if rt_densities_all:
         _plot_rt_sweep(residual_rms_by_row, rt_densities_all, args.fpa, plot_dir,
                       snr=gdt.DEFAULT_SNR_BY_FPA.get(args.fpa))
+    _plot_g_ratio_sweep(residual_rms_by_row, args.fpa, plot_dir,
+                       snr=gdt.DEFAULT_SNR_BY_FPA.get(args.fpa))
     if args.anchor_schematic:
         _plot_anchor_schematic(truth_A, args.fpa, args.schematic_row, args.g_ratio, plot_dir)
     if args.bin_sample_counts:
@@ -373,19 +377,70 @@ def main() -> int:
 
 
 def _plot(truth_A, residual_rms_by_row, fpa, plot_dir):
+    """One curve per config. Colour is grouped by MECHANISM, not just an
+    arbitrary per-line cycle -- with >10 configs the default matplotlib
+    cycle wraps and reuses colours across genuinely different families,
+    which is actively misleading here since the two families have a real,
+    different shape: bingrid_* (G-bin state, piecewise-reconstructed onto
+    the anchor grid) rings/oscillates from the coarse interpolation between
+    bin centres; nativegrid_ad<d>/native_ad<d> (state built directly on a
+    fine anchor grid, no bin layer) are much smoother. Blues = bingrid
+    family (solid=linear downscale, dashed=nearest, darker=smaller g_ratio
+    i.e. finer/more bins); oranges = native family (dotted, darker=denser
+    anchor grid). Anything else falls back to the default cycle.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(11, 6))
     rows = np.arange(truth_A.shape[0])
-    for label, pct_row in residual_rms_by_row.items():
-        ax.plot(rows, pct_row, label=label, lw=1.2)
+
+    bingrid, native, other = {}, {}, []
+    for label in residual_rms_by_row:
+        parsed = _bingrid_config_from_label(label)
+        if parsed is not None:
+            g_ratio, kind, _density = parsed
+            bingrid[label] = (g_ratio, kind)
+            continue
+        d = _rt_density_from_label(label)
+        if d is not None:
+            native[label] = d
+            continue
+        other.append(label)
+
+    def _log_frac(x, lo, hi):
+        return 0.0 if hi == lo else (np.log(x) - np.log(lo)) / (np.log(hi) - np.log(lo))
+
+    if bingrid:
+        g_ratios = [g for g, _ in bingrid.values()]
+        g_lo, g_hi = min(g_ratios), max(g_ratios)
+        for label, (g_ratio, kind) in sorted(bingrid.items(), key=lambda kv: -kv[1][0]):
+            # smaller g_ratio (more bins, finer) -> darker
+            shade = 0.85 - 0.55 * (1.0 - _log_frac(g_ratio, g_lo, g_hi))
+            ax.plot(rows, residual_rms_by_row[label], color=plt.cm.Blues(shade),
+                    ls="-" if kind == "linear" else "--", lw=1.1, label=label)
+
+    if native:
+        densities = list(native.values())
+        d_lo, d_hi = min(densities), max(densities)
+        for label, d in sorted(native.items(), key=lambda kv: kv[1]):
+            # denser anchor grid -> darker
+            shade = 0.3 + 0.6 * _log_frac(d, d_lo, d_hi)
+            ax.plot(rows, residual_rms_by_row[label], color=plt.cm.Oranges(shade),
+                    ls=":", lw=1.3, label=label)
+
+    for label in other:
+        ax.plot(rows, residual_rms_by_row[label], lw=1.2, label=label)
+
     ax.set_xlabel("detector row")
     ax.set_ylabel("residRMS / mean|truth| (%)")
     ax.set_yscale("log")
-    ax.set_title(f"Prior-only forward residual by row, FPA{fpa} (no solve)")
-    ax.legend(fontsize=8, ncol=2)
+    ax.set_title(f"Prior-only forward residual by row, FPA{fpa} (no solve)\n"
+                "blue = bingrid (solid=linear, dashed=nearest downscale, darker=finer g_ratio)"
+                "  |  orange dotted = nativegrid/native (darker=denser anchor grid)",
+                fontsize=10.5)
+    ax.legend(fontsize=7, ncol=2)
     ax.grid(alpha=0.3)
     fig.tight_layout()
     out = plot_dir / f"forward_check_residual_by_row_fpa{fpa}.png"
@@ -420,7 +475,9 @@ def _plot_rt_sweep(residual_rms_by_row, densities, fpa, plot_dir, snr=None):
 
     spacing_km, med_all, max_all, med_hot, med_smooth = [], [], [], [], []
     for d in densities:
-        label = "highres" if d == 1.0 else f"native_ad{d:g}"
+        label = f"nativegrid_ad{d:g}"
+        if label not in residual_rms_by_row:
+            label = f"native_ad{d:g}"  # pre-rename on-disk data, still readable
         if label not in residual_rms_by_row:
             continue
         pct_row = residual_rms_by_row[label]
@@ -458,6 +515,80 @@ def _plot_rt_sweep(residual_rms_by_row, densities, fpa, plot_dir, snr=None):
     ax.grid(alpha=0.3, which="both")
     fig.tight_layout()
     out = plot_dir / f"forward_check_rt_sweep_fpa{fpa}.png"
+    fig.savefig(out, dpi=150)
+    print(f"saved {out}")
+    plt.close(fig)
+
+
+def _bingrid_config_from_label(label):
+    """Parse 'bingrid_g<ratio>_<linear|nearest>_ad<density>' back into
+    (g_ratio, interp_kind, anchor_density), or None if `label` isn't one of
+    these g_ratio-sweep configs."""
+    import re
+    m = re.match(r"^bingrid_g([0-9.]+)_(linear|nearest)_ad([0-9.]+)$", label)
+    if not m:
+        return None
+    return float(m.group(1)), m.group(2), float(m.group(3))
+
+
+def _plot_g_ratio_sweep(residual_rms_by_row, fpa, plot_dir, snr=None):
+    """Bin-grid convergence-to-truth: residual vs. g_ratio (equivalently,
+    vs. G, since G = width/g_ratio) at whatever anchor density(ies) the
+    'bingrid_g<ratio>_<kind>_ad<density>' labels in `residual_rms_by_row`
+    were rendered at. One line per (interp kind, anchor density) found.
+    Overlays the matching native-grid ceiling (`nativegrid_ad<density>`) at
+    each density present, as a horizontal reference -- what the bin-grid
+    sweep should converge onto as g_ratio shrinks.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    by_group = {}  # (kind, density) -> [(g_ratio, med, mx), ...]
+    for label, pct_row in residual_rms_by_row.items():
+        parsed = _bingrid_config_from_label(label)
+        if parsed is None:
+            continue
+        g_ratio, kind, density = parsed
+        by_group.setdefault((kind, density), []).append(
+            (g_ratio, float(np.nanmedian(pct_row)), float(np.nanmax(pct_row))))
+
+    if not by_group:
+        print("_plot_g_ratio_sweep: no bingrid_g<ratio>_<kind>_ad<density> labels found, skipping")
+        return
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    colors = {"linear": "C0", "nearest": "C1"}
+    for (kind, density), rows in sorted(by_group.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+        rows.sort(key=lambda r: -r[0])  # coarse (large g_ratio) first
+        g_ratios = [r[0] for r in rows]
+        meds = [r[1] for r in rows]
+        maxs = [r[2] for r in rows]
+        c = colors.get(kind, None)
+        ax.plot(g_ratios, meds, "o-", color=c, label=f"{kind} ad{density:g}: median", lw=1.6)
+        ax.plot(g_ratios, maxs, "o--", color=c, alpha=0.6, label=f"{kind} ad{density:g}: max", lw=1.2)
+
+        ceiling_label = f"nativegrid_ad{density:g}"
+        if ceiling_label not in residual_rms_by_row:
+            ceiling_label = f"native_ad{density:g}"  # pre-rename on-disk fallback
+        if ceiling_label in residual_rms_by_row:
+            ceil_pct = residual_rms_by_row[ceiling_label]
+            ax.axhline(float(np.nanmax(ceil_pct)), color=c, ls=":", lw=1.2, alpha=0.8,
+                      label=f"{ceiling_label} (native-grid ceiling): max")
+
+    if snr:
+        ax.axhline(100.0 / snr, color="0.3", ls=":", lw=1.4,
+                  label=f"instrument noise floor (1/SNR={snr:g})")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.invert_xaxis()  # smaller g_ratio (more bins, finer) to the right
+    ax.set_xlabel("g_ratio (log scale -- more bins / finer to the right)")
+    ax.set_ylabel("residRMS / mean|truth| (%)")
+    ax.set_title(f"Bin-grid convergence to truth, FPA{fpa} (prior=truth exactly, no solve)")
+    ax.legend(fontsize=7.5, ncol=2)
+    ax.grid(alpha=0.3, which="both")
+    fig.tight_layout()
+    out = plot_dir / f"forward_check_g_ratio_sweep_fpa{fpa}.png"
     fig.savefig(out, dpi=150)
     print(f"saved {out}")
     plt.close(fig)
@@ -790,7 +921,7 @@ def _plot_bin_vs_native_map(fpa, target_row, g_ratio, densities, plot_dir):
 
         _add_pixel_row_grid(ax, a_lo, a_hi)
 
-        label = "highres (=native_ad1)" if density == 1.0 else f"native_ad{density:g}"
+        label = f"nativegrid_ad{density:g}"
         ax.set_xlim(0, N_COLS)
         ax.set_xlabel("detector column")
         ax.set_title(f"{label}\n({len(anchor_rows)} anchors = {density:g} pts/pixel row, "
@@ -811,25 +942,18 @@ def _plot_bin_vs_native_map(fpa, target_row, g_ratio, densities, plot_dir):
 #: (short lane label, long description) -- the long form goes in the
 #: figure's caption text, not the lane title, to keep lanes narrow.
 _SCHEMATIC_LANES_LEGEND = [
-    ("G bins", "exact / coarse<d> / oversample<d> / structural all solve for "
-              "values at these SAME G bin positions (g_ratio sets G); they "
-              "differ only in how each bin's own VALUE is computed, not in "
-              "how many bins exist or where they sit."),
-    ("coarseD spl", "the SPARSER truth-sampling used to compute the G bin "
-                    "values above, for prior_anchor_density=D<1 -- feeds the "
-                    "same G bins, doesn't add resolution."),
-    ("oversampleD spl", "the DENSER truth-sampling used to compute the G bin "
-                        "values above, for prior_anchor_density=D>1 -- also "
-                        "feeds the same G bins; can only approach 'exact' "
-                        "from below, never exceed it."),
-    ("native_adD", "no G-bin layer at all -- the STATE ITSELF sits at these "
-                   "positions, D anchors per detector row (D=1 is 'highres', "
-                   "the RT-sweep's own density=1.0 point)."),
+    ("G bins", "the bingrid_g<N>_<kind>_ad<d> configs all solve for values at "
+              "these G bin positions (g_ratio sets G); they differ only in "
+              "how each bin's own value gets downscaled onto the native "
+              "anchor grid (state_interp kind), not in how many bins exist "
+              "or where they sit."),
+    ("nativegrid_adD", "no G-bin layer at all -- the STATE ITSELF sits at these "
+                       "positions, D anchors per detector row (D=1 is one "
+                       "exact-truth value per detector row)."),
 ]
 
 
 def _sampling_positions(fpa, target_row, g_ratio, display_pad=6,
-                        prior_anchor_densities=(0.25, 4.0),
                         rt_densities=(0.25, 1.0, 2.0, 4.0, 8.0, 16.0)):
     """Row-space positions of every config's actual sampling/anchor points,
     for the real production window containing `target_row` -- no RT, cheap
@@ -867,17 +991,9 @@ def _sampling_positions(fpa, target_row, g_ratio, display_pad=6,
 
     positions = {"G bins": clip(row_of_eta(bin_centers))}
 
-    for d in prior_anchor_densities:
-        n_anchor = max(2, int(round(d * len(bin_centers))))
-        anchor_pos = (bin_centers if n_anchor == len(bin_centers)
-                     else np.linspace(bin_centers.min(), bin_centers.max(), n_anchor))
-        tag = "coarse" if d < 1 else "oversample"
-        positions[f"{tag}{d:g} spl"] = clip(row_of_eta(anchor_pos))
-
     for d in rt_densities:
         anchor_rows = np.arange(a_lo, a_hi + 1e-9, 1.0 / d)
-        tag = "highres\n(ad1)" if d == 1.0 else f"native_ad{d:g}"
-        positions[tag] = clip(anchor_rows)
+        positions[f"nativegrid_ad{d:g}"] = clip(anchor_rows)
 
     return row_lo, row_hi, disp_lo, disp_hi, positions
 
@@ -979,28 +1095,47 @@ def _plot_2d(truth_A, resid_by_label, fpa, plot_dir):
         print(f"saved {out}")
         plt.close(fig)
 
-    # -- comparison grid: all configs' pct residual on ONE shared colour
-    # scale, so amplitudes are directly comparable across configs rather
-    # than each panel auto-scaling to its own (very different) range --
-    labels = list(resid_by_label.keys())
-    pct_all = {lb: resid_by_label[lb] / cont * 100.0 for lb in labels}
+    # -- comparison grid: bingrid (left column) vs. native-grid (right
+    # column) pct residual, on ONE shared colour scale, so amplitudes are
+    # directly comparable both within and across the two families --
+    # 'nearest' downscaled bingrid configs excluded (rejected 2026-08-19,
+    # see forward_check_g_ratio_sweep_fpa<N>.png -- 'linear' only from here
+    # on). Each column sorted coarse->fine (bingrid: descending g_ratio;
+    # native: ascending density), row-aligned by that ordering, NOT by
+    # matched density -- the two families' own density axes don't correspond
+    # 1:1, this is just "coarsest at top" for each column independently.
+    labels_bingrid = sorted(
+        (lb for lb in resid_by_label if (parsed := _bingrid_config_from_label(lb)) is not None
+         and parsed[1] == "linear"),
+        key=lambda lb: -_bingrid_config_from_label(lb)[0])
+    labels_native = sorted(
+        (lb for lb in resid_by_label if _rt_density_from_label(lb) is not None),
+        key=_rt_density_from_label)
+    if not labels_bingrid and not labels_native:
+        print("_plot_2d: no bingrid_*(linear)/native(grid)_ad* labels present, skipping "
+             "comparison grid")
+        return
+    pct_all = {lb: resid_by_label[lb] / cont * 100.0 for lb in labels_bingrid + labels_native}
     shared_max = max(float(np.nanmax(np.abs(p))) for p in pct_all.values()) or 1.0
     shared_lin = min(float(np.nanmedian(np.abs(p[np.isfinite(p)]))) or shared_max * 1e-3
                      for p in pct_all.values())
 
-    ncols = min(3, len(labels))
-    nrows = int(np.ceil(len(labels) / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 5.2 * nrows), squeeze=False)
-    for i, label in enumerate(labels):
-        ax = axes[i // ncols][i % ncols]
-        im = ax.imshow(pct_all[label], aspect="auto", cmap="RdBu_r", origin="upper",
-                       norm=SymLogNorm(linthresh=shared_lin, vmin=-shared_max,
-                                      vmax=shared_max, base=10))
-        ax.set_title(label, fontsize=11)
-        ax.set_xlabel("detector column")
-        ax.set_ylabel("detector row")
-    for j in range(len(labels), nrows * ncols):
-        axes[j // ncols][j % ncols].axis("off")
+    nrows = max(len(labels_bingrid), len(labels_native))
+    fig, axes = plt.subplots(nrows, 2, figsize=(10.4, 5.2 * nrows), squeeze=False)
+    im = None
+    for col, col_labels in enumerate((labels_bingrid, labels_native)):
+        for row in range(nrows):
+            ax = axes[row][col]
+            if row >= len(col_labels):
+                ax.axis("off")
+                continue
+            label = col_labels[row]
+            im = ax.imshow(pct_all[label], aspect="auto", cmap="RdBu_r", origin="upper",
+                           norm=SymLogNorm(linthresh=shared_lin, vmin=-shared_max,
+                                          vmax=shared_max, base=10))
+            ax.set_title(label, fontsize=11)
+            ax.set_xlabel("detector column")
+            ax.set_ylabel("detector row")
     fig.colorbar(im, ax=axes, fraction=0.02, pad=0.02, label="residual / |truth| (%)")
     fig.suptitle(f"FPA{fpa} prior-only forward residual, all configs (shared colour scale, "
                 f"no solve)", fontsize=13)
