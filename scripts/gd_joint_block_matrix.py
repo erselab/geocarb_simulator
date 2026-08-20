@@ -81,6 +81,7 @@ ARCHIVE = REPO_ROOT / "analytic_jacobian_testing" / "results"
 from geocarb_gert import along_slit_scene as als  # noqa: E402
 from geocarb_gert.gd_polynomials import xy_to_wavelength_slit  # noqa: E402
 from geocarb_gert.gd_render import s_max  # noqa: E402
+from geocarb_gert.mission_config import RetrievalDefaults  # noqa: E402
 
 N_COLS = 1024
 FREE_SETS = {"co2": "co2_ppm", "co2p": "co2_ppm,p_surface_hpa"}
@@ -103,14 +104,16 @@ SCENES = {
 }
 
 
-def config_id(free_key, nwin, gratio, adens, si, scene="realistic", barcode_bars=32):
-    """`{free}-{nwin}-g{gratio}[-ad{adens}][-{si}][-{scene}[bars]]`.
+def config_id(free_key, nwin, gratio, adens, si, scene="realistic", barcode_bars=32,
+              prior_fields="exact"):
+    """`{free}-{nwin}-g{gratio}[-ad{adens}][-{si}][-{scene}[bars]][-pf-{prior_fields}]`.
 
     Elides every non-default piece (`adens==1`, `si="linear"`,
-    `scene="realistic"`) so a config at the closed regression's own defaults
-    gets EXACTLY that regression's own id (`co2p-58-g1`, no suffix) --
-    which is what makes the archive-reuse lookup in `resolve_existing` a
-    simple path check rather than a translation table.
+    `scene="realistic"`, `prior_fields="exact"`) so a config at the closed
+    regression's own defaults gets EXACTLY that regression's own id
+    (`co2p-58-g1`, no suffix) -- which is what makes the archive-reuse
+    lookup in `resolve_existing` a simple path check rather than a
+    translation table.
 
     `si` is the `state_interp` kind string (`"linear"`/`"nearest"`) --
     found 2026-08-19 (user): the boolean `state_interp` this used to encode
@@ -118,6 +121,13 @@ def config_id(free_key, nwin, gratio, adens, si, scene="realistic", barcode_bars
     `build_forward_state`'s old exact-truth bypass. The closed regression
     only ever archived `state_interp=True` (today's `"linear"`), so archive
     reuse is unaffected -- `-nosi` configs were never actually archived.
+
+    `prior_fields` names a key in `als.PRIOR_FIELD_SETS` (2026-08-20) --
+    what the PRIOR knows, orthogonal to `scene` (what the TRUTH is). Always
+    appended last and with its own `-pf-` marker (rather than folded into
+    the bare `-{name}` scheme `scene` uses) since prior-field names contain
+    underscores themselves (`co2_plus1pct_psurf_minus1pct`) and would be
+    ambiguous to split back out of a plain hyphen-joined id otherwise.
     """
     cid = f"{free_key}-{nwin}-g{gratio:g}"
     if adens != 1:
@@ -129,11 +139,16 @@ def config_id(free_key, nwin, gratio, adens, si, scene="realistic", barcode_bars
         if scene in ("barcode", "realistic-barcode"):
             tag += str(barcode_bars)
         cid += f"-{tag}"
+    if prior_fields != "exact":
+        cid += f"-pf-{prior_fields}"
     return cid
 
 
 def parse_config(cid):
     """Inverse of `config_id`, best-effort (used only for display)."""
+    prior_fields = "exact"
+    if "-pf-" in cid:
+        cid, prior_fields = cid.split("-pf-", 1)
     parts = cid.split("-")
     free_key, nwin, gtag = parts[0], parts[1], parts[2]
     adens, si, scene, barcode_bars = 1, "linear", "realistic", 32
@@ -148,16 +163,17 @@ def parse_config(cid):
             scene, barcode_bars = "realistic-barcode", int(p[len("realisticbarcode"):])
         elif p.startswith("barcode"):
             scene, barcode_bars = "barcode", int(p[len("barcode"):])
-    return free_key, int(nwin), float(gtag[1:]), adens, si, scene, barcode_bars
+    return free_key, int(nwin), float(gtag[1:]), adens, si, scene, barcode_bars, prior_fields
 
 
 def is_bare(cid: str) -> bool:
     """True iff this id matches the closed regression's own naming exactly
-    (anchor_density=1, state_interp="linear", scene=realistic) -- the only
-    case an archive lookup is meaningful (the archive has no barcode/uniform
-    runs at all)."""
+    (anchor_density=1, state_interp="linear", scene=realistic,
+    prior_fields="exact") -- the only case an archive lookup is meaningful
+    (the archive has no barcode/uniform/imperfect-prior runs at all)."""
     parsed = parse_config(cid)
-    return "-ad" not in cid and parsed[4] == "linear" and parsed[5] == "realistic"
+    return ("-ad" not in cid and parsed[4] == "linear" and parsed[5] == "realistic"
+           and parsed[7] == "exact")
 
 
 # ---------------------------------------------------------------- running --
@@ -177,7 +193,7 @@ def resolve_existing(cid, jacobian, tag_dir):
 
 
 def run_one(cid, jacobian, n_workers, env, tag_dir, force=False):
-    free_key, nwin, gratio, adens, si, scene, barcode_bars = parse_config(cid)
+    free_key, nwin, gratio, adens, si, scene, barcode_bars, prior_fields = parse_config(cid)
     path, source = (None, None) if force else resolve_existing(cid, jacobian, tag_dir)
     if path is not None:
         tag = "archive (already validated)" if source == "archive" else "exists"
@@ -199,11 +215,16 @@ def run_one(cid, jacobian, n_workers, env, tag_dir, force=False):
         cmd += ["--barcode", "--barcode-bars", str(barcode_bars)]
     if sc["realistic_barcode"]:
         cmd += ["--realistic-barcode", "--barcode-bars", str(barcode_bars)]
+    if prior_fields != "exact":
+        cmd += ["--prior-fields", prior_fields]
     if env.get("_HIRES_ONLY") == "1":
         cmd.append("--hires-only")
+    if env.get("_CONFIG_PATH"):
+        cmd += ["--config", env["_CONFIG_PATH"]]
     print(f"  {cid:26s} {jacobian:8s} running ...", flush=True)
     t0 = time.time()
-    r = subprocess.run(cmd, cwd=REPO_ROOT, env={k: v for k, v in env.items() if k != "_HIRES_ONLY"},
+    _internal_keys = ("_HIRES_ONLY", "_CONFIG_PATH")
+    r = subprocess.run(cmd, cwd=REPO_ROOT, env={k: v for k, v in env.items() if k not in _internal_keys},
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     dt = time.time() - t0
     if r.returncode != 0:
@@ -289,19 +310,39 @@ def compare(a, b):
 # ------------------------------------------------------------------- main --
 
 def main() -> int:
+    # Parse just --config before building the real parser below, so its
+    # own default values (anchor_density/state_interp/jacobian/prior_fields)
+    # can reflect it -- same two-pass pattern gd_joint_block_whole_slit_
+    # sweep.py's own _resolve_cli_defaults() uses, for the same reason.
+    _pre = argparse.ArgumentParser(add_help=False)
+    _pre.add_argument("--config", type=str, default=None)
+    _pre_args, _ = _pre.parse_known_args()
+    _cfg = RetrievalDefaults.from_yaml(_pre_args.config)
+
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--config", type=str, default=None,
+                    help="path to retrieval_defaults.yml, forwarded as --config to every "
+                         "shelled-out gd_joint_block_whole_slit_sweep.py invocation (default: "
+                         "the checked-in input/retrieval_defaults.yml). Only --anchor-density/"
+                         "--state-interp/--jacobian/--prior-fields's own defaults below read "
+                         "from it directly -- --free and --g-ratio keep this script's own "
+                         "historical defaults ('co2p', '1'), which deliberately differ from "
+                         "the single-run sweep script's defaults ('co2_ppm', '3') and would "
+                         "silently change if sourced from the same config value.")
     ap.add_argument("--tag", default="default",
                     help="namespaces this run's output under results/config_matrix/<tag>/ "
                          "so different sweep sessions never collide (default: 'default')")
     ap.add_argument("--free", default="co2p", help="comma list from {co2,co2p} (default: co2p)")
     ap.add_argument("--n-windows", default="58", help="comma list of ints (default: 58)")
     ap.add_argument("--g-ratio", default="1", help="comma list of floats (default: 1)")
-    ap.add_argument("--anchor-density", default="1", help="comma list of ints (default: 1)")
-    ap.add_argument("--state-interp", default="linear",
+    ap.add_argument("--anchor-density", default=str(_cfg.anchor_density),
+                    help="comma list of ints (default: input/retrieval_defaults.yml's "
+                         "solve.anchor_density)")
+    ap.add_argument("--state-interp", default=_cfg.state_interp,
                     help="comma list of state_interp kinds, linear/nearest "
-                         "(default: linear)")
-    ap.add_argument("--jacobian", default="analytic",
+                         "(default: input/retrieval_defaults.yml's solve.state_interp)")
+    ap.add_argument("--jacobian", default=_cfg.jacobian,
                     help="comma list from {analytic,fd} (default: analytic only -- FD's "
                          "own agreement with it is already established: PASS on all 16 "
                          "closed-regression configs plus both anchor_density=4 configs, "
@@ -321,6 +362,11 @@ def main() -> int:
                          "along-slit truth.")
     ap.add_argument("--barcode-bars", type=int, default=32,
                     help="bars for barcode/realistic-barcode scenes (default 32)")
+    ap.add_argument("--prior-fields", default=_cfg.prior_fields,
+                    help=f"comma list of named prior field-sets from als.PRIOR_FIELD_SETS "
+                         f"(default: exact, prior=truth) -- {sorted(als.PRIOR_FIELD_SETS)}. "
+                         f"Orthogonal to --scene: --scene controls what the TRUTH is, "
+                         f"--prior-fields controls what the PRIOR knows about it.")
     ap.add_argument("--hires-only", action="store_true",
                     help="skip coarse -- correct whenever only anchor_density is swept, "
                          "since coarse cannot depend on it at all")
@@ -349,10 +395,14 @@ def main() -> int:
     for sc in scenes:
         if sc not in SCENES:
             ap.error(f"--scene: {sc!r} not in {list(SCENES)}")
+    prior_fields_list = parse_list(args.prior_fields, str)
+    for pf in prior_fields_list:
+        if pf not in als.PRIOR_FIELD_SETS:
+            ap.error(f"--prior-fields: {pf!r} not in {sorted(als.PRIOR_FIELD_SETS)}")
 
-    cids = [config_id(f, n, g, a, s, scene, args.barcode_bars)
-           for f, n, g, a, s, scene
-           in itertools.product(frees, nwins, gratios, adenss, sis, scenes)]
+    cids = [config_id(f, n, g, a, s, scene, args.barcode_bars, pf)
+           for f, n, g, a, s, scene, pf
+           in itertools.product(frees, nwins, gratios, adenss, sis, scenes, prior_fields_list)]
     n_workers = args.n_workers or max(1, (os.cpu_count() or 4) - 2)
 
     tag_dir = REPO_ROOT / "results" / "config_matrix" / args.tag
@@ -369,6 +419,8 @@ def main() -> int:
         env[var] = "1"  # see closed regression's own note: avoids BLAS oversubscription
     if args.hires_only:
         env["_HIRES_ONLY"] = "1"
+    if args.config:
+        env["_CONFIG_PATH"] = args.config
 
     rows = np.arange(float(N_COLS))
     _, s = xy_to_wavelength_slit(2, np.full(N_COLS, 512.0), rows)
@@ -387,7 +439,8 @@ def main() -> int:
     print(f"tag: {args.tag}   {len(cids)} configs x {len(jacobians)} solvers, "
          f"{n_workers} workers, hires_only={args.hires_only}")
     print(f"axes: free={frees} n_windows={nwins} g_ratio={gratios} "
-         f"anchor_density={adenss} state_interp={sis} scene={scenes}")
+         f"anchor_density={adenss} state_interp={sis} scene={scenes} "
+         f"prior_fields={prior_fields_list}")
     print(f"gert: {gert_dir}\n")
 
     scored, timings, sources = {}, {}, {}
@@ -412,7 +465,7 @@ def main() -> int:
     emit(f"# Config matrix -- tag `{args.tag}`\n")
     emit(f"Axes: free={frees}, n_windows={nwins}, g_ratio={gratios}, "
         f"anchor_density={adenss}, state_interp={sis}, jacobian={jacobians}, "
-        f"scene={scenes}, hires_only={args.hires_only}\n")
+        f"scene={scenes}, prior_fields={prior_fields_list}, hires_only={args.hires_only}\n")
     emit("## Accuracy against truth\n")
     hdr = (f"| {'config':26s} | jac(req) | solve  | jac(used) | {'CO2 rms':>9s} | "
           f"{'CO2 max':>9s} | {'dP rms':>8s} | {'dP max':>8s} | {'residRMS':>10s} | src |")

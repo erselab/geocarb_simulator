@@ -10,14 +10,16 @@ from __future__ import annotations
 from gert.instrument import ILS, SpectralWindow
 from gert.instrument_config import Instrument
 
+from .mission_config import GeoCarbInstrumentConfig as _GeoCarbInstrumentConfig
+
 # (label, wn_min, wn_max, molecules, resolving_power)
 # GeoCarb resolving power λ/Δλ ≈ 20 000 (O2 A) … ≈ 12 000 (2.3 µm).
-GEOCARB_BANDS = [
-    ("O2_A",     12950.0, 13190.0, ["o2", "h2o"],                 19000.0),
-    ("CO2_weak",  6166.0,  6286.0, ["co2", "h2o"],                20000.0),
-    ("CO2_strong", 4810.0, 4897.0, ["co2", "h2o"],                20000.0),
-    ("CH4_CO",    4258.60, 4350.69, ["ch4", "co", "h2o", "n2o"],  12000.0),
-]
+# Sourced from input/geocarb_instrument.yml's bands: block at import time
+# (Phase B of the config-consolidation plan) -- was a typed-inline literal
+# list. Kept as a module constant since it's imported bare in several
+# places (e.g. scripts/gd_test.py's GEOCARB_BANDS[fpa]); a non-default
+# instrument config must go through GeoCarbInstrumentConfig.bands directly.
+GEOCARB_BANDS = _GeoCarbInstrumentConfig.from_yaml().bands
 
 
 def build_geocarb_instrument(bands=GEOCARB_BANDS, channels_per_fwhm: int = 3,

@@ -73,21 +73,18 @@ from scipy.interpolate import interp1d
 #: has its own, generally shorter and more variable, spatial scale. So this
 #: default is right for the current scene and should NOT be carried over
 #: uncritically to real data or to a scene with aerosols.
-DEFAULT_CORR_LENGTH_ETA = {
-    "co2_ppm": 0.0071,            # ~10 km -- the CO2/CO hot-spot scale; longer would
-                                  # wash out the point sources the study is about
-    "ch4_ppb": 0.0714,            # ~100 km -- its own broad plume width
-    "co_ppb": 0.0393,             # ~55 km  -- its own broad plume width
-    "h2o_surface_vmr": 0.357,     # ~500 km -- the smooth climatological tanh gradient
-    "p_surface_hpa": 0.100,       # ~140 km -- the topographic depression width
-    # Surface albedo is the one row whose structure is SHORTER than the gas
-    # features, not longer: `along_slit_scene.ALBEDO_CORR_KM` = 30 km of
-    # within-patch variability, on top of land-cover boundaries only
-    # ALBEDO_EDGE_KM ~ 3 km (about one detector row) wide. This is Sec.4.1's
-    # point that albedo wants denser bins and a shorter correlation length
-    # than a well-mixed gas -- see `albedo_positions_for` below.
-    "albedo": 0.0214,             # ~30 km -- ALBEDO_CORR_KM / SLIT_HALF_KM
-}
+# Sourced from input/retrieval_defaults.yml's correlation_length_eta: block
+# at import time (Phase C of the config-consolidation plan) -- was a
+# typed-inline dict. This is a retrieval-methodology default (how much
+# structure each row's prior assumes), not instrument physics, hence
+# RetrievalDefaults rather than GeoCarbInstrumentConfig -- kept as a module
+# constant since it's read bare below and would otherwise need every
+# caller updated. Per-row rationale (co2_ppm ~10km hot-spot scale,
+# p_surface_hpa ~140km topographic depression, albedo ~30km
+# ALBEDO_CORR_KM/SLIT_HALF_KM, etc.) is unchanged and lives in
+# retrieval_defaults.yml's own comments now.
+from .mission_config import RetrievalDefaults as _RetrievalDefaults  # noqa: E402
+DEFAULT_CORR_LENGTH_ETA = _RetrievalDefaults.from_yaml().corr_length_eta
 
 
 #: Where a state row enters the forward model. This is not cosmetic

@@ -157,7 +157,7 @@ def _posterior_error_plot(summary: dict, fpa: int, free_key: str, param: str, pl
     for (cid, jacobian), sc in summary["scored"].items():
         if jacobian != "analytic":
             continue
-        fk, nwin, gratio, adens, si, scene, _ = parse_config(cid)
+        fk, nwin, gratio, adens, si, scene, _, _ = parse_config(cid)
         if fk != free_key or "hires" not in sc:
             continue
         st = sc["hires"].get("_state", {})
@@ -211,7 +211,7 @@ def _sweep_rms_plot(summary: dict, fpa: int, plot_dir: Path):
     for (cid, jacobian), sc in summary["scored"].items():
         if jacobian != "analytic" or "hires" not in sc:
             continue
-        fk, nwin, gratio, adens, si, scene, _ = parse_config(cid)
+        fk, nwin, gratio, adens, si, scene, _, _ = parse_config(cid)
         r = sc["hires"]
         for param in ("co2_ppm", "p_surface_hpa"):
             for metric in ("rms", "max"):

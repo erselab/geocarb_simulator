@@ -1,0 +1,58 @@
+# retrieval_defaults.yml -- sweep/retrieval-algorithm defaults.
+#
+# Loaded by geocarb_gert.mission_config.RetrievalDefaults.from_yaml().
+# CLI flags in scripts/gd_joint_block_whole_slit_sweep.py and
+# scripts/gd_joint_block_matrix.py read these as their argparse defaults;
+# any flag passed explicitly on the command line still overrides -- this is
+# what SLURM array scripts vary per task (e.g. --g-ratio, --anchor-density).
+# Edit this file freely per experiment; unlike geocarb_instrument.yml it is
+# NOT calibration data.
+#
+# Every value below was copied from the hardcoded module constant / argparse
+# default it replaces (see the "source" comment on each block) as of
+# 2026-08-20.
+
+# source: scripts/gd_joint_block_whole_slit_sweep.py module constants
+tiling:
+  min_window: 4    # MIN_WINDOW
+  pad: 4           # PAD
+  g_ratio: 3       # G_RATIO
+
+# source: scripts/gd_joint_block_whole_slit_sweep.py argparse defaults
+solve:
+  gamma: 3.0
+  sigma_abs: 0.10
+  jacobian: analytic          # "fd" | "analytic"
+  state_interp: linear        # "linear" | "nearest"
+  anchor_density: 1
+  prior_form: exponential     # "exponential" | "tikhonov"
+  prior_fields: exact         # key into geocarb_gert.along_slit_scene.PRIOR_FIELD_SETS
+  free: [co2_ppm]
+
+# source: scripts/gd_joint_block_retrieve.py::FPA = 2 (single-band today;
+# see docs/PROJECT_STATUS.md / the config-consolidation plan Phase E for
+# multi-band). --fpa accepts a comma list; this is the one-element default.
+band:
+  default_fpa: [2]
+
+# source: geocarb_gert/joint_state.py::DEFAULT_CORR_LENGTH_ETA -- how much
+# spatial structure each row's prior assumes, in eta (unitless, -1..+1
+# across the full slit). NOT a single physically-motivated scale to reuse
+# uncritically on real data or a scene with aerosols -- see the module's
+# own docstring note on p_surface (real surface-pressure bias is usually
+# dominated by scattering-height/aerosol uncertainty, a different and more
+# variable scale).
+correlation_length_eta:
+  co2_ppm: 0.0071          # ~10 km -- the CO2/CO hot-spot scale; longer would wash out the point sources
+  ch4_ppb: 0.0714           # ~100 km -- its own broad plume width
+  co_ppb: 0.0393            # ~55 km -- its own broad plume width
+  h2o_surface_vmr: 0.357    # ~500 km -- the smooth climatological tanh gradient
+  p_surface_hpa: 0.100      # ~140 km -- the topographic depression width
+  albedo: 0.0214            # ~30 km -- ALBEDO_CORR_KM / SLIT_HALF_KM; shorter than the gas rows
+
+# source: scripts/gd_joint_block_whole_slit_sweep.py --n-lookup-samples /
+# --out-root's own documented conditional defaults (400/results under
+# prior_fields=exact, 5600/results/realistic_prior otherwise)
+sampling:
+  n_lookup_samples_default: 400
+  n_lookup_samples_imperfect_prior: 5600

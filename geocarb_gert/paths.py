@@ -63,6 +63,36 @@ def gert_root(explicit: str | os.PathLike | None = None) -> Path:
     return Path(_HPC_FALLBACK)
 
 
+#: Final fallback for the config root, mirroring _HPC_FALLBACK above.
+_CONFIG_HPC_FALLBACK = "/scratch/scrowel3_lab/geocarb_simulator/input"
+
+
+def config_root(explicit: str | os.PathLike | None = None) -> Path:
+    """Resolve the ``input/`` directory holding ``geocarb_instrument.yml``
+    and ``retrieval_defaults.yml`` (see ``geocarb_gert.mission_config``).
+
+    Order: `explicit` argument, then ``$GEOCARB_CONFIG_ROOT``, then
+    ``<repo_root>/input``, then the HPC fallback -- the same
+    search-then-fallback shape as :func:`gert_root`, applied to this
+    project's own config files instead of the sibling ``gert`` checkout.
+
+    Parameters
+    ----------
+    explicit : path-like, optional
+        A caller-supplied override (e.g. a ``--config`` CLI argument's
+        directory). Returned as-is when given.
+    """
+    if explicit:
+        return Path(explicit)
+    env = os.environ.get("GEOCARB_CONFIG_ROOT")
+    if env:
+        return Path(env)
+    cand = REPO_ROOT / "input"
+    if cand.is_dir():
+        return cand
+    return Path(_CONFIG_HPC_FALLBACK)
+
+
 def describe_gert_root() -> str:
     """One-line provenance string for logs -- which path was chosen and why.
 

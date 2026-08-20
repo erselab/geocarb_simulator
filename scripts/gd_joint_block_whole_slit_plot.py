@@ -3,8 +3,19 @@
 (scripts/gd_joint_block_whole_slit_sweep.py) into slit-wide comparisons:
 true/coarse/hires CO2 profile, retrieval bias, per-window fit quality, and
 the adaptive window/G sizing itself. Every quantity here is reconstructed
-from the sweep's own saved state vectors (x_coarse, x_hires per window) --
-no re-solving.
+from the sweep's own saved StateSpec snapshots (`w["coarse"]["params"]
+["co2_ppm"]`/`w["hires"]["params"]["co2_ppm"]`, already-scaled physical ppm
+values per window) -- no re-solving.
+
+Reads `params["co2_ppm"]["values"]` directly rather than reconstructing
+via `w["prior_co2_ppm_bins"] * w["x_hires"]` (fixed 2026-08-20): that
+legacy top-level `prior_co2_ppm_bins` field is ALWAYS exact truth,
+kept only for old back-compat plotters -- it does not reflect
+`--prior-fields`, so the old reconstruction silently gave the wrong
+posterior for any non-"exact" prior run (right by coincidence only when
+prior=truth, since `prior_co2_ppm_bins` happens to equal the real prior
+in that one case). `gd_joint_block_matrix.py`'s own `stitch()` was
+never affected -- it always read `params[...]["values"]` this same way.
 
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_block_whole_slit_plot.py \\
         [results/gd_joint_block_whole_slit_fpa2_gratio1.pkl]
@@ -62,9 +73,14 @@ def main() -> int:
 
         bin_centers = w["bin_centers"]
         coarse_edges = 0.5 * (bin_centers[:-1] + bin_centers[1:]) if len(bin_centers) > 1 else np.array([])
-        retrieved_ppm_coarse = (w["prior_co2_ppm_bins"] * w["x_coarse"]
+        # Already-scaled physical ppm values, correct under any --prior-fields
+        # (see module docstring) -- positions are guaranteed == bin_centers by
+        # construction (state_spec_from_scene stores exactly the positions it
+        # was called with), so bin_centers is still the right x-axis to
+        # interpolate/bin against below.
+        retrieved_ppm_coarse = (np.asarray(w["coarse"]["params"]["co2_ppm"]["values"])
                                 if has_coarse else None)
-        retrieved_ppm_hires = w["prior_co2_ppm_bins"] * w["x_hires"]
+        retrieved_ppm_hires = np.asarray(w["hires"]["params"]["co2_ppm"]["values"])
 
         if len(bin_centers) > 1:
             idx = np.searchsorted(coarse_edges, eta_win)

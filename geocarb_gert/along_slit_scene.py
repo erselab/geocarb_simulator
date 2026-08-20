@@ -29,9 +29,11 @@ layered on top -- CO2 and CO hot spots are coincident (combustion
 co-emission); CH4's are independent.
 
 Coordinate convention: physical along-slit distance is linear in eta
-(eta=-1..+1 -> -1400..+1400 km, ~2800 km total, matching this repo's
-LongSlitGeoSatellite's slit_length_km=3000 default closely enough for a
-stress-test truth scene).
+(eta=-1..+1 -> -SLIT_HALF_KM..+SLIT_HALF_KM, ~2800 km total by default --
+sourced from input/geocarb_instrument.yml's geometry.slit_length_km since
+Phase B of the config-consolidation plan, which also brought
+LongSlitGeoSatellite's own default into exact agreement with this value
+rather than the two merely being close).
 """
 from __future__ import annotations
 
@@ -48,8 +50,16 @@ from model_sampler import pressure_to_alt_std_atm
 
 from .scene import _MW_RATIO, _std_temperature, _WELL_MIXED
 from .gd_render import available_cpus
+from .mission_config import GeoCarbInstrumentConfig as _GeoCarbInstrumentConfig
 
-SLIT_HALF_KM = 1400.0        # -> 2800 km total slit length
+#: Sourced from input/geocarb_instrument.yml's geometry.slit_length_km at
+#: import time (Phase B of the config-consolidation plan) -- was a bare
+#: 1400.0 literal. Kept as a module constant since it's imported bare
+#: throughout this package and scripts/; a non-default geometry config
+#: must read cfg.geometry.slit_half_km directly rather than this constant,
+#: which always reflects the checked-in default YAML. See
+#: geocarb_gert/mission_config.py.
+SLIT_HALF_KM = _GeoCarbInstrumentConfig.from_yaml().geometry.slit_half_km
 
 # -- baselines (geocarb_gert.scene.reference_atmosphere / _WELL_MIXED) --
 XCO2_BG_PPM = 415.0
@@ -366,6 +376,53 @@ STATE_FIELDS_PRIOR = {
     "co_ppb": lambda x: xco_ppb_prior(x),
     "h2o_surface_vmr": lambda x: h2o_surface_vmr(x),
     "p_surface_hpa": lambda x: p_surface_hpa_prior(x),
+}
+
+# -- uniform multiplicative-bias priors (2026-08-20) --
+#
+# A different failure mode from STATE_FIELDS_PRIOR's "missing localized
+# structure": here the prior keeps 100% of the truth's own spatial detail
+# (background + plume + hot spots for CO2, background + topography for
+# p_surface -- every term STATE_FIELDS has) and is wrong only in its
+# absolute level, by a constant factor everywhere along the slit. This
+# isolates "prior committed to the wrong absolute value" from "prior
+# missing spatial detail" -- PROJECT_STATUS.md Sec.5 Phase 2's two
+# distinct imperfect-prior questions -- rather than conflating both into
+# one experiment. First pair (2026-08-20): CO2 +1% alone, then CO2 +1%
+# together with p_surface -1%, to see whether a second simultaneously
+# mis-set row changes how much g_ratio/anchor_density resolution the
+# solve needs, the same conditioning question Phase 1's co2/co2p pair
+# asked of representation error.
+STATE_FIELDS_PRIOR_CO2_PLUS1PCT = {
+    "co2_ppm": lambda x: 1.01 * xco2_ppm(x),
+    "ch4_ppb": lambda x: xch4_ppb(x),
+    "co_ppb": lambda x: xco_ppb(x),
+    "h2o_surface_vmr": lambda x: h2o_surface_vmr(x),
+    "p_surface_hpa": lambda x: p_surface_hpa(x),
+}
+
+STATE_FIELDS_PRIOR_CO2_PLUS1PCT_PSURF_MINUS1PCT = {
+    "co2_ppm": lambda x: 1.01 * xco2_ppm(x),
+    "ch4_ppb": lambda x: xch4_ppb(x),
+    "co_ppb": lambda x: xco_ppb(x),
+    "h2o_surface_vmr": lambda x: h2o_surface_vmr(x),
+    "p_surface_hpa": lambda x: 0.99 * p_surface_hpa(x),
+}
+
+#: Standardized registry every prior-selecting call site reads from by
+#: NAME, instead of each caller wiring its own boolean/enum for one prior
+#: at a time (the pattern this replaces: `gd_joint_block_whole_slit_
+#: sweep.py`'s old `--realistic-prior` boolean, which could only ever
+#: mean "STATE_FIELDS_PRIOR or nothing"). "exact" (prior=truth) and
+#: "structural" (the old --realistic-prior=True case) are included so
+#: every prior configuration -- old and new -- goes through this same
+#: lookup; adding a new imperfect prior means adding one entry here, not
+#: a new flag at every call site.
+PRIOR_FIELD_SETS = {
+    "exact": STATE_FIELDS,
+    "structural": STATE_FIELDS_PRIOR,
+    "co2_plus1pct": STATE_FIELDS_PRIOR_CO2_PLUS1PCT,
+    "co2_plus1pct_psurf_minus1pct": STATE_FIELDS_PRIOR_CO2_PLUS1PCT_PSURF_MINUS1PCT,
 }
 
 

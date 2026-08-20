@@ -182,6 +182,35 @@ the actual limiting factor is prior *quality*, not grid resolution) are in
   mechanism setting the RT-resolution floor (`nearest_bin_scene`'s hard
   nearest-anchor assignment — never interpolated spectra — is first-order
   in anchor spacing with no inherent plateau).
+- **Two distinct, separable contributors to the forward-only residual,
+  quantified directly (2026-08-20)** — worth stating precisely, since
+  "resolution error" undersells that there are two different mechanisms
+  with different dominance regimes, not one:
+  - *Bin-interpolation error*: the G-bin state's own missing curvature
+    between bin centers (this is what `g_ratio` controls). Isolated by
+    holding `anchor_density=16` fixed and sweeping `g_ratio` alone
+    (`resid_bingrid_g<N>_linear_ad16_fpa2.npy`): residual RMS climbs from
+    1.44e-4 (`g_ratio=0.5`) to 8.96e-3 (`g_ratio=12`), a 62x range.
+  - *Pixel-to-anchor snap error*: `nearest_bin_scene`'s hard, non-
+    interpolated nearest-anchor assignment — present even with a
+    perfectly exact state at every anchor, since a whole neighborhood of
+    real pixels still gets stamped with one anchor's own spectrum.
+    Isolated using the `native`/`nativegrid` configs (no bin layer at
+    all — state built directly at anchor resolution, so nothing but this
+    mechanism can contribute): residual RMS falls from 4.58e-3
+    (`anchor_density=0.25`) to 1.11e-4 (`anchor_density=16`), first-order
+    in anchor spacing, confirming the qualitative claim above with real
+    numbers.
+  - **Which one dominates depends on where `g_ratio` sits, not a fixed
+    ranking.** Comparing the full bin+anchor residual (at fixed
+    `anchor_density=16`) against the anchor-only floor: at fine `g_ratio`
+    (0.5–1) the full residual sits right at the anchor floor (1.3x it) —
+    bin interpolation is already good enough not to matter, and the
+    pixel-snap floor is the actual bottleneck. At coarse `g_ratio` (6–12)
+    the full residual is 20–81x the anchor floor — bin-interpolation
+    error now dominates completely. Neither mechanism is negligible in
+    general; which one is the lever depends on which regime a given
+    config is in.
 - The realistic-prior forward-only residual comparisons: `bingrid_g<N>_
   <kind>_ad<d>` (G-bin state, prior=truth at each bin, downscaled onto a
   fixed anchor density) against `nativegrid_ad<d>`/`native_ad<d>` (no G-bin
@@ -277,6 +306,151 @@ ceiling at matching `(g_ratio, anchor_density)` — the floor retrieval RMS
 should approach if the solve is well-conditioned, since with prior=truth
 and no noise there's nothing else for the solve to correct; and (b) the
 instrument noise floor (`1/SNR`), same convention as every §3 plot.
+
+**Phase 1 result (2026-08-20)**: all 30 configs ran (`results/
+config_matrix/retrieval_bingrid_v1/REPORT.md`, figures under `plots/
+config_matrix/retrieval_bingrid_v1/`). CO2 rms bias improves
+monotonically as `g_ratio` shrinks for both free-parameter sets (e.g.
+`co2-58-g0.5-ad16` 0.019 ppm vs. `co2-58-g12-ad16` 1.26 ppm), and
+`anchor_density` gives a real but much smaller secondary improvement at
+fixed `g_ratio`; `co2p` shows higher bias than `co2`-only at matched
+settings, especially at loose `g_ratio` — the harder-conditioning
+question that config was designed to probe.
+
+Checked directly against §3's own forward-only residual (same
+`g_ratio`/`anchor_density=16` configs, `resid_bingrid_g<N>_linear_ad16_
+fpa2.npy`) — not just "does the solve approach the ceiling," which
+undersells it:
+
+| g_ratio | forward-only residRMS (no solve) | retrieved residRMS (co2) | improvement |
+|---|---|---|---|
+| 0.5 | 1.44e-4 | 1.59e-5 | 9.0x |
+| 1 | 1.47e-4 | 1.60e-5 | 9.2x |
+| 3 | 3.83e-4 | 1.90e-5 | 20.2x |
+| 6 | 2.25e-3 | 5.19e-5 | 43.4x |
+| 12 | 8.96e-3 | 2.19e-4 | 40.8x |
+
+The solve doesn't just approach the forward-only ceiling — it goes well
+below it, by 9x at fine `g_ratio` up to ~40x at coarse `g_ratio`. This
+ties directly to the two-mechanism split above (§3, "What's validated as
+of now"): the forward-only check freezes the state at exactly the bin-
+center truth value, so its residual is 100% representation error (bin-
+interpolation + pixel-snap, uncorrected). The real GN solve is free to
+move the state away from that exact value whenever doing so reduces the
+spectral residual — and it has more room to do that precisely where
+representation error is larger to begin with, which is why the
+improvement factor grows with `g_ratio` (more bin-interpolation error to
+partially correct) rather than staying flat.
+
+**The ppm-bias ceiling, checked directly (2026-08-20) — and it does NOT
+track the spectral-residual result.** The forward-only side has no ppm
+number stored, but it doesn't need re-rendering to get one: `prior_co2_
+ppm_bins` at each window's own `bin_centers` already **is** exact truth
+sampled at the bin scale (verified bit-identical against `als.STATE_
+FIELDS["co2_ppm"]` evaluated at the same positions), so stitching it
+across all 58 windows with the exact same `interp`-onto-`eta_rows`
+machinery `gd_joint_block_matrix.py`'s own `stitch()`/`score()` uses for
+the real posterior gives the representation-only ppm-bias ceiling with
+no forward-model rerun needed — an apples-to-apples "prior, unsolved" vs.
+"posterior, solved" comparison using identical scoring code:
+
+| g_ratio | ceiling rms | co2 retrieved rms | co2 ratio | co2p retrieved rms | co2p ratio |
+|---|---|---|---|---|---|
+| 0.5 | 0.0007 | 0.0193 | **27.6x worse** | 0.0155 | 22.1x worse |
+| 1 | 0.0021 | 0.0178 | **8.5x worse** | 0.0149 | 7.1x worse |
+| 3 | 0.0464 | 0.0379 | 0.82x (at ceiling) | 0.0360 | 0.78x (at ceiling) |
+| 6 | 0.2010 | 0.2454 | 1.22x worse | 0.1630 | 0.81x (at ceiling) |
+| 12 | 0.3311 | 1.2591 | 3.80x worse | 0.7786 | 2.35x worse |
+
+Unlike the spectral residual, which the solve always improved (9-40x),
+the ppm bias is *worse than not solving at all* at fine `g_ratio` — by
+more than an order of magnitude at `g_ratio=0.5`, where the unsolved
+prior is already essentially exact (0.0007 ppm) and the solve pushes it
+to 0.019 ppm. This is the two objectives (spectral fit vs. ppm accuracy)
+diverging once representation error exists: `prior=truth` is not
+actually the minimizer of the (noiseless) GN objective, because even the
+exact bin-truth state, once downscaled and rendered, cannot reproduce
+the dense-truth radiance exactly (§3's own representation-error floor,
+never zero). The solver has no way to know that; it only sees a
+nonzero residual and reduces it, which means moving the state away from
+the ppm-accurate prior whenever that happens to fit the (partly
+discretization-artifact) residual pattern better — textbook forward-
+model/smoothing error aliasing into the retrieved state, not a bug in
+the solve. `co2p` is consistently a little closer to the ceiling than
+`co2`-only at every `g_ratio` (worth noting, not yet explained). At
+`g_ratio=3` both free-sets sit almost exactly at the ceiling — the one
+point in this grid where the two objectives roughly agree. **Practical
+implication for Phase 2 and beyond**: "finer `g_ratio` gives a more
+accurate retrieval" is true for the spectral fit but false for ppm bias
+in this prior=truth, no-noise setting — coarser `g_ratio` is not
+strictly worse once the state has room to drift from an already-correct
+prior. Worth deliberately checking whether this reverses, or how much,
+once Phase 2's imperfect (non-truth) prior removes the special case
+where the unsolved starting point is itself near-perfect.
+
+Robustness check: the ratio holds essentially unchanged across all three
+tested `anchor_density` values (1, 4, 16), not just ad16 — e.g. at
+`g_ratio=0.5` the retrieved/ceiling ratio is 29.5x/26.5x/26.3x across
+ad=1/4/16, and similarly flat at every other `g_ratio`. `anchor_density`
+being a much weaker lever than `g_ratio` (already established above)
+means the "solving is worse than not solving" effect at fine `g_ratio`
+is not an anchor-density artifact — it is `g_ratio`-driven alone.
+
+**What is the solve actually tracking, if not the bin-center prior? Three
+increasingly careful tests (2026-08-20), same `co2-58-g<N>-ad16`
+configs.** All three ask the same question in a progressively more
+faithful way: is there a *different*, physically sensible target — not
+exact truth at the bin's own center point — that the retrieved bin value
+sits closer to than it does to `prior_co2_ppm_bins`?
+
+1. *Naive bin average*: the true CO2 field, pixel-averaged over each
+   bin's own nearest-bin-center footprint (unweighted). Does not explain
+   it — at `g_ratio` 0.5/1/3, the retrieved value is *closer* to the bin
+   center than to this average (rms 0.019/0.016/0.031 vs. center vs.
+   0.020/0.030/0.092 vs. average) — the opposite of the hypothesis. Only
+   at coarse `g_ratio` (6, 12) do the two distances become close to each
+   other, and even then it is a weak signal next to the >1 ppm retrieval
+   error at that point.
+2. *Interpolation-aware least-squares target*: properly accounts for how
+   a bin's value actually reaches a pixel — piecewise-linearly
+   interpolated onto the `anchor_etas` grid (the real `M` matrix
+   `build_forward_state` uses for `state_interp="linear"`), then
+   nearest-anchor-snapped to pixels, exactly matching the real rendering
+   chain. Solves for the bin values that best reproduce true CO2 under
+   that exact chain (ridge-stabilized against `prior_co2_ppm_bins`; one
+   of 58 windows was rank-deficient after dropping anchors with zero real
+   pixels, at `g_ratio` 0.5 and 1 only — does not change the pattern in
+   the other 57). Still does not explain the fine-`g_ratio` divergence —
+   0.0195/0.0188/0.0343 vs. this target at g=0.5/1/3, no better than the
+   bin-center distances (0.0187/0.0164/0.0307). Only helps at coarse
+   `g_ratio` (0.2195 vs. 0.2837 at g=6; 1.0714 vs. 1.1053 at g=12), and
+   only modestly.
+3. **PSF-aware least-squares target**: same chain as (2), but the true
+   CO2 field is first convolved along rows with the actual spatial-PSF
+   kernel `gaussian_blur_rows` uses (FWHM=1.5px, σ≈0.64 rows — rows only,
+   never columns, matching that function's own mixing) before computing
+   the anchor-level target. **This is the best predictor found, and the
+   only one that helps across the entire `g_ratio` range rather than
+   just one end of it**:
+
+   | g_ratio | \|retr − bin center\| | \|retr − LSQ, no PSF\| | \|retr − LSQ, PSF-aware\| |
+   |---|---|---|---|
+   | 0.5 | 0.0187 | 0.0195 | **0.0151** |
+   | 1 | 0.0164 | 0.0188 | **0.0139** |
+   | 3 | 0.0307 | 0.0343 | **0.0301** |
+   | 6 | 0.2837 | 0.2195 | **0.2183** |
+   | 12 | 1.1053 | 1.0714 | **1.0712** |
+
+   Largest improvement exactly where tests (1) and (2) explained nothing
+   — 19% tighter at `g_ratio=0.5`, 15% at `g_ratio=1` — consistent with
+   the physical picture: the GN solve is fitting the actually-measured,
+   PSF-blurred radiance, so a target built from the same blur operator
+   predicts its behavior better than one that ignores it. Does not close
+   the gap entirely (0.014-0.015 ppm of divergence remains even against
+   this target at fine `g_ratio`) — some genuine forward-model-error
+   aliasing on top of the PSF effect is still unaccounted for, not a
+   complete explanation, but the strongest one found so far and the only
+   one that is not regime-specific.
 
 ### Phase 2 — imperfect prior (after Phase 1)
 

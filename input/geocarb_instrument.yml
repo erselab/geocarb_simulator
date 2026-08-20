@@ -1,0 +1,108 @@
+# geocarb_instrument.yml -- GeoCarb physical instrument description.
+#
+# Loaded by geocarb_gert.mission_config.GeoCarbInstrumentConfig.from_yaml().
+# This is calibration data, not a tuning knob: edit only when the actual
+# instrument definition changes (bands, focal-plane distortion, noise
+# calibration, mission geometry) -- not per-experiment. Retrieval/sweep
+# knobs (g_ratio, anchor_density, free rows, ...) live in the separate
+# retrieval_defaults.yml instead; see docs/PROJECT_STATUS.md.
+#
+# Every value below was copied from the hardcoded module constant it
+# replaces (see the "source" comment on each block) as of 2026-08-20 --
+# Phase A of the config-consolidation plan is required to reproduce these
+# exactly, not just relocate them referentially.
+
+name: geocarb_v1
+
+# -- spectral bands ----------------------------------------------------------
+# source: geocarb_gert/instrument.py::GEOCARB_BANDS
+# (label, wn_min, wn_max, molecules, resolving_power) -- GeoCarb resolving
+# power lambda/Delta-lambda ~= 20000 (O2 A) ... ~= 12000 (2.3 um). fpa is the
+# GD-polynomial/noise-calibration index this band corresponds to (same order
+# gd_polynomials.py and radiometry.py already use).
+bands:
+  - {label: O2_A,       wn_min: 12950.0, wn_max: 13190.0, molecules: [o2, h2o],            resolving_power: 19000.0, fpa: 0}
+  - {label: CO2_weak,   wn_min: 6166.0,  wn_max: 6286.0,  molecules: [co2, h2o],            resolving_power: 20000.0, fpa: 1}
+  - {label: CO2_strong, wn_min: 4810.0,  wn_max: 4897.0,  molecules: [co2, h2o],            resolving_power: 20000.0, fpa: 2}
+  - {label: CH4_CO,     wn_min: 4258.60, wn_max: 4350.69, molecules: [ch4, co, h2o, n2o],   resolving_power: 12000.0, fpa: 3}
+
+# source: geocarb_gert/instrument.py::build_geocarb_instrument's own defaults
+spectral_sampling:
+  channels_per_fwhm: 3
+  hires_spacing: 0.01
+
+# -- focal plane: mode switch -------------------------------------------------
+# "measured": keystone/smile/clocking stay implicit in the real ground-test
+#   GD polynomial coefficients (gd_csv_path) -- what the production
+#   truth-rendering pipeline actually uses today.
+# "analytic": keystone/smile/clocking become free scalars per FPA, driving
+#   geocarb_gert.focalplane.FocalPlaneModel instead -- for idealized/
+#   design-study scenes, not real-data reproduction.
+focal_plane:
+  mode: measured
+
+  # source: geocarb_gert/gd_polynomials.py module constants
+  measured:
+    gd_csv_path: gcmap_em27.csv   # resolved relative to repo root (paths.REPO_ROOT)
+    n_fpa: 4
+    n_px: 1024
+    dispersion_ascending: {0: false, 1: true, 2: false, 3: true}
+    # source: geocarb_gert/gd_render.py's spatial_psf_fwhm_px default,
+    # also duplicated in focalplane.py's FocalPlaneModel default and a
+    # literal in scripts/gd_test.py:190 -- this is the single source of
+    # truth Phase B collapses those three sites onto.
+    spatial_psf_fwhm_px: 1.5
+
+  # source: geocarb_gert/focalplane.py::FocalPlaneModel field defaults, plus
+  # wn_min/wn_max (copied from the bands: list above -- same units, cm^-1,
+  # no conversion) and fwhm_nm (derived once here from each band's own
+  # resolving_power: fwhm_nm = 1e7 / (wn_center_cm-1 * resolving_power),
+  # i.e. the wavenumber-space Delta-nu = nu/R converted to wavelength-space
+  # nm via d(wl_um) = (1e4/wn_center^2)*d(wn) -- NOT re-derived by the
+  # loader, to avoid a unit round-trip inside code no current caller
+  # exercises; only consulted when mode: analytic.
+  analytic:
+    - {fpa: 0, wn_min: 12950.0, wn_max: 13190.0, fwhm_nm: 0.04027,
+       slit_length_mm: 40.0, magnification: 1.0, detector_pitch_um: 18.0,
+       n_spectral: 1024, keystone_frac: 1.0e-3, smile_px_edge: 0.0, clocking_deg: 0.0}
+    - {fpa: 1, wn_min: 6166.0, wn_max: 6286.0, fwhm_nm: 0.08031,
+       slit_length_mm: 40.0, magnification: 1.0, detector_pitch_um: 18.0,
+       n_spectral: 1024, keystone_frac: 1.0e-3, smile_px_edge: 0.0, clocking_deg: 0.0}
+    - {fpa: 2, wn_min: 4810.0, wn_max: 4897.0, fwhm_nm: 0.10302,
+       slit_length_mm: 40.0, magnification: 1.0, detector_pitch_um: 18.0,
+       n_spectral: 1024, keystone_frac: 1.0e-3, smile_px_edge: 0.0, clocking_deg: 0.0}
+    - {fpa: 3, wn_min: 4258.60, wn_max: 4350.69, fwhm_nm: 0.19359,
+       slit_length_mm: 40.0, magnification: 1.0, detector_pitch_um: 18.0,
+       n_spectral: 1024, keystone_frac: 1.0e-3, smile_px_edge: 0.0, clocking_deg: 0.0}
+
+# -- spatial geometry / mission ------------------------------------------------
+# Single source of truth for slit length / GSD / t_int / altitude -- resolves
+# the along_slit_scene.SLIT_HALF_KM vs geosat_geometry.py vs
+# radiometry.GEOCARB_REF triple-duplication (Phase B).
+#
+# slit_length_km is chosen as 2800.0 (-> slit_half_km = 1400.0), matching
+# along_slit_scene.SLIT_HALF_KM=1400.0 -- what production truth-rendering and
+# every banked Phase 1 / imperfect-prior result has actually used.
+# geosat_geometry.LongSlitGeoSatellite's own slit_length_km=3000.0
+# constructor default was never actually wired into that path; Phase B
+# changes THAT default to 2800.0 to match, not this value.
+geometry:
+  slit_length_km: 2800.0
+  pixel_size_ew_km: 6.0     # source: geosat_geometry.LongSlitGeoSatellite default
+  pixel_size_ns_km: 6.0     # source: geosat_geometry.LongSlitGeoSatellite default
+  integration_time_s: 10.0  # source: geosat_geometry.LongSlitGeoSatellite default; == radiometry.GEOCARB_REF["t_int_s"]
+  sat_alt_km: 35786.0       # source: geosat_geometry.SAT_ALT_KM; == radiometry.GEOCARB_REF["sat_alt_km"]
+  # sat_lon_deg has no prior default anywhere in the codebase (a required
+  # LongSlitGeoSatellite constructor arg) -- -85.0 (a plausible CONUS-viewing
+  # GeoCarb longitude) is a new choice, not a relocation; adjust freely.
+  sat_lon_deg: -85.0
+
+# -- noise-model calibration ---------------------------------------------------
+# source: geocarb_gert/radiometry.py::RADIOMETRIC_SPEC_BY_FPA (real per-band
+# calibration from instrument testing; radiances in W/m^2/sr/um).
+noise:
+  by_fpa:
+    0: {I_ref: 71.0, SNR_ref: 395.0, I_min: 0.04,  I_max: 360.0}   # O2/SIF
+    1: {I_ref: 14.0, SNR_ref: 389.0, I_min: 0.006, I_max: 60.0}    # WCO2
+    2: {I_ref: 5.0,  SNR_ref: 302.0, I_min: 0.004, I_max: 24.0}    # SCO2
+    3: {I_ref: 2.7,  SNR_ref: 254.0, I_min: 0.006, I_max: 20.0}    # CH4/CO

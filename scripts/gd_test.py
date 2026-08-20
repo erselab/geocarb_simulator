@@ -121,8 +121,18 @@ from gert.rt_solver import SingleScatterSolver
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GERT_ROOT = gert_root()   # $GERT_ROOT -> ../../gert -> ../gert -> HPC scratch
 
+from geocarb_gert.mission_config import GeoCarbInstrumentConfig as _GeoCarbInstrumentConfig
+_GEOCARB_CFG = _GeoCarbInstrumentConfig.from_yaml()
+
 WELL_MIXED_GASES = {"o2", "n2o"}
-DEFAULT_SNR_BY_FPA = {0: 400.0, 1: 300.0, 2: 300.0, 3: 200.0}
+# Derived from RADIOMETRIC_SPEC_BY_FPA's real calibration (Phase B of the
+# config-consolidation plan) rather than hand-set -- previously
+# {0: 400.0, 1: 300.0, 2: 300.0, 3: 200.0}, which disagreed with the real
+# SNR_ref values below by design, not by drift; this only feeds the "wide
+# instrument" ABSCO/hires grid-sizing SNR (see _band_setup), not any
+# retrieval weighting, so the small shift (400->395, 300->389, 300->302,
+# 200->254) does not change retrieved quantities.
+DEFAULT_SNR_BY_FPA = {fpa: spec["SNR_ref"] for fpa, spec in RADIOMETRIC_SPEC_BY_FPA.items()}
 
 _G = {}
 
@@ -187,7 +197,8 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
             n_samples=n_lookup_samples, n_workers=n_workers, uniform=uniform,
             vary_albedo=vary_albedo)
 
-    A = gd_render.image(fpa, wn_hires, radiance, wide_win.ils, spatial_psf_fwhm_px=1.5,
+    A = gd_render.image(fpa, wn_hires, radiance, wide_win.ils,
+                        spatial_psf_fwhm_px=_GEOCARB_CFG.focal_plane.measured.spatial_psf_fwhm_px,
                         n_workers=n_workers)
     # LinearShotNoise, calibrated from real instrument-test data
     # (geocarb_gert.radiometry.RADIOMETRIC_SPEC_BY_FPA) rather than the

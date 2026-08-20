@@ -71,6 +71,7 @@ from geocarb_gert import gd_render  # noqa: E402
 from geocarb_gert import gert_root  # noqa: E402
 from geocarb_gert.gd_polynomials import real_wavenumber_range, xy_to_wavelength_slit  # noqa: E402
 from geocarb_gert.gd_render import s_max  # noqa: E402
+from geocarb_gert.mission_config import RetrievalDefaults as _RetrievalDefaults  # noqa: E402
 
 from gert.forward_model import ForwardModel  # noqa: E402
 from gert.instrument import ILS, SpectralWindow  # noqa: E402
@@ -85,7 +86,15 @@ from gert.rt_solver import SingleScatterSolver  # noqa: E402
 # joint-block chain is HPC-specific, since the sweep already runs standalone
 # on a local multiprocessing Pool when --task-id/--n-tasks are omitted).
 GERT_ROOT = gert_root()   # geocarb_gert.paths -- shared by every driver
-FPA = 2
+# Sourced from input/retrieval_defaults.yml's band.default_fpa[0] at import
+# time (Phase C of the config-consolidation plan) -- was a bare literal `2`.
+# This module-level constant is still what the ~15 other scripts importing
+# `FPA` from here get; it is NOT itself multi-band-aware (still exactly one
+# int) and does not reflect any --config/--fpa CLI override a caller may
+# have passed -- gd_joint_block_whole_slit_sweep.py is the one script that
+# adds a real --fpa flag and resolves its OWN active band from that at
+# runtime, independent of this constant. See geocarb_gert/mission_config.py.
+FPA = _RetrievalDefaults.from_yaml().default_fpa[0]
 
 
 def _eta_of(fpa, cols, rows):

@@ -25,12 +25,21 @@ import numpy as np
 from gert.instrument import LinearShotNoise
 from gert.radiometry import DetectorSpec, RadiometricNoise
 
-# GeoCarb reference design point (matches geosat_geometry.LongSlitGeoSatellite
-# defaults: 6 km pixels, 10 s integration).
+from .mission_config import GeoCarbInstrumentConfig as _GeoCarbInstrumentConfig
+
+_cfg = _GeoCarbInstrumentConfig.from_yaml()
+
+# GeoCarb reference design point. Sourced from input/geocarb_instrument.yml's
+# geometry: block at import time (Phase B of the config-consolidation plan)
+# -- was a typed-inline dict that had to be kept in sync with
+# geosat_geometry.LongSlitGeoSatellite's own constructor defaults "by
+# convention" (a prior code comment's own words); now the same YAML backs
+# both, via GeoCarbInstrumentConfig.satellite(), so they agree by
+# construction instead.
 GEOCARB_REF = {
-    "gsd_km":   6.0,
-    "t_int_s": 10.0,
-    "sat_alt_km": 35786.0,
+    "gsd_km": _cfg.geometry.pixel_size_ns_km,
+    "t_int_s": _cfg.geometry.integration_time_s,
+    "sat_alt_km": _cfg.geometry.sat_alt_km,
 }
 
 # Real per-band radiometric calibration from instrument testing (all
@@ -45,12 +54,10 @@ GEOCARB_REF = {
 # and sigma(I_min) = I_min (SNR=1 by definition of "minimum measurable
 # signal") is a 2x2 linear system in (N0^2, N1) -- see
 # :func:`linear_shot_noise_params`.
-RADIOMETRIC_SPEC_BY_FPA = {
-    0: dict(I_ref=71.0, SNR_ref=395.0, I_min=0.04,  I_max=360.0),   # O2/SIF
-    1: dict(I_ref=14.0, SNR_ref=389.0, I_min=0.006, I_max=60.0),    # WCO2
-    2: dict(I_ref=5.0,  SNR_ref=302.0, I_min=0.004, I_max=24.0),    # SCO2
-    3: dict(I_ref=2.7,  SNR_ref=254.0, I_min=0.006, I_max=20.0),    # CH4/CO
-}
+# Sourced from input/geocarb_instrument.yml's noise.by_fpa: block at import
+# time (Phase B of the config-consolidation plan) -- was a typed-inline
+# dict.
+RADIOMETRIC_SPEC_BY_FPA = _cfg.noise_by_fpa
 
 
 def linear_shot_noise_params(spec: dict) -> tuple:

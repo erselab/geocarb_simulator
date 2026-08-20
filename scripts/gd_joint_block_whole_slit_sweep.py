@@ -61,10 +61,22 @@ from gert.rt_solver import SingleScatterSolver  # noqa: E402
 from geocarb_gert.gd_polynomials import rows_crossed  # noqa: E402
 from geocarb_gert.gd_render import available_cpus  # noqa: E402
 from geocarb_gert import jacobians as jac  # noqa: E402
+from geocarb_gert.mission_config import RetrievalDefaults  # noqa: E402
 
-MIN_WINDOW = 4
-PAD = 4
-G_RATIO = 3
+# Sourced from input/retrieval_defaults.yml's tiling: block at import time
+# (Phase C of the config-consolidation plan) -- were typed-inline literals.
+# Always reflect the CHECKED-IN default YAML, not whatever --config resolves
+# to at runtime: these are baked into build_window_tiles/scale_for_window_
+# count's own function-signature defaults at import time, before argparse
+# ever runs, so a per-run --config choice cannot reach them this way -- see
+# main()'s own --config pre-pass for the CLI-flag-level mechanism that DOES
+# honor --config (the actual `--min-window`/`--g-ratio` values used for any
+# given run always come from args.min_window/args.g_ratio, not these bare
+# module constants).
+_defaults = RetrievalDefaults.from_yaml()
+MIN_WINDOW = _defaults.min_window
+PAD = _defaults.pad
+G_RATIO = _defaults.g_ratio
 ROW_MAX_IDX = 1023
 
 _SWEEP = {}
@@ -130,6 +142,11 @@ def _make_state_spectrum(absco, wide_inst, geo, solar, albedo):
 
 
 def _solve_window(row_lo: int, row_hi: int):
+    # Shadows the module-level `FPA` import for the rest of this function:
+    # every bare `FPA` reference below (_eta_of, jac.linearize) now resolves
+    # to the active run's --fpa choice (Phase C of the config-consolidation
+    # plan) rather than the fixed gd_joint_block_retrieve.FPA constant.
+    FPA = _SWEEP["fpa"]
     band = _SWEEP["band"]
     absco, wide_inst, geo, solar, albedo = (_SWEEP["absco"], _SWEEP["wide_inst"],
                                             _SWEEP["geo"], _SWEEP["solar"], _SWEEP["albedo"])
@@ -147,7 +164,7 @@ def _solve_window(row_lo: int, row_hi: int):
     hires_only = _SWEEP.get("hires_only", False)
     anchor_density = int(_SWEEP.get("anchor_density", 1))
     state_interp = _SWEEP.get("state_interp", "linear")  # interp1d kind: "linear" or "nearest"
-    prior_fields = _SWEEP.get("prior_fields")            # None -> als.STATE_FIELDS (exact truth)
+    prior_fields = _SWEEP.get("prior_fields")            # an als.PRIOR_FIELD_SETS[...] dict, always explicit (never None)
     prior_anchor_density = _SWEEP.get("prior_anchor_density")  # None -> exact-per-bin (today's default)
 
     rows_win = np.arange(row_lo, row_hi + 1)
@@ -263,10 +280,28 @@ def _worker(tile):
         return dict(row_lo=row_lo, row_hi=row_hi, error=f"{type(e).__name__}: {e}")
 
 
+def _resolve_cli_defaults() -> RetrievalDefaults:
+    """Parse just --config (if given) before building the real argparse
+    parser below, so every other flag's own `default=` can reflect it.
+    argparse has no mechanism for one add_argument's default to depend on
+    an earlier flag's value within a single parse, so this is a small,
+    deliberate two-pass parse -- everything downstream (args.gamma,
+    args.g_ratio, ...) still comes from the real, single ap.parse_args()
+    call in main(); this only decides what its defaults are."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=str, default=None)
+    pre_args, _ = pre.parse_known_args()
+    return RetrievalDefaults.from_yaml(pre_args.config)
+
+
 def main() -> int:
+    cfg = _resolve_cli_defaults()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--gamma", type=float, default=3.0)
-    ap.add_argument("--sigma-abs", type=float, default=0.10)
+    ap.add_argument("--config", type=str, default=None,
+                    help="path to retrieval_defaults.yml, overriding every flag's own "
+                         "default below (default: the checked-in input/retrieval_defaults.yml)")
+    ap.add_argument("--gamma", type=float, default=cfg.gamma)
+    ap.add_argument("--sigma-abs", type=float, default=cfg.sigma_abs)
     ap.add_argument("--n-workers", type=int, default=None)
     ap.add_argument("--uniform", action="store_true", help="constant-atmosphere scene "
                     "(no real along-slit variation at all) -- a debugging aid: with a "
@@ -297,10 +332,16 @@ def main() -> int:
                     help="number of alternating-brightness bars across the slit for "
                          "--barcode/--realistic-barcode (default 32, matching gd_test.py's "
                          "own default). Ignored otherwise.")
-    ap.add_argument("--g-ratio", type=float, default=G_RATIO, help="G = max(2, round(width/"
-                    "g_ratio)) per window -- default matches the production convention "
-                    "(G_RATIO=3). Pass 1.0 for 'one bin per row' (ground-footprint-tied "
-                    "resolution, docs/JOINT_BLOCK_MIGRATION_PLAN.md Sec.9).")
+    ap.add_argument("--g-ratio", type=float, default=cfg.g_ratio, help="G = max(2, round(width/"
+                    "g_ratio)) per window -- default from input/retrieval_defaults.yml "
+                    "(g_ratio=3 in the checked-in config). Pass 1.0 for 'one bin per row' "
+                    "(ground-footprint-tied resolution, docs/JOINT_BLOCK_MIGRATION_PLAN.md Sec.9).")
+    ap.add_argument("--fpa", type=str, default=",".join(str(f) for f in cfg.default_fpa),
+                    help="comma-separated GeoCarb band index/indices (0=O2_A, 1=CO2_weak, "
+                         "2=CO2_strong, 3=CH4_CO). Default from input/retrieval_defaults.yml's "
+                         "band.default_fpa. Currently must resolve to exactly one band -- "
+                         "multi-band joint retrieval is a later phase of the "
+                         "config-consolidation plan, not yet implemented in this script.")
     ap.add_argument("--task-id", type=int, default=None, help="SLURM-array-friendly "
                     "partitioning: process only tiles[task_id::n_tasks] (round-robin, so "
                     "wide/narrow windows are spread across tasks rather than grouped) and "
@@ -311,12 +352,12 @@ def main() -> int:
     ap.add_argument("--hires-only", action="store_true",
                     help="skip the coarse solve (unchanged by --anchor-density/"
                          "--state-interp, so re-running it would just reproduce the baseline)")
-    ap.add_argument("--anchor-density", type=int, default=1,
+    ap.add_argument("--anchor-density", type=int, default=cfg.anchor_density,
                     help="anchors per detector row for the hi-res forward model "
                          "(default 1 = the original one-per-row). >1 places anchors at "
                          "fractional row positions, shrinking the nearest-anchor step "
                          "error ~(1/4)|f'|h proportionally. Cost scales with it.")
-    ap.add_argument("--state-interp", type=str, default="linear",
+    ap.add_argument("--state-interp", type=str, default=cfg.state_interp,
                     choices=["linear", "nearest"],
                     help="how each hi-res anchor's atmosphere is built from the G bin "
                          "centres (CO2, CH4, CO, H2O, p_surface alike) -- a "
@@ -331,7 +372,7 @@ def main() -> int:
                          "row, free or frozen, always goes through this same interpolation; "
                          "a row that should be as-good-as-truth gets that via the PRIOR "
                          "(--free, or a densely-constructed fields=) instead.")
-    ap.add_argument("--free", type=str, default="co2_ppm",
+    ap.add_argument("--free", type=str, default=",".join(cfg.free),
                     help="comma-separated state rows to retrieve; everything else is "
                          "frozen at local truth. Names from als.STATE_FIELDS, e.g. "
                          "co2_ppm,p_surface_hpa. CO2 is an ordinary row and may be frozen.")
@@ -341,7 +382,7 @@ def main() -> int:
                          "own physical scale (co2 ~10km hot-spot, p_surface ~140km "
                          "topography, etc). A single shared value is rarely right, since "
                          "surface pressure and a CO2 hot spot do not share a scale.")
-    ap.add_argument("--jacobian", type=str, default="analytic", choices=["fd", "analytic"],
+    ap.add_argument("--jacobian", type=str, default=cfg.jacobian, choices=["fd", "analytic"],
                     help="'analytic' (default since 2026-08-19) uses "
                          "geocarb_gert.jacobians.linearize -- derivatives assembled from "
                          "gert's per-layer arrays, one evaluation per iteration, no step "
@@ -366,35 +407,44 @@ def main() -> int:
     ap.add_argument("--window-scale", type=float, default=1.0,
                     help="multiplier on the keystone window-radius formula; larger "
                          "means fewer, wider windows. Ignored when --n-windows is given.")
-    ap.add_argument("--min-window", type=int, default=MIN_WINDOW,
-                    help=f"minimum window radius (default {MIN_WINDOW})")
+    ap.add_argument("--min-window", type=int, default=cfg.min_window,
+                    help=f"minimum window radius (default {cfg.min_window})")
     ap.add_argument("--out", type=str, default=None,
                     help="output pickle path (default: derived from the run settings)")
-    ap.add_argument("--prior-form", type=str, default="exponential",
+    ap.add_argument("--prior-form", type=str, default=cfg.prior_form,
                     choices=["exponential", "tikhonov"],
                     help="'exponential' (default): sigma^2 exp(-|d_eta|/corr_length) in "
                          "PHYSICAL eta, correct under non-uniform bin spacing. "
                          "'tikhonov': the original gamma*(L^T L)+I/sigma^2 in bin index, "
                          "bit-identical to pre-2026-08-17 results.")
-    ap.add_argument("--realistic-prior", action="store_true",
-                    help="new experiment class (2026-08): priors come from "
-                         "als.STATE_FIELDS_PRIOR (background/topography-aware, never the "
-                         "localized plume/hot-spot/synoptic content) instead of the exact "
-                         "local truth. Orthogonal to --uniform/--barcode/--realistic-barcode, "
-                         "which flatten the TRUTH scene -- this only changes what the prior "
-                         "knows, truth stays fully realistic. Defaults --n-lookup-samples to "
-                         "5600 and --out-root to results/realistic_prior unless overridden.")
+    ap.add_argument("--prior-fields", type=str, default=cfg.prior_fields,
+                    choices=sorted(als.PRIOR_FIELD_SETS),
+                    help="named prior field-set from als.PRIOR_FIELD_SETS (default: "
+                         "'exact', prior=truth). 'structural': als.STATE_FIELDS_PRIOR "
+                         "(background/topography-aware, never localized plume/hot-spot/"
+                         "synoptic content -- the retired --realistic-prior=True case). "
+                         "'co2_plus1pct'/'co2_plus1pct_psurf_minus1pct': uniform "
+                         "multiplicative-bias priors -- full truth structure kept, only "
+                         "the absolute level is wrong, isolating that failure mode from "
+                         "structural's 'missing detail' one. Orthogonal to --uniform/"
+                         "--barcode/--realistic-barcode, which flatten the TRUTH scene -- "
+                         "this only changes what the prior knows, truth stays fully "
+                         "realistic. Any non-'exact' choice defaults --n-lookup-samples "
+                         "to 5600 and --out-root to results/realistic_prior unless "
+                         "overridden (same convention every prior in this experiment "
+                         "class shares, for comparability).")
     ap.add_argument("--n-lookup-samples", type=int, default=None,
                     help="along-slit samples for build_lookup_radiance (default: 400, or "
-                         "5600 under --realistic-prior). Governs how well the rendered TRUTH "
-                         "image resolves the ~10km-wide hot spots (400 -> 7km spacing, ~3 "
-                         "samples/FWHM; 5600 -> 0.5km spacing, ~20 samples/FWHM). One-time "
-                         "forward-rendering cost, not paid per-solve.")
+                         "5600 under a non-'exact' --prior-fields). Governs how well the "
+                         "rendered TRUTH image resolves the ~10km-wide hot spots (400 -> "
+                         "7km spacing, ~3 samples/FWHM; 5600 -> 0.5km spacing, ~20 "
+                         "samples/FWHM). One-time forward-rendering cost, not paid per-solve.")
     ap.add_argument("--out-root", type=str, default=None,
                     help="root directory for output files, replacing 'results' (default: "
-                         "'results', or 'results/realistic_prior' under --realistic-prior).")
+                         "'results', or 'results/realistic_prior' under a non-'exact' "
+                         "--prior-fields).")
     ap.add_argument("--prior-anchor-density", type=float, default=None,
-                    help="resolution knob for the prior, independent of --realistic-prior: "
+                    help="resolution knob for the prior, independent of --prior-fields: "
                          "None (default) samples the prior fields exactly at each bin's own "
                          "position (today's mechanism). 1.0 is an explicit way to ask for "
                          "the same thing ('just bin centers'). <1.0 builds the prior from "
@@ -415,14 +465,20 @@ def main() -> int:
                  "--uniform would force flat state priors against a truth that "
                  "deliberately is not flat -- a real prior/truth mismatch, not a "
                  "simplification. Drop --uniform.")
-    if args.realistic_prior and (args.uniform or args.barcode or args.realistic_barcode):
-        ap.error("--realistic-prior changes what the PRIOR knows; --uniform/--barcode/"
+    if args.prior_fields != "exact" and (args.uniform or args.barcode or args.realistic_barcode):
+        ap.error("--prior-fields changes what the PRIOR knows; --uniform/--barcode/"
                  "--realistic-barcode flatten the TRUTH scene -- combining them mixes two "
                  "different kinds of idealization/de-idealization in one run. Drop one.")
+    fpa_list = tuple(int(x.strip()) for x in args.fpa.split(","))
+    if len(fpa_list) != 1:
+        ap.error(f"--fpa currently supports exactly one band (got {args.fpa!r}); multi-band "
+                 "joint retrieval is a later phase of the config-consolidation plan, not yet "
+                 "implemented in this script")
+    fpa = fpa_list[0]
     n_lookup_samples = (args.n_lookup_samples if args.n_lookup_samples is not None
-                        else 5600 if args.realistic_prior else 400)
+                        else 5600 if args.prior_fields != "exact" else 400)
     out_root = Path(args.out_root if args.out_root is not None
-                    else "results/realistic_prior" if args.realistic_prior else "results")
+                    else "results/realistic_prior" if args.prior_fields != "exact" else "results")
     # NOT just args.uniform: --barcode's true composition is also spatially constant
     # (only reflectance varies), so it needs the same flat StateSpec priors --
     # see state_spec_from_scene's own `uniform` docstring for why this has to reach
@@ -432,26 +488,26 @@ def main() -> int:
     scene_label = ("barcode" if args.barcode else
                   "realistic-barcode" if args.realistic_barcode else
                   "uniform" if args.uniform else "realistic")
-    print(f"Building {scene_label}-scene FPA{FPA} band (renders the real 1024x1024 detector image)...", flush=True)
+    print(f"Building {scene_label}-scene FPA{fpa} band (renders the real 1024x1024 detector image)...", flush=True)
     block = gg.geocarb_demo(verbose=False)["blocks"][0]
     _, _, geo = sample_geometries(block, n=1, seed=0)[0]
     absco = gert.ABSCOTable.load_all(str(GERT_ROOT / "input/absco/absco.h5"))
     solar = gert.SolarSpectrum.load(str(GERT_ROOT / "input/solar/solar.h5"))
     atm_center = als.atmosphere_at(0.0)
     gdt._G.update(dict(atm=atm_center, absco=absco, geo=geo, solar=solar))
-    snr = gdt.DEFAULT_SNR_BY_FPA[FPA]
-    band = gdt._band_setup(FPA, atm_center, absco, geo, solar, snr, n_lookup_samples, None,
+    snr = gdt.DEFAULT_SNR_BY_FPA[fpa]
+    band = gdt._band_setup(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples, None,
                            args.uniform, args.barcode, args.barcode_bars, False, 0,
                            args.realistic_barcode)
-    wide_win, wide_inst, albedo = band_basics(FPA, atm_center, absco, geo, solar)
+    wide_win, wide_inst, albedo = band_basics(fpa, atm_center, absco, geo, solar)
     print("done.\n", flush=True)
 
     if args.n_windows is not None:
-        window_scale = scale_for_window_count(FPA, args.n_windows, args.min_window)
+        window_scale = scale_for_window_count(fpa, args.n_windows, args.min_window)
         print(f"--n-windows {args.n_windows} -> window_scale {window_scale:.2f}", flush=True)
     else:
         window_scale = args.window_scale
-    all_tiles = build_window_tiles(FPA, min_window=args.min_window,
+    all_tiles = build_window_tiles(fpa, min_window=args.min_window,
                                    window_scale=window_scale)
     widths = [hi - lo + 1 for lo, hi in all_tiles]
     print(f"{len(all_tiles)} windows total, widths min={min(widths)} max={max(widths)} "
@@ -464,7 +520,7 @@ def main() -> int:
         tiles = all_tiles
 
     _SWEEP.update(dict(band=band, absco=absco, wide_inst=wide_inst, geo=geo, solar=solar,
-                       albedo=albedo, wn_hires=band["wn_hires"], ils=band["ils"],
+                       albedo=albedo, wn_hires=band["wn_hires"], ils=band["ils"], fpa=fpa,
                        gamma=args.gamma, sigma_abs=args.sigma_abs, g_ratio=args.g_ratio,
                        uniform=args.uniform, uniform_priors=uniform_priors, atm_center=atm_center,
                        hires_only=args.hires_only, anchor_density=args.anchor_density,
@@ -472,7 +528,7 @@ def main() -> int:
                        free=tuple(x.strip() for x in args.free.split(',')),
                        corr_length=args.corr_length, prior_form=args.prior_form,
                        jacobian=args.jacobian,
-                       prior_fields=(als.STATE_FIELDS_PRIOR if args.realistic_prior else None),
+                       prior_fields=als.PRIOR_FIELD_SETS[args.prior_fields],
                        prior_anchor_density=args.prior_anchor_density))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
@@ -515,31 +571,35 @@ def main() -> int:
         suffix += f"_nwin{len(all_tiles)}"
     if args.jacobian != "fd":
         suffix += f"_{args.jacobian}"
-    if args.realistic_prior:
-        suffix += "_realisticprior"
+    if args.prior_fields != "exact":
+        suffix += f"_prior-{args.prior_fields}"
     if args.prior_anchor_density is not None:
         suffix += f"_prad{args.prior_anchor_density:g}"
-    payload = {"results": results, "tiles": all_tiles, "fpa": FPA, "uniform": args.uniform,
+    payload = {"results": results, "tiles": all_tiles, "fpa": fpa, "uniform": args.uniform,
               "barcode": args.barcode, "realistic_barcode": args.realistic_barcode,
               "barcode_bars": args.barcode_bars if (args.barcode or args.realistic_barcode) else None,
               "uniform_priors": uniform_priors,
               "gamma": args.gamma, "sigma_abs": args.sigma_abs,
-              "g_ratio": args.g_ratio, "min_window": MIN_WINDOW, "pad": PAD,
+              # min_window: args.min_window (the value actually used to tile),
+              # not the bare MIN_WINDOW default constant -- fixed alongside the
+              # Phase C config wiring (pre-existing: previously always recorded
+              # the constant even when --min-window overrode it).
+              "g_ratio": args.g_ratio, "min_window": args.min_window, "pad": PAD,
               "hires_only": args.hires_only, "anchor_density": args.anchor_density,
               "state_interp": args.state_interp, "free": free_t,
               "corr_length": args.corr_length, "prior_form": args.prior_form,
               "jacobian": args.jacobian, "n_windows": len(all_tiles),
-              "window_scale": window_scale, "realistic_prior": args.realistic_prior,
+              "window_scale": window_scale, "prior_fields": args.prior_fields,
               "n_lookup_samples": n_lookup_samples,
               "prior_anchor_density": args.prior_anchor_density}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
-        out_dir = REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}_parts"
+        out_dir = REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{fpa}{suffix}_parts"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"task{args.task_id:03d}of{args.n_tasks}.pkl"
     else:
         out_path = (Path(args.out) if args.out else
-                    REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{FPA}{suffix}.pkl")
+                    REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{fpa}{suffix}.pkl")
         out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as f:
         pickle.dump(payload, f)

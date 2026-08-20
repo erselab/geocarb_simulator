@@ -846,7 +846,7 @@ class LongSlitGeoSatellite:
 
     def __init__(self,
                  sat_lon_deg:        float,
-                 slit_length_km:     float = 3000.0,
+                 slit_length_km:     float = 2800.0,
                  pixel_size_ew_km:   float = 6.0,
                  pixel_size_ns_km:   float = 6.0,
                  integration_time_s: float = 10.0,
