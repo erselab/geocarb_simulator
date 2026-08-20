@@ -243,6 +243,52 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
                x_km_of_row=x_km_of_row, xtrue_of_row=xtrue_of_row)
 
 
+def _band_setup_cached(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_samples: int,
+                       n_workers, uniform: bool, barcode: bool, barcode_bars: int,
+                       noise: bool, noise_seed: int, realistic_barcode: bool = False,
+                       vary_albedo: bool = False, use_cache: bool = True):
+    """Cache-aware wrapper around :func:`_band_setup` for the deterministic
+    (``noise=False``) case -- "having an observation saved on disk" so a
+    config-matrix sweep that only varies retrieval-side knobs (g_ratio,
+    anchor_density, free rows, ...) doesn't re-render the same scene per
+    config. See ``geocarb_gert.truth_cache``'s own module docstring for the
+    cache-key/invalidation design and what is deliberately NOT cached
+    (``radiance``, ``noise_arr``) -- callers needing either of those (e.g.
+    this module's own native/undistorted/rectified pipeline in ``main()``)
+    must call :func:`_band_setup` directly, not this wrapper.
+
+    Bypasses the cache entirely when ``noise=True`` (a fresh random
+    realization is the whole point there) or ``use_cache=False``.
+    """
+    if noise or not use_cache:
+        return _band_setup(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples,
+                           n_workers, uniform, barcode, barcode_bars, noise, noise_seed,
+                           realistic_barcode, vary_albedo)
+
+    from geocarb_gert import truth_cache
+    scene = ("barcode" if barcode else "realistic-barcode" if realistic_barcode
+            else "uniform" if uniform else "realistic")
+    key = truth_cache.cache_key(
+        fpa=fpa, scene=scene,
+        barcode_bars=barcode_bars if scene in ("barcode", "realistic-barcode") else None,
+        n_lookup_samples=n_lookup_samples, vary_albedo=vary_albedo,
+        spatial_psf_fwhm_px=_GEOCARB_CFG.focal_plane.measured.spatial_psf_fwhm_px,
+        gd_csv_path=str(_GEOCARB_CFG.focal_plane.measured.gd_csv_path),
+    )
+    cached = truth_cache.load(key)
+    if cached is not None:
+        print(f"  truth cache HIT ({key})", flush=True)
+        return cached
+
+    print(f"  truth cache MISS ({key}) -- rendering", flush=True)
+    band = _band_setup(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples,
+                       n_workers, uniform, barcode, barcode_bars, noise, noise_seed,
+                       realistic_barcode, vary_albedo)
+    cacheable = {k: v for k, v in band.items() if k not in ("radiance", "noise_arr")}
+    truth_cache.save(key, cacheable)
+    return cacheable
+
+
 def _shared_s_grid(fpas, n: int = 1024) -> np.ndarray:
     """Real slit-angle grid [deg] spanning the N-way intersection of every
     band's covered range -- the target grid for the "rectified" pipeline.

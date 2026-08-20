@@ -333,6 +333,15 @@ def main() -> int:
     ap.add_argument("--gamma", type=float, default=cfg.gamma)
     ap.add_argument("--sigma-abs", type=float, default=cfg.sigma_abs)
     ap.add_argument("--n-workers", type=int, default=None)
+    ap.add_argument("--no-truth-cache", action="store_true",
+                    help="always re-render the truth detector image instead of reusing a "
+                         "cached one from results/truth_cache/ (see geocarb_gert.truth_cache). "
+                         "Caching is on by default -- every config in a matrix sweep that "
+                         "shares a scene (fpa, --uniform/--barcode/--realistic-barcode, "
+                         "--barcode-bars, n_lookup_samples) hits the same cache entry, so "
+                         "only the first config in a sweep pays the render cost. Pass this "
+                         "to force a fresh render, e.g. after a change to the rendering code "
+                         "itself that hasn't bumped truth_cache.TRUTH_CACHE_VERSION yet.")
     ap.add_argument("--uniform", action="store_true", help="constant-atmosphere scene "
                     "(no real along-slit variation at all) -- a debugging aid: with a "
                     "genuinely uniform truth, correct bias is EXACTLY zero everywhere "
@@ -526,9 +535,9 @@ def main() -> int:
     atm_center = als.atmosphere_at(0.0)
     gdt._G.update(dict(atm=atm_center, absco=absco, geo=geo, solar=solar))
     snr = gdt.DEFAULT_SNR_BY_FPA[fpa]
-    band = gdt._band_setup(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples, None,
-                           args.uniform, args.barcode, args.barcode_bars, False, 0,
-                           args.realistic_barcode)
+    band = gdt._band_setup_cached(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples, None,
+                                  args.uniform, args.barcode, args.barcode_bars, False, 0,
+                                  args.realistic_barcode, use_cache=not args.no_truth_cache)
     wide_win, wide_inst, albedo = band_basics(fpa, atm_center, absco, geo, solar)
     print("done.\n", flush=True)
 

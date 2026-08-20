@@ -154,10 +154,11 @@ def _posterior_error_plot(summary: dict, fpa: int, free_key: str, param: str, pl
     rows = np.arange(N_COLS)
 
     lines = []  # (g_ratio, adens, err)
+    prior_fields_seen = set()
     for (cid, jacobian), sc in summary["scored"].items():
         if jacobian != "analytic":
             continue
-        fk, nwin, gratio, adens, si, scene, _, _ = parse_config(cid)
+        fk, nwin, gratio, adens, si, scene, _, prior_fields = parse_config(cid)
         if fk != free_key or "hires" not in sc:
             continue
         st = sc["hires"].get("_state", {})
@@ -165,6 +166,7 @@ def _posterior_error_plot(summary: dict, fpa: int, free_key: str, param: str, pl
             continue
         err = np.asarray(st[param], dtype=float) - truth
         lines.append((gratio, adens, err))
+        prior_fields_seen.add(prior_fields)
 
     if not lines:
         print(f"_posterior_error_plot: no {free_key}/{param} configs found, skipping")
@@ -182,6 +184,18 @@ def _posterior_error_plot(summary: dict, fpa: int, free_key: str, param: str, pl
     for gratio, adens, err in sorted(lines, key=lambda r: (-r[0], r[1])):
         ax.plot(rows, err, color=shade(gratio), ls=ls_by_ad.get(adens, "-"), lw=1.2,
                label=f"g_ratio={gratio:g}, ad{adens}")
+    # Prior error (prior - truth), analytic and g_ratio/anchor_density-
+    # independent -- als.PRIOR_FIELD_SETS[pf] is the same field function
+    # regardless of bin placement, so one reference line per distinct
+    # prior_fields value covers every (g_ratio, adens) line above. Skipped
+    # entirely under "exact" (prior=truth -- would just draw a flat zero
+    # line and add legend clutter for the common case).
+    for pf in sorted(prior_fields_seen):
+        if pf == "exact" or param not in als.PRIOR_FIELD_SETS[pf]:
+            continue
+        prior_err = np.asarray(als.PRIOR_FIELD_SETS[pf][param](x_km), dtype=float) - truth
+        ax.plot(rows, prior_err, color="0.35", ls=(0, (1, 1)), lw=1.4, zorder=3,
+               label=f"prior ({pf})")
     ax.axhline(0.0, color="0.5", lw=0.8, alpha=0.6)
     ax.set_xlabel("detector row")
     unit = "ppm" if param == "co2_ppm" else ("hPa" if param == "p_surface_hpa" else "")

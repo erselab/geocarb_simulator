@@ -221,9 +221,11 @@ def run_one(cid, jacobian, n_workers, env, tag_dir, force=False):
         cmd.append("--hires-only")
     if env.get("_CONFIG_PATH"):
         cmd += ["--config", env["_CONFIG_PATH"]]
+    if env.get("_NO_TRUTH_CACHE") == "1":
+        cmd.append("--no-truth-cache")
     print(f"  {cid:26s} {jacobian:8s} running ...", flush=True)
     t0 = time.time()
-    _internal_keys = ("_HIRES_ONLY", "_CONFIG_PATH")
+    _internal_keys = ("_HIRES_ONLY", "_CONFIG_PATH", "_NO_TRUTH_CACHE")
     r = subprocess.run(cmd, cwd=REPO_ROOT, env={k: v for k, v in env.items() if k not in _internal_keys},
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     dt = time.time() - t0
@@ -371,6 +373,13 @@ def main() -> int:
                     help="skip coarse -- correct whenever only anchor_density is swept, "
                          "since coarse cannot depend on it at all")
     ap.add_argument("--n-workers", type=int, default=None)
+    ap.add_argument("--no-truth-cache", action="store_true",
+                    help="forwarded to every shelled-out sweep invocation -- always re-render "
+                         "the truth scene instead of reusing results/truth_cache/ (see "
+                         "geocarb_gert.truth_cache). Caching is on by default and is exactly "
+                         "what this tool benefits from most: every config here that shares a "
+                         "scene renders it once. Pass this after a rendering-path code change "
+                         "that hasn't bumped TRUTH_CACHE_VERSION yet.")
     ap.add_argument("--force", action="store_true",
                     help="re-run configs even if found in this tag's folder OR the archive")
     ap.add_argument("--tol", type=float, default=1e-5)
@@ -421,6 +430,8 @@ def main() -> int:
         env["_HIRES_ONLY"] = "1"
     if args.config:
         env["_CONFIG_PATH"] = args.config
+    if args.no_truth_cache:
+        env["_NO_TRUTH_CACHE"] = "1"
 
     rows = np.arange(float(N_COLS))
     _, s = xy_to_wavelength_slit(2, np.full(N_COLS, 512.0), rows)
