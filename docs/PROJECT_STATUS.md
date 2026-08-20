@@ -250,6 +250,11 @@ the actual limiting factor is prior *quality*, not grid resolution) are in
   diagnostics (no retrieval): residual comparisons, RT-resolution sweeps,
   the bin/anchor schematics.
 - **`scripts/gd_jacobian_validate.py`** — analytic-vs-FD validation.
+- **`geocarb_gert/mission_config.py`** / **`input/geocarb_instrument.yml`**,
+  **`input/retrieval_defaults.yml`** — single source of truth for
+  instrument parameters (bands, focal-plane geometry, spatial resolution,
+  noise calibration) and retrieval-sweep defaults, replacing scattered
+  module constants. See §6.
 
 ## 5. Retrieval plan (next steps)
 
@@ -472,3 +477,69 @@ matrix axis, or reuse `--scene`) before Phase 2 can run through the same
 matrix tooling as Phase 1; until then, individual
 `gd_joint_block_whole_slit_sweep.py --realistic-prior ...` runs work
 directly.
+
+*(2026-08-20 update: this note is stale — `--realistic-prior` was retired
+in favor of the standardized `--prior-fields`/`als.PRIOR_FIELD_SETS`
+registry, which IS wired through `gd_joint_block_matrix.py`'s own
+`--prior-fields` axis; see §6's imperfect-prior "first try" results.)*
+
+## 6. Config consolidation + the real noise model (2026-08-20)
+
+Every "interesting" instrument parameter — bands, focal-plane geometry
+(keystone/smile/clocking), spatial resolution, slit length, noise
+calibration — and every retrieval-sweep default (`g_ratio`,
+`anchor_density`, correlation lengths, ...) now has exactly one place
+it's defined: `input/geocarb_instrument.yml` and
+`input/retrieval_defaults.yml`, loaded via
+`geocarb_gert/mission_config.py`'s `GeoCarbInstrumentConfig`/
+`RetrievalDefaults`. This replaced several previously-scattered, and in a
+few cases *disagreeing*, module constants — most notably
+`along_slit_scene.SLIT_HALF_KM` (1400.0, what production truth-rendering
+actually used) vs. `geosat_geometry.LongSlitGeoSatellite`'s own
+`slit_length_km=3000.0` default (never actually wired in): the latter's
+default now matches the former exactly, rather than the two merely being
+close. `gd_joint_block_whole_slit_sweep.py` and `gd_joint_block_matrix.py`
+both gained a `--config` flag (YAML values become argparse defaults, CLI
+flags still override — SLURM sweep automation unaffected) and the sweep
+script gained a real `--fpa` flag, making band selection a run-time
+choice instead of an edit-the-source constant (single-band only for now
+— multi-band joint retrieval, building on the already-existing
+`geocarb_noise_model_multi`/`cross_band.nearest_row_pairing_multi`
+machinery, is a later phase).
+
+**The `Sy_inv` noise-model swap.** The real, ground-test-calibrated
+GeoCarb noise model (`geocarb_gert.radiometry.geocarb_noise_model`,
+backed by `RADIOMETRIC_SPEC_BY_FPA`) existed but was never actually used
+to weight the production Gauss-Newton solve — `_solve_window` instead
+used an ad hoc flat scalar, `Sy_inv_diag = 1/mean(|signal|)^2` for the
+whole window. This is now replaced by the real per-pixel
+`sqrt(N0^2 + N1*|I|)` noise model as the default (not opt-in — a
+deliberate project decision, since a real noise model should be how the
+code works, not a flag nobody remembers to pass).
+
+**This changes retrieved numbers** relative to every result in §5 above
+(the Phase 1 bingrid sweep and the Phase 2 imperfect-prior "first try"
+results) — expected, not a bug. Quantified at the CO2/CO hot-spot window
+(rows 890-935, `g_ratio=3`, `anchor_density=1`): the old "sigma" was a
+spatially uniform 6.62 (radiance units) — nonsensically large, comparable
+to the scene's own dynamic range (`y_true` ranges 0.10-11.97 there) — an
+artifact of the old formula never having been a real noise model, just a
+relative-weighting scalar dressed up as one. The new per-pixel sigma
+averages ~0.018 (matching `y_true.mean()/SNR_ref` to the expected
+order of magnitude) and genuinely varies across the window
+(std ~0.005) tracking local radiance. Despite the ~365x difference in
+absolute scale, the retrieved CO2 itself shifted by only up to ~0.03 ppm
+at this window (out of a ~3.7 ppm peak enhancement) — this window is
+heavily overdetermined (~47,000 pixels vs. 15 state unknowns), so the fit
+is data-dominated under either weighting; the real payoff of the fix is a
+*physically calibrated* posterior uncertainty (tighter in bright/
+high-SNR regions, looser in dim ones), which the old flat scalar could
+not represent, not a large change to the central retrieved value. A full
+58-window smoke run (`--g-ratio 12`, coarse) confirmed no NaN/inf
+anywhere and residual/bias behavior matching the already-documented
+coarse-`g_ratio` degradation pattern above — a real, sane retrieval, not
+noise-dominated garbage.
+
+Any future comparison against the Phase 1/Phase 2 numbers above should
+account for this: they were computed under the old, uncalibrated flat
+weighting.

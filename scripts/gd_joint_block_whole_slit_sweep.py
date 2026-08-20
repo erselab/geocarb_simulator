@@ -62,6 +62,15 @@ from geocarb_gert.gd_polynomials import rows_crossed  # noqa: E402
 from geocarb_gert.gd_render import available_cpus  # noqa: E402
 from geocarb_gert import jacobians as jac  # noqa: E402
 from geocarb_gert.mission_config import RetrievalDefaults  # noqa: E402
+from geocarb_gert.radiometry import geocarb_noise_model  # noqa: E402
+
+# Defensive floor on the real noise model's sigma (Phase D of the
+# config-consolidation plan), radiance units (W/m^2/sr/um, same as `A`).
+# Not currently load-bearing -- linear_shot_noise_params solves N0 > 0 for
+# all four calibrated bands in RADIOMETRIC_SPEC_BY_FPA today -- but guards
+# against a future band whose N0 ~ 0 producing inf in Sy_inv_diag at a
+# literal-zero-radiance pixel.
+_SIGMA_FLOOR = 1e-6
 
 # Sourced from input/retrieval_defaults.yml's tiling: block at import time
 # (Phase C of the config-consolidation plan) -- were typed-inline literals.
@@ -181,8 +190,29 @@ def _solve_window(row_lo: int, row_hi: int):
                                         for xk in bin_centers * als.SLIT_HALF_KM]))
 
     y_true = band["A"][rows_win, :].ravel()
-    y_scale = float(np.mean(np.abs(y_true)))
-    Sy_inv_diag = np.full(y_true.size, 1.0 / y_scale ** 2)
+    # Real per-pixel noise (Phase D of the config-consolidation plan),
+    # replacing the old flat-scalar Sy_inv_diag = 1/mean(|signal|)^2 for
+    # the whole window. geocarb_noise_model(FPA) is the same LinearShotNoise
+    # gd_test.py::_band_setup already computes (and previously discarded
+    # after the saturation check) from RADIOMETRIC_SPEC_BY_FPA's real
+    # per-band calibration: sigma(I)^2 = N0^2 + N1*|I|, so a dim pixel
+    # (window edge, dark scene) gets a correspondingly tighter noise floor
+    # instead of inheriting the window's own mean-|signal| scale. Routed
+    # through the NoiseModel.sigma() interface rather than inlining the
+    # formula, so any future change to the noise model's own definition is
+    # picked up here automatically. `windows` is accepted but unused by
+    # LinearShotNoise.sigma() (only reads R/N0/N1), so `[None]` is a valid
+    # placeholder, not a real per-window object.
+    #
+    # THIS CHANGES RETRIEVED NUMBERS relative to every run before this
+    # commit, including the Phase 1 bingrid sweep and the imperfect-prior
+    # sweep from this session -- deliberate, not opt-in, per project
+    # decision (config-consolidation plan Phase D). Old behavior for
+    # reference: Sy_inv_diag = 1/np.mean(np.abs(y_true))**2, uniform across
+    # the whole window.
+    noise_model = geocarb_noise_model(FPA)
+    sigma = noise_model.sigma([y_true], [None])
+    Sy_inv_diag = 1.0 / np.maximum(sigma, _SIGMA_FLOOR) ** 2
 
     out = dict(row_lo=row_lo, row_hi=row_hi, width=width, G=G, bin_centers=bin_centers,
               prior_co2_ppm_bins=prior_co2_ppm_bins)
