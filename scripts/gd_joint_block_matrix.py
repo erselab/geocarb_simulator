@@ -178,14 +178,34 @@ def is_bare(cid: str) -> bool:
 
 # ---------------------------------------------------------------- running --
 
-def resolve_existing(cid, jacobian, tag_dir):
+def _payload_flat_sy_inv(path) -> bool:
+    """Best-effort read of a cached pkl's own flat_sy_inv flag -- pre-Phase-D
+    pkls (or any pkl from before this field existed) have no such key, and
+    are treated as flat_sy_inv=False (they predate the real-noise-model
+    default entirely, so that's what they in fact are)."""
+    try:
+        with open(path, "rb") as f:
+            return bool(pickle.load(f).get("flat_sy_inv", False))
+    except Exception:
+        return False
+
+
+def resolve_existing(cid, jacobian, tag_dir, flat_sy_inv=False):
     """(path, source) if this exact config/solver already has output
     somewhere -- this tag's own folder first, then (for bare ids only) the
-    closed regression's archive. `source` is "own" or "archive"/None."""
+    closed regression's archive. `source` is "own" or "archive"/None.
+
+    A file that exists at the expected path but whose own flat_sy_inv
+    metadata does NOT match the requested one is treated as NOT found
+    (forces a fresh run) rather than silently returned -- config_id() has
+    no flat_sy_inv axis (that flag is meant to be paired with its own
+    --tag, not mixed into an existing tag's own configs), so this is the
+    guard against a --flat-sy-inv run silently reusing a same-path
+    corrected-weighting result, or vice versa."""
     own = tag_dir / f"{cid}_{jacobian}.pkl"
-    if own.exists():
+    if own.exists() and _payload_flat_sy_inv(own) == flat_sy_inv:
         return own, "own"
-    if is_bare(cid):
+    if is_bare(cid) and not flat_sy_inv:
         arch = ARCHIVE / f"{cid}_{jacobian}.pkl"
         if arch.exists():
             return arch, "archive"
@@ -194,7 +214,8 @@ def resolve_existing(cid, jacobian, tag_dir):
 
 def run_one(cid, jacobian, n_workers, env, tag_dir, force=False):
     free_key, nwin, gratio, adens, si, scene, barcode_bars, prior_fields = parse_config(cid)
-    path, source = (None, None) if force else resolve_existing(cid, jacobian, tag_dir)
+    flat_sy_inv = env.get("_FLAT_SY_INV") == "1"
+    path, source = (None, None) if force else resolve_existing(cid, jacobian, tag_dir, flat_sy_inv)
     if path is not None:
         tag = "archive (already validated)" if source == "archive" else "exists"
         print(f"  {cid:26s} {jacobian:8s} {tag}, skipping", flush=True)
@@ -223,9 +244,11 @@ def run_one(cid, jacobian, n_workers, env, tag_dir, force=False):
         cmd += ["--config", env["_CONFIG_PATH"]]
     if env.get("_NO_TRUTH_CACHE") == "1":
         cmd.append("--no-truth-cache")
+    if env.get("_FLAT_SY_INV") == "1":
+        cmd.append("--flat-sy-inv")
     print(f"  {cid:26s} {jacobian:8s} running ...", flush=True)
     t0 = time.time()
-    _internal_keys = ("_HIRES_ONLY", "_CONFIG_PATH", "_NO_TRUTH_CACHE")
+    _internal_keys = ("_HIRES_ONLY", "_CONFIG_PATH", "_NO_TRUTH_CACHE", "_FLAT_SY_INV")
     r = subprocess.run(cmd, cwd=REPO_ROOT, env={k: v for k, v in env.items() if k not in _internal_keys},
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     dt = time.time() - t0
@@ -380,6 +403,17 @@ def main() -> int:
                          "what this tool benefits from most: every config here that shares a "
                          "scene renders it once. Pass this after a rendering-path code change "
                          "that hasn't bumped TRUTH_CACHE_VERSION yet.")
+    ap.add_argument("--flat-sy-inv", action="store_true",
+                    help="forwarded to every shelled-out sweep invocation -- reproduces the "
+                         "pre-Phase-D flat-scalar Sy_inv weighting instead of the real noise "
+                         "model (the default). NOT a production option, solely for deliberately "
+                         "reproducing an old comparison point (docs/PROJECT_STATUS.md Sec.6). "
+                         "ALWAYS pair this with a --tag no corrected-weighting run has ever "
+                         "used -- resolve_existing() checks each cached file's own flat_sy_inv "
+                         "metadata and refuses to reuse a mismatched one (forces a fresh run "
+                         "instead of silently returning the wrong-weighting result), but a "
+                         "dedicated tag is still the intended way to keep the two comparable "
+                         "runs' outputs cleanly separated on disk.")
     ap.add_argument("--force", action="store_true",
                     help="re-run configs even if found in this tag's folder OR the archive")
     ap.add_argument("--tol", type=float, default=1e-5)
@@ -432,6 +466,8 @@ def main() -> int:
         env["_CONFIG_PATH"] = args.config
     if args.no_truth_cache:
         env["_NO_TRUTH_CACHE"] = "1"
+    if args.flat_sy_inv:
+        env["_FLAT_SY_INV"] = "1"
 
     rows = np.arange(float(N_COLS))
     _, s = xy_to_wavelength_slit(2, np.full(N_COLS, 512.0), rows)

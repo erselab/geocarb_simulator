@@ -206,13 +206,20 @@ def _solve_window(row_lo: int, row_hi: int):
     #
     # THIS CHANGES RETRIEVED NUMBERS relative to every run before this
     # commit, including the Phase 1 bingrid sweep and the imperfect-prior
-    # sweep from this session -- deliberate, not opt-in, per project
-    # decision (config-consolidation plan Phase D). Old behavior for
-    # reference: Sy_inv_diag = 1/np.mean(np.abs(y_true))**2, uniform across
-    # the whole window.
-    noise_model = geocarb_noise_model(FPA)
-    sigma = noise_model.sigma([y_true], [None])
-    Sy_inv_diag = 1.0 / np.maximum(sigma, _SIGMA_FLOOR) ** 2
+    # sweep from this session -- deliberate, not opt-in as a PRODUCTION
+    # default (config-consolidation plan Phase D). --flat-sy-inv below is
+    # NOT a reversal of that decision -- it exists solely so a deliberate,
+    # labeled A/B comparison against the old behavior stays reproducible
+    # without reverting real code; the default here is unchanged.
+    if _SWEEP.get("flat_sy_inv", False):
+        # Reproduces the pre-Phase-D formula exactly, for comparison only
+        # -- see docs/PROJECT_STATUS.md Sec.6 and --flat-sy-inv's own help.
+        y_scale = float(np.mean(np.abs(y_true)))
+        Sy_inv_diag = np.full(y_true.size, 1.0 / y_scale ** 2)
+    else:
+        noise_model = geocarb_noise_model(FPA)
+        sigma = noise_model.sigma([y_true], [None])
+        Sy_inv_diag = 1.0 / np.maximum(sigma, _SIGMA_FLOOR) ** 2
 
     out = dict(row_lo=row_lo, row_hi=row_hi, width=width, G=G, bin_centers=bin_centers,
               prior_co2_ppm_bins=prior_co2_ppm_bins)
@@ -342,6 +349,16 @@ def main() -> int:
                          "only the first config in a sweep pays the render cost. Pass this "
                          "to force a fresh render, e.g. after a change to the rendering code "
                          "itself that hasn't bumped truth_cache.TRUTH_CACHE_VERSION yet.")
+    ap.add_argument("--flat-sy-inv", action="store_true",
+                    help="reproduce the pre-Phase-D Sy_inv weighting exactly (Sy_inv_diag = "
+                         "1/mean(|signal|)^2, uniform across the whole window) instead of the "
+                         "real per-pixel noise model (the default). NOT a production option -- "
+                         "exists solely to reproduce old comparison points deliberately (e.g. "
+                         "the imperfect-prior 'first try' results computed before Phase D of "
+                         "the config-consolidation plan landed) without checking out old code. "
+                         "Adds a _flatsyinv suffix to the output filename so it can never "
+                         "collide with a corrected-weighting run of the same config. See "
+                         "docs/PROJECT_STATUS.md Sec.6.")
     ap.add_argument("--uniform", action="store_true", help="constant-atmosphere scene "
                     "(no real along-slit variation at all) -- a debugging aid: with a "
                     "genuinely uniform truth, correct bias is EXACTLY zero everywhere "
@@ -568,7 +585,8 @@ def main() -> int:
                        corr_length=args.corr_length, prior_form=args.prior_form,
                        jacobian=args.jacobian,
                        prior_fields=als.PRIOR_FIELD_SETS[args.prior_fields],
-                       prior_anchor_density=args.prior_anchor_density))
+                       prior_anchor_density=args.prior_anchor_density,
+                       flat_sy_inv=args.flat_sy_inv))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
     print(f"solving with {n_workers} workers...", flush=True)
@@ -614,6 +632,8 @@ def main() -> int:
         suffix += f"_prior-{args.prior_fields}"
     if args.prior_anchor_density is not None:
         suffix += f"_prad{args.prior_anchor_density:g}"
+    if args.flat_sy_inv:
+        suffix += "_flatsyinv"
     payload = {"results": results, "tiles": all_tiles, "fpa": fpa, "uniform": args.uniform,
               "barcode": args.barcode, "realistic_barcode": args.realistic_barcode,
               "barcode_bars": args.barcode_bars if (args.barcode or args.realistic_barcode) else None,
@@ -630,7 +650,8 @@ def main() -> int:
               "jacobian": args.jacobian, "n_windows": len(all_tiles),
               "window_scale": window_scale, "prior_fields": args.prior_fields,
               "n_lookup_samples": n_lookup_samples,
-              "prior_anchor_density": args.prior_anchor_density}
+              "prior_anchor_density": args.prior_anchor_density,
+              "flat_sy_inv": args.flat_sy_inv}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
         out_dir = REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{fpa}{suffix}_parts"

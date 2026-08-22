@@ -543,3 +543,60 @@ noise-dominated garbage.
 Any future comparison against the Phase 1/Phase 2 numbers above should
 account for this: they were computed under the old, uncalibrated flat
 weighting.
+
+**2026-08-21 update — reran Phase 2 under the corrected weighting, and
+added `--flat-sy-inv` for deliberate old/new comparison.** The imperfect-
+prior sweep's raw pkls from before Phase D were overwritten (accidentally,
+mid-testing) before anyone thought to save them — `results/` is
+gitignored, so there was no git history either, and they are permanently
+gone. Added `--flat-sy-inv` to `gd_joint_block_whole_slit_sweep.py`/
+`gd_joint_block_matrix.py`: reproduces the old flat-scalar `Sy_inv`
+formula exactly (verified bit-identical to the surviving old REPORT.md
+numbers, reconstructed from conversation transcript, across the full
+30-config sweep) for deliberate A/B comparison — NOT a reversal of the
+Phase D default, which is unchanged; `resolve_existing()` now checks each
+cached file's own `flat_sy_inv` metadata so a mismatched reuse can't
+silently happen. Reran both:
+  - `results/config_matrix/retrieval_prior_{co2plus1pct,co2p}_v2/` —
+    corrected (current default weighting)
+  - `results/config_matrix/retrieval_prior_{co2plus1pct,co2p}_flatsyinv/` —
+    old weighting, reproduced
+  - `results/config_matrix/retrieval_prior_{co2plus1pct,co2p}_v1/` — the
+    `_v1` tag itself now holds only the reconstructed old REPORT.md +
+    restored-from-git old plots (its raw pkls were the thing overwritten;
+    see the `results/.../v1/results/README.txt` left in place of them).
+
+New comparison plots (`scripts/gd_retrieval_prior_convergence_compare.py`,
+`scripts/gd_retrieval_prior_slit_chi2_compare.py`): CO2 rms improved
+20-500x depending on config (e.g. `co2p` best case 4.24 -> 0.009 ppm), and
+critically now shows the EXPECTED behavior of resolution improving
+accuracy (old weighting was resolution-INSENSITIVE — flat regardless of
+`g_ratio`, direct evidence it wasn't really using the data). Full
+per-window pkls (unlike the original, now-lost run) also enabled a real
+prior/posterior/chi2-vs-slit-position comparison and a chi2 defined
+against the real per-pixel noise floor (careful: these are `noise=False`
+sweeps, so chi2 here means representation-error-vs-assumed-noise-floor,
+not a real measurement-noise goodness-of-fit test — no chi2~=1
+expectation applies).
+
+**Window-boundary finding (open, not yet acted on).** Each of the 58
+windows is solved fully independently (no continuity constraint across
+their shared edge), and at `g_ratio=0.5` this shows up as a real, if
+small, boundary-specific accuracy cost: mean `|error|` at smooth-region
+window boundaries is ~3.5x larger for `g_ratio=0.5` than `g_ratio=1`
+(0.0066 vs 0.0019 ppm), on top of a much larger, clearly-localized jump
+right at the sharp west-hotspot seam (rows 98-126, where both windows are
+already pinned at `MIN_WINDOW`'s 9-row floor, so `g_ratio=0.5` packs
+G=18 bins into 9 rows -- edge bins there get one-sided real-pixel support
+instead of two-sided, so they're both more weakly constrained and more
+sensitive to exactly where the boundary falls relative to the true peak).
+CoV of the raw retrieved value at boundaries showed NO g_ratio-dependent
+difference (dominated by the real background gradient, not retrieval
+noise) -- the effect only shows up once the real trend is removed (CoV/
+mean on `|error|` specifically). Candidate fixes discussed, not yet
+implemented: (1) overlap the windows by a few rows and taper-blend the
+overlap at stitch time (cheap, output-only, doesn't touch the Bayesian
+solve); (2) weakly couple each window's edge-bin prior to its neighbor's
+own posterior via a Gauss-Seidel-style relaxation pass (a real statistical
+coupling, costs the current one-shot-per-window parallelism). Leaning
+toward starting with (1).
