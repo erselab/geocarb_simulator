@@ -113,11 +113,37 @@ def scale_for_window_count(fpa: int, target: int, min_window: int = MIN_WINDOW) 
 
 def build_window_tiles(fpa: int, row_min: int = 0, row_max: int = ROW_MAX_IDX,
                        min_window: int = MIN_WINDOW,
-                       window_scale: float = 1.0) -> list:
-    """Non-overlapping tiling of [row_min, row_max]. Each window's own
-    radius is a small fixed-point solve (window width depends on
-    rows_crossed at the window's own center, which depends on width) --
-    converges in a couple of iterations since rows_crossed varies slowly."""
+                       window_scale: float = 1.0, overlap: int = 0) -> list:
+    """Non-overlapping tiling of [row_min, row_max] by default (overlap=0,
+    unchanged from before). Each window's own radius is a small
+    fixed-point solve (window width depends on rows_crossed at the
+    window's own center, which depends on width) -- converges in a couple
+    of iterations since rows_crossed varies slowly.
+
+    `overlap`: rows of symmetric overlap ADDED to each internal boundary
+    AFTER the base non-overlapping tiling above is computed -- window i's
+    own row_hi extends by `overlap` past its natural boundary, and window
+    i+1's own row_lo retreats by `overlap` past the same boundary, so the
+    two windows share `2*overlap` real rows (clamped at the slit's own two
+    ends, which have no neighbor to overlap into). Purely additive:
+    `overlap=0` (the default) reproduces today's exact tiling, unchanged,
+    for every existing caller. Lets `geocarb_gert.along_slit_query.
+    query_state` blend two independent windows' own estimates in the
+    shared rows instead of either window's own boundary value being used
+    un-blended -- see docs/PROJECT_STATUS.md Sec.6's window-boundary
+    overshoot/undershoot finding for why that matters (it's a genuine
+    sign-reversing bias, which averaging directly cancels). The windows'
+    own retrieved bins feed `geocarb_gert.along_slit_state.
+    stack_windows_along_slit` first, which is what `query_state` reads.
+
+    Keep `overlap` small relative to the narrowest window (`2*min_window+1`
+    rows, e.g. 9 at the default MIN_WINDOW=4) -- this function does not
+    guard against `overlap` large enough that a window ends up overlapping
+    BOTH of its neighbors at once (a 3-way overlap merge_windows_along_
+    slit does not attempt to reconstruct correctly beyond simple N-way
+    inverse-variance combination, which is still valid, just not the
+    2-window case this was designed and validated against).
+    """
     tiles = []
     row_start = row_min
     while row_start <= row_max:
@@ -132,6 +158,13 @@ def build_window_tiles(fpa: int, row_min: int = 0, row_max: int = ROW_MAX_IDX,
         row_end = min(row_start + 2 * r, row_max)
         tiles.append((row_start, row_end))
         row_start = row_end + 1
+    if overlap > 0 and len(tiles) > 1:
+        widened = []
+        for i, (lo, hi) in enumerate(tiles):
+            new_lo = lo - overlap if i > 0 else lo
+            new_hi = hi + overlap if i < len(tiles) - 1 else hi
+            widened.append((max(row_min, new_lo), min(row_max, new_hi)))
+        tiles = widened
     return tiles
 
 
@@ -263,17 +296,23 @@ def _solve_window(row_lo: int, row_hi: int):
         # the identity regardless of kind -- state_interp is genuinely a no-op here.
         fwd_c = build_forward_state(FPA, rows_win, bin_centers, spec_c, spectrum,
                                     wn_hires, ils, pad=PAD, state_interp="linear")
-        x_c = gauss_newton_state(fwd_c, y_true, spec_c, Sy_inv_diag,
-                                 label=f"[{row_lo}-{row_hi}] coarse", verbose=False,
-                                 jacobian_fn=_linearizer(spec_c, bin_centers, use_analytic, "linear"))
+        x_c, S_ret_c = gauss_newton_state(fwd_c, y_true, spec_c, Sy_inv_diag,
+                                          label=f"[{row_lo}-{row_hi}] coarse", verbose=False,
+                                          jacobian_fn=_linearizer(spec_c, bin_centers, use_analytic, "linear"),
+                                          return_cov=True)
         resid_c = y_true - fwd_c(x_c)
         # Standing rule: save the ENTIRE state vector (free AND frozen) and
         # the FULL residual field, never just summary scalars. `jacobian_used`
         # is the solve's OWN record, not the requested `--jacobian` flag --
         # see the note above on why hires can silently differ from coarse.
+        # `cov` is the packed posterior covariance in SCALE units, over
+        # exactly the free elements `slices`/`x` describe -- see
+        # StateSpec.cov_for/project_cov to get one row's own physical-units
+        # block (or a projection onto arbitrary rows).
         out["coarse"] = spec_c.snapshot(x_c, resid=resid_c,
                                         resid_rms=float(np.sqrt(np.mean(resid_c ** 2))),
-                                        jacobian_used=("analytic" if use_analytic else "fd"))
+                                        jacobian_used=("analytic" if use_analytic else "fd"),
+                                        cov=S_ret_c)
         out["x_coarse"] = x_c                      # back-compat with existing plotters
         out["resid_coarse"] = resid_c
         out["resid_coarse_rms"] = float(np.sqrt(np.mean(resid_c ** 2)))
@@ -291,14 +330,16 @@ def _solve_window(row_lo: int, row_hi: int):
                                    prior_anchor_density=prior_anchor_density)
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
                                 wn_hires, ils, pad=PAD, state_interp=state_interp)
-    x_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
-                             label=f"[{row_lo}-{row_hi}] hires", verbose=False,
-                             jacobian_fn=_linearizer(spec_h, anchor_etas, use_analytic_hires,
-                                                     state_interp))
+    x_h, S_ret_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
+                                      label=f"[{row_lo}-{row_hi}] hires", verbose=False,
+                                      jacobian_fn=_linearizer(spec_h, anchor_etas, use_analytic_hires,
+                                                              state_interp),
+                                      return_cov=True)
     resid_h = y_true - fwd_h(x_h)
     out["hires"] = spec_h.snapshot(x_h, resid=resid_h,
                                    resid_rms=float(np.sqrt(np.mean(resid_h ** 2))),
-                                   jacobian_used=("analytic" if use_analytic_hires else "fd"))
+                                   jacobian_used=("analytic" if use_analytic_hires else "fd"),
+                                   cov=S_ret_h)
     out["x_hires"] = x_h
     out["resid_hires"] = resid_h
     out["anchor_etas"] = anchor_etas
@@ -465,6 +506,16 @@ def main() -> int:
                          "means fewer, wider windows. Ignored when --n-windows is given.")
     ap.add_argument("--min-window", type=int, default=cfg.min_window,
                     help=f"minimum window radius (default {cfg.min_window})")
+    ap.add_argument("--overlap", type=int, default=0,
+                    help="rows of symmetric overlap added to each internal window "
+                         "boundary (default 0, today's exact non-overlapping tiling, "
+                         "unchanged). >0 lets geocarb_gert.along_slit_query.query_state "
+                         "blend two independent windows' own estimates in their shared "
+                         "rows instead of using either window's boundary value "
+                         "un-blended -- see docs/PROJECT_STATUS.md Sec.6's window-"
+                         "boundary overshoot/undershoot finding. Keep small relative to the "
+                         "narrowest window (2*min_window+1 rows) -- see "
+                         "build_window_tiles's own docstring.")
     ap.add_argument("--out", type=str, default=None,
                     help="output pickle path (default: derived from the run settings)")
     ap.add_argument("--prior-form", type=str, default=cfg.prior_form,
@@ -564,10 +615,11 @@ def main() -> int:
     else:
         window_scale = args.window_scale
     all_tiles = build_window_tiles(fpa, min_window=args.min_window,
-                                   window_scale=window_scale)
+                                   window_scale=window_scale, overlap=args.overlap)
     widths = [hi - lo + 1 for lo, hi in all_tiles]
     print(f"{len(all_tiles)} windows total, widths min={min(widths)} max={max(widths)} "
-         f"mean={np.mean(widths):.1f}, total rows={sum(widths)}", flush=True)
+         f"mean={np.mean(widths):.1f}, total rows={sum(widths)}"
+         + (f", overlap={args.overlap}" if args.overlap else ""), flush=True)
     if args.task_id is not None:
         tiles = all_tiles[args.task_id::args.n_tasks]
         print(f"task {args.task_id}/{args.n_tasks}: {len(tiles)} windows assigned "
@@ -634,6 +686,8 @@ def main() -> int:
         suffix += f"_prad{args.prior_anchor_density:g}"
     if args.flat_sy_inv:
         suffix += "_flatsyinv"
+    if args.overlap:
+        suffix += f"_ovlp{args.overlap}"
     payload = {"results": results, "tiles": all_tiles, "fpa": fpa, "uniform": args.uniform,
               "barcode": args.barcode, "realistic_barcode": args.realistic_barcode,
               "barcode_bars": args.barcode_bars if (args.barcode or args.realistic_barcode) else None,
@@ -651,7 +705,7 @@ def main() -> int:
               "window_scale": window_scale, "prior_fields": args.prior_fields,
               "n_lookup_samples": n_lookup_samples,
               "prior_anchor_density": args.prior_anchor_density,
-              "flat_sy_inv": args.flat_sy_inv}
+              "flat_sy_inv": args.flat_sy_inv, "overlap": args.overlap}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
         out_dir = REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{fpa}{suffix}_parts"

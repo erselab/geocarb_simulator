@@ -593,10 +593,99 @@ sensitive to exactly where the boundary falls relative to the true peak).
 CoV of the raw retrieved value at boundaries showed NO g_ratio-dependent
 difference (dominated by the real background gradient, not retrieval
 noise) -- the effect only shows up once the real trend is removed (CoV/
-mean on `|error|` specifically). Candidate fixes discussed, not yet
-implemented: (1) overlap the windows by a few rows and taper-blend the
-overlap at stitch time (cheap, output-only, doesn't touch the Bayesian
-solve); (2) weakly couple each window's edge-bin prior to its neighbor's
-own posterior via a Gauss-Seidel-style relaxation pass (a real statistical
-coupling, costs the current one-shot-per-window parallelism). Leaning
-toward starting with (1).
+mean on `|error|` specifically). The sign pattern is systematic, not
+random noise: a window's trailing edge consistently overshoots and the
+next window's leading edge consistently undershoots (or vice versa),
+tracking the local true-CO2 gradient direction -- classic edge bias of
+independently-regularized local regression, and directly explained by the
+`exponential`-form prior's own documented behavior (`joint_state.py::
+Sa_inv_block`'s docstring): inverting a stationary exponential covariance
+gives compensating corner terms but no edge weakening, unlike `tikhonov`'s
+natural free-boundary condition. Two candidate fixes were considered --
+(1) overlap the windows by a few rows and blend the overlap at stitch
+time (cheap, output-only, doesn't touch the Bayesian solve), (2) weakly
+couple each window's edge-bin prior to its neighbor's own posterior via a
+Gauss-Seidel-style relaxation pass (a real statistical coupling, costs the
+current one-shot-per-window parallelism). (1) was implemented; (2) was
+not pursued.
+
+**Posterior covariance + window-overlap merging (implemented,
+2026-08-21).** Three pieces, in dependency order:
+
+1. **Posterior covariance is now available from every solve.**
+   `gauss_newton_state(..., return_cov=True)` returns `(x, S_ret)` with
+   `S_ret = inv(A)` at the final Gauss-Newton iteration -- `A` is already
+   factored for that iteration's own `np.linalg.solve`, so this is nearly
+   free. `StateSpec.cov_for(name, S_ret_scale)` slices one row's own
+   physical-units covariance sub-block out of the packed `S_ret_scale`
+   (scale-kind rows convert via `prior[i]*prior[j]*S_ret[i,j]`, the
+   delta-method Jacobian of `value = prior*x`); `StateSpec.project_cov`
+   projects that block onto arbitrary eta positions via the same
+   `interp_weights` matrix `interp_to` itself uses, so
+   `Var(x_hat(eta)) = W @ Cov_row @ W.T` exactly, including off-diagonal
+   terms between query points -- not an approximation.
+   `gd_joint_block_whole_slit_sweep.py` now saves `cov` in every window's
+   `snapshot()` (coarse and hires both) as a matter of course.
+
+2. **`build_window_tiles(..., overlap=N)`** (new `--overlap` flag, default
+   0 = today's exact non-overlapping tiling, unchanged for every existing
+   caller). After the usual keystone-driven tiling, each internal boundary
+   is widened by `overlap` rows on each side (clamped at the slit's own
+   two ends). Because bin count scales with window width
+   (`G = round(width/g_ratio)`), a widened window gets proportionally MORE
+   bins over its now-wider eta range -- `pixel_density_bin_centers`
+   re-places every bin from scratch, so overlapping windows' bins are
+   never shared or coincident, only their *row ranges* overlap. Verified
+   visually with `scripts/gd_window_overlap_diagram.py` (two independently
+   -placed, non-coinciding bin sets shown side-by-side for `overlap=0` vs.
+   `overlap=N`).
+
+3. **The information-bearing state, and a separate query/postprocessing
+   step.** An initial design directly interpolated each window's own bins
+   onto a fixed 1024-detector-row grid and combined overlapping windows
+   there (`along_slit_merge.py`, since replaced). That representation
+   understated the real correlation structure: within one window, every
+   reported row is a linear combination of the SAME G bins (rank ~G, not
+   window-width), so adjacent rows are far more correlated than 1024
+   independent numbers would imply -- exactly the kind of manufactured
+   precision this project's own along-slit uncertainty work is trying to
+   avoid. Replaced with a two-module split:
+   - `geocarb_gert/along_slit_state.py::stack_windows_along_slit(windows,
+     name)` builds the actual retrieved state: every contributing
+     window's own bins concatenated, with the REAL joint covariance --
+     exactly block-diagonal, since each window was solved fully
+     independently (no shared data, no prior term crosses a window
+     boundary). Nothing is interpolated or fabricated here; length is
+     however many bins were actually retrieved, not tied to any detector-
+     row count.
+   - `geocarb_gert/along_slit_query.py::query_state(stacked, row_query,
+     eta_query)` is the postprocessing step: given any caller-supplied
+     grid, returns `(values, cov, n_covering)` -- the FULL covariance at
+     that grid, not just a diagonal, via `W @ stacked.cov @ W.T` for one
+     interpolation operator `W`. A query point covered by exactly one
+     window reproduces `StateSpec.project_cov` exactly (unit-tested). A
+     point covered by two overlapping windows gets the inverse-variance-
+     optimal combination of their independent estimates, PLUS an explicit
+     `disagreement_inflation` term (same idea as `var_excess` below) at
+     exactly the multi-window points, since the documented overshoot/
+     undershoot bias means two windows can disagree by more than their
+     own stated uncertainties predict -- a bias effect, not something
+     `W @ cov @ W.T` alone can represent. `n_covering` lets a caller tell
+     a single-window point from a merged one from a gap, without
+     re-deriving it. A 1024-row curve is now just one particular query a
+     caller can make against the real state, not the state itself.
+
+   Empirically validated (matching `overlap=0`/`overlap=2` sweeps at
+   `g_ratio=1`, exact prior, `co2plus1pct`): merging overlap-band
+   estimates cut mean `|error|` near the base-tiling seams from 0.0169 to
+   0.0100 ppm (41%), max `|error|` from 0.176 to 0.113 (36%), and
+   whole-slit mean `|error|` from 0.0126 to 0.0108 (14%).
+
+**Not yet done:** `docs/PROJECT_STATUS.md` (this section) is now current,
+but none of this is wired into the four existing downstream plotting
+scripts (`gd_joint_block_whole_slit_plot.py`, `gd_joint_block_matrix.py::
+stitch()`, `gd_retrieval_bingrid_plot.py`,
+`gd_retrieval_prior_slit_chi2_compare.py`) -- deliberately scoped out
+until the mechanism itself was proven correct. Whether `overlap>0` should
+become the new default for production sweeps, or stay an explicit
+per-run opt-in, is also still an open decision.

@@ -380,6 +380,51 @@ class StateSpec:
         basis = np.eye(p.n)
         return _row_interp1d(p.positions, basis, state_interp, axis=0)(etas)
 
+    def cov_for(self, name: str, S_ret_scale: np.ndarray) -> np.ndarray:
+        """One row's own ``(n, n)`` posterior covariance sub-matrix, in
+        physical units -- sliced out of `gauss_newton_state(...,
+        return_cov=True)`'s own ``S_ret_scale`` (packed over ALL free
+        rows, in scale units -- see `slices()`) and converted with this
+        row's own `prior`: ``kind="scale"`` -> ``Cov_phys[i,j] =
+        prior[i]*prior[j]*S_ret_scale[i,j]`` (the delta-method Jacobian of
+        ``value = prior * x`` is just `prior` itself, elementwise);
+        ``kind="absolute"`` -> already physical, no conversion.
+
+        A frozen row has no posterior uncertainty by construction (it
+        never moved from its prior, `Sa`/`Sy` were never consulted for
+        it) -- returns a zero matrix of the right shape rather than
+        raising, so callers iterating over every row (frozen and free
+        alike, e.g. building a full snapshot) don't need to special-case
+        frozen ones.
+        """
+        p = self[name]
+        if not p.free:
+            return np.zeros((p.n, p.n))
+        sl = self.slices()[name]
+        block = np.asarray(S_ret_scale, dtype=float)[sl, sl]
+        if p.kind == "scale":
+            return block * np.outer(p.prior, p.prior)
+        return block
+
+    def project_cov(self, etas, name: str, S_ret_scale: np.ndarray,
+                    state_interp: str = "linear") -> np.ndarray:
+        """This row's posterior covariance projected onto arbitrary eta
+        positions, through the SAME linear interpolation `interp_to`/
+        `interp_weights` use for the point estimate: ``Var(x_hat(eta)) =
+        W @ Cov_row @ W.T`` -- exact, not an approximation, since
+        `interp_to` is itself exactly ``value = W @ row_values`` for a
+        fixed `state_interp` kind (see `interp_weights`'s own docstring).
+
+        Returns the FULL ``(len(etas), len(etas))`` covariance, including
+        off-diagonal terms between the query points -- e.g. needed to
+        propagate uncertainty correctly through a further downstream
+        linear combination (a window-boundary blend, say). Take
+        ``.diagonal()`` for just the per-point variance.
+        """
+        W = self.interp_weights(etas, name, state_interp)
+        cov_row = self.cov_for(name, S_ret_scale)
+        return W @ cov_row @ W.T
+
     def snapshot(self, x, **extra) -> dict:
         """A complete, self-describing record of this solve's state vector.
 
@@ -554,7 +599,8 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
 
 def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
                        step: float = 1e-3, max_iter: int = 15, tol: float = 1e-5,
-                       label: str = "", verbose: bool = True, jacobian_fn=None):
+                       label: str = "", verbose: bool = True, jacobian_fn=None,
+                       return_cov: bool = False):
     """Regularized Gauss-Newton over whatever :class:`StateSpec` says is free.
 
     The generic counterpart of `gd_joint_block_retrieve.gauss_newton_
@@ -588,6 +634,20 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     evaluation rather than ``n_free + 1``, and `forward` is then unused. The
     `kind="scale"` restriction is lifted in that mode, because analytic
     columns carry their own units and there is no shared step to mis-scale.
+
+    ``return_cov=True`` additionally returns the posterior covariance
+    ``S_ret = A^-1`` (Rodgers ``(K^T Sy^-1 K + Sa^-1)^-1``), evaluated once
+    at ``A``'s own final-iteration value -- no extra forward/Jacobian
+    evaluation, since ``A`` is already built for that last `np.linalg.
+    solve`. This is the FULL covariance over every free element in `spec`'s
+    own packed order (`spec.slices()`), in "scale" units (same units `x`
+    itself is in) -- includes off-diagonal covariance between every pair of
+    bins, both within one row (neighboring bins) and, when more than one
+    row is free at once (e.g. co2_ppm + p_surface_hpa), across rows. Use
+    `StateSpec.cov_for`/`StateSpec.project_cov` to slice out one row's own
+    block, convert to physical units, and (optionally) project onto
+    arbitrary eta positions through the same interpolation the point
+    estimate itself uses.
     """
     if jacobian_fn is None:
         for p in spec.free_params:
@@ -628,6 +688,8 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
                   f"rms_resid={rms:.4g}", flush=True)
         if np.linalg.norm(dx) < tol:
             break
+    if return_cov:
+        return x, np.linalg.inv(A)
     return x
 
 
