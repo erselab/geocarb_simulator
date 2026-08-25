@@ -95,9 +95,21 @@ def hires_spectra_for(fm, surface_types=SCENE_TYPES) -> dict:
 
 
 def _std_temperature(z_km: np.ndarray) -> np.ndarray:
-    """US Standard Atmosphere 1976 temperature [K] (troposphere → mesosphere)."""
+    """US Standard Atmosphere 1976 temperature [K] (troposphere → mesosphere).
+
+    Built from `np.full_like(z, nan)`, not `np.empty_like` -- every branch
+    below is a `np.where(condition, value, T)` chain, and a NaN input fails
+    every comparison, so an unhandled `z` (e.g. from `pressure_to_alt_std_
+    atm` returning nan for an out-of-table pressure) previously left T at
+    whatever UNINITIALIZED memory `np.empty_like` happened to allocate --
+    found 2026-08-25 as a real, hard-to-diagnose failure (T literally came
+    back as the pressure array's own leftover bit pattern, a physically
+    plausible-looking but wrong number, not an obvious NaN). Starting from
+    nan makes any future unhandled `z` fail loudly (NaN propagates to a
+    clear crash downstream) instead of silently returning garbage.
+    """
     z = np.asarray(z_km, dtype=float)
-    T = np.empty_like(z)
+    T = np.full_like(z, np.nan)
     T = np.where(z < 11.0, 288.15 - 6.5 * z, T)
     T = np.where((z >= 11.0) & (z < 20.0), 216.65, T)
     T = np.where((z >= 20.0) & (z < 32.0), 216.65 + 1.0 * (z - 20.0), T)

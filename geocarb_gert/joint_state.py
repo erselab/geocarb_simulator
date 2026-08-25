@@ -208,8 +208,14 @@ class ParamSpec:
         a real behavioural difference at every window boundary, since
         production windows tile non-overlapping.
 
-        Defaulting to ``tikhonov`` keeps continuity with every result
-        computed before 2026-08-17; ``exponential`` is opt-in.
+        Defaulted to ``tikhonov`` through 2026-08-17 for continuity with
+        every result computed before then. As of the 2026-08-20 config
+        consolidation, ``exponential`` (with per-row correlation lengths
+        from `input/retrieval_defaults.yml`'s `correlation_length_eta`,
+        e.g. ~10 km for `co2_ppm`) is the actual default -- this is also
+        the prior form whose lack of edge-weakening produces the
+        window-boundary overshoot/undershoot bias documented in
+        docs/PROJECT_STATUS.md Sec.6.
         """
         n = self.n
         if self.prior_form == "tikhonov":
@@ -485,7 +491,8 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                           prior_form="exponential", gamma=3.0,
                           band_label=None, surface_positions=None,
                           surface_density: int = 3, uniform: bool = False,
-                          prior_anchor_density: float | None = None) -> StateSpec:
+                          prior_anchor_density: float | None = None,
+                          surface_fields=None) -> StateSpec:
     """Build a :class:`StateSpec` whose priors are the truth scene's own
     values at `bin_centers` -- the joint block's existing "local-truth
     nuisance idealization", but now with every quantity present as a real,
@@ -503,10 +510,15 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
     want, since surface pressure and a CO2 hot spot do not share a scale.
 
     `band_label` (a `SpectralWindow.label`, e.g. "CO2_strong") adds the
-    `surface`-target rows from `along_slit_scene.SURFACE_FIELDS`, on their
+    `surface`-target rows from `surface_fields` (default `along_slit_scene.
+    SURFACE_FIELDS`, i.e. the exact truth -- pass `along_slit_scene.
+    SURFACE_PRIOR_FIELD_SETS[key]` for an imperfect surface prior, the same
+    way `fields` selects an imperfect atmosphere prior via `PRIOR_FIELD_SETS`;
+    added 2026-08-25, previously hardcoded to `SURFACE_FIELDS`), on their
     own denser grid (`surface_positions`, or `albedo_positions_for(
-    bin_centers, surface_density)`). Omitting it reproduces the pre-2026-08-18
-    atmosphere-only state exactly, so every existing caller is unaffected.
+    bin_centers, surface_density)`). Omitting `band_label` reproduces the
+    pre-2026-08-18 atmosphere-only state exactly, so every existing caller
+    is unaffected.
 
     `uniform=True` evaluates every field at a single fixed position
     (`x_km=0.0`, matching `along_slit_scene.atmosphere_at(0.0)`'s own
@@ -546,6 +558,7 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
     from . import along_slit_scene as als
 
     fields = als.STATE_FIELDS if fields is None else fields
+    surface_fields = als.SURFACE_FIELDS if surface_fields is None else surface_fields
     bin_centers = np.atleast_1d(np.asarray(bin_centers, dtype=float))
     default_sigma = {"co2_ppm": 0.10, "ch4_ppb": 0.10, "co_ppb": 0.20,
                      "h2o_surface_vmr": 0.25, "p_surface_hpa": 0.02,
@@ -593,7 +606,7 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                if surface_positions is None
                else np.atleast_1d(np.asarray(surface_positions, dtype=float)))
         rows += [_row(name, fn, pos, "surface")
-                 for name, fn in als.SURFACE_FIELDS.items()]
+                 for name, fn in surface_fields.items()]
     return StateSpec(rows)
 
 

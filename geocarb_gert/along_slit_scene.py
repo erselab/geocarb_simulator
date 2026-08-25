@@ -134,7 +134,9 @@ SURFACE_PATCHES = [
 ]
 ALBEDO_EDGE_KM = 3.0      # boundary softness, ~1 detector row
 ALBEDO_COV = 0.10         # fractional 1-sigma within-patch variability
-ALBEDO_CORR_KM = 30.0     # its correlation length -- shorter than any gas feature
+ALBEDO_CORR_KM = 10.0     # its correlation length -- matches the CO2 hot-spot scale
+                          # (~1.7 detector rows at 6km/row GSD); shorter than any gas
+                          # feature besides the hot spots themselves (2026-08-25, was 30.0)
 ALBEDO_FINE_SEED = 20260817
 _ALBEDO_MIN, _ALBEDO_MAX = 0.005, 0.95
 
@@ -193,7 +195,7 @@ def _patch_type_weights(x_km):
     return types, w / total
 
 
-def albedo_at(x_km, labels):
+def albedo_at(x_km, labels, include_fine: bool = True):
     """Surface albedo at along-slit position(s) `x_km`, for bands `labels`.
 
     `labels` are `SpectralWindow.label` strings (e.g. "CO2_strong"), so the
@@ -205,6 +207,11 @@ def albedo_at(x_km, labels):
     multi-FPA joint retrievals of `JOINT_BLOCK_MIGRATION_PLAN.md` Sec.5,
     where per-bin albedo has to be retrieved per band.
 
+    `include_fine=False` (2026-08-25) drops the fine-scale texture
+    perturbation, leaving just the patch-archetype blend -- the surface-side
+    analogue of `STATE_FIELDS_PRIOR`'s "background/topography, no localized
+    detail" imperfect prior. See `SURFACE_FIELDS_PRIOR`/`albedo_for_label_prior`.
+
     Returns
     -------
     ndarray, shape (n_labels,) for scalar `x_km`, else (n_labels, n_x)
@@ -215,8 +222,11 @@ def albedo_at(x_km, labels):
     x = np.atleast_1d(np.asarray(x_km, dtype=float))
     types, w = _patch_type_weights(x)
 
-    xf, f = _albedo_fine_field()
-    pert = 1.0 + np.interp(x, xf, f)
+    if include_fine:
+        xf, f = _albedo_fine_field()
+        pert = 1.0 + np.interp(x, xf, f)
+    else:
+        pert = 1.0
 
     out = np.empty((len(labels), len(x)))
     for j, lab in enumerate(labels):
@@ -232,7 +242,7 @@ def albedo_at(x_km, labels):
     return out[:, 0] if scalar else out
 
 
-def albedo_for_label(x_km, label):
+def albedo_for_label(x_km, label, include_fine: bool = True):
     """`albedo_at` for a single band, returning a plain scalar/1-D array.
 
     The shape `albedo_at` returns is ``(n_labels, n_x)``, which is right for
@@ -242,8 +252,18 @@ def albedo_for_label(x_km, label):
     `JOINT_BLOCK_MIGRATION_PLAN.md` Sec.5's per-band albedo retrieval needs.
     """
     scalar = np.isscalar(x_km) or np.asarray(x_km).ndim == 0
-    out = np.atleast_2d(albedo_at(np.atleast_1d(x_km), [label]))[0]
+    out = np.atleast_2d(albedo_at(np.atleast_1d(x_km), [label], include_fine))[0]
     return float(out[0]) if scalar else out
+
+
+def albedo_for_label_prior(x_km, label):
+    """The imperfect ("structural") surface prior: `albedo_for_label` with
+    the fine-scale texture dropped -- the prior knows the large-scale
+    land-cover patch layout but not the within-patch brightness variation
+    (ecosystem health, darker/lighter grasses, ...). See
+    `SURFACE_FIELDS_PRIOR`/`SURFACE_PRIOR_FIELD_SETS` below.
+    """
+    return albedo_for_label(x_km, label, include_fine=False)
 
 
 #: Truth-state parameters that are NOT part of `AtmosphericProfile` and so
@@ -256,15 +276,32 @@ def albedo_for_label(x_km, label):
 #: the coupling that makes a shared surface across FPAs meaningful, and it is
 #: why these could not simply be appended to `STATE_FIELDS`.
 #:
-#: CAVEAT (2026-08-18): the joint-block truth images rendered so far all use
-#: a single CONSTANT albedo -- `gd_test._band_setup`'s `vary_albedo` defaults
-#: to False and no joint-block caller passes it. So a free albedo row fitted
-#: against those bands is fitting a constant, and the patch/fine-scale
-#: structure below is present in this module but absent from the data. Render
-#: with ``vary_albedo=True`` (and re-cache the band image) before reading any
-#: albedo retrieval as a test of along-slit albedo recovery.
+#: RESOLVED (2026-08-25, was open 2026-08-18 -> 2026-08-25): the joint-block
+#: sweep script now has its own `--vary-albedo` flag
+#: (`scripts/gd_joint_block_whole_slit_sweep.py`), required (and validated)
+#: whenever `"albedo"` is in `--free` -- see that script for the actual
+#: production wiring. `gd_test._band_setup`'s own `vary_albedo` still
+#: defaults to False for every OTHER caller, unaffected.
 SURFACE_FIELDS = {
     "albedo": albedo_for_label,
+}
+
+#: Imperfect surface prior (2026-08-25) -- the surface-side sibling of
+#: `STATE_FIELDS_PRIOR`: knows the large-scale patch layout, not the
+#: fine-scale texture. Named `SURFACE_PRIOR_FIELD_SETS` (not folded into
+#: `PRIOR_FIELD_SETS` itself) because surface fields take `(x_km,
+#: band_label)` while atmosphere fields take just `(x_km)` -- see
+#: `SURFACE_FIELDS`'s own docstring above. `joint_state.state_spec_from_
+#: scene`'s `surface_fields` parameter reads from here, keyed by the SAME
+#: `--prior-fields` value that selects `PRIOR_FIELD_SETS` for the
+#: atmosphere rows -- one flag now drives both.
+SURFACE_FIELDS_PRIOR = {
+    "albedo": albedo_for_label_prior,
+}
+
+SURFACE_PRIOR_FIELD_SETS = {
+    "exact": SURFACE_FIELDS,
+    "structural": SURFACE_FIELDS_PRIOR,
 }
 
 

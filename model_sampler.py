@@ -121,6 +121,17 @@ def pressure_to_alt_std_atm(pressure_hpa: np.ndarray | float) -> np.ndarray:
     Accurate to within ~0.1 km for pressures 1013–0.004 hPa (surface to 86 km).
     Vectorised; accepts scalars or arrays.
 
+    The troposphere layer (`i == 0`) has no upper pressure bound: a real
+    surface pressure routinely exceeds the 1013.25 hPa sea-level reference
+    (topography, weather, or just this scene's own along-slit p_surface_hpa
+    variability) -- found 2026-08-25, a p_surface_hpa of 1014.27 (nothing
+    unusual) fell through every mask below and left `alt` at its
+    initialized `nan`, which `_std_temperature` then silently turned into
+    garbage (see that function's own docstring). The troposphere's
+    lapse-rate formula is a smooth, physically sensible extrapolation a few
+    hPa past 1013.25 -- there is no real "floor" here, only the table's own
+    tabulation boundary.
+
     Parameters
     ----------
     pressure_hpa : float or array-like
@@ -137,7 +148,7 @@ def pressure_to_alt_std_atm(pressure_hpa: np.ndarray | float) -> np.ndarray:
     for i in range(len(_STD_ATM_LAYERS) - 1):
         z0_km, p0, T0, L_km = _STD_ATM_LAYERS[i]
         _,     p1, _,  _    = _STD_ATM_LAYERS[i + 1]
-        mask = (p <= p0) & (p >= p1)
+        mask = (p >= p1) if i == 0 else (p <= p0) & (p >= p1)
         if not np.any(mask):
             continue
         pm = p[mask]

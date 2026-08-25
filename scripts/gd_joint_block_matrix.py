@@ -84,7 +84,8 @@ from geocarb_gert.gd_render import s_max  # noqa: E402
 from geocarb_gert.mission_config import RetrievalDefaults  # noqa: E402
 
 N_COLS = 1024
-FREE_SETS = {"co2": "co2_ppm", "co2p": "co2_ppm,p_surface_hpa"}
+FREE_SETS = {"co2": "co2_ppm", "co2p": "co2_ppm,p_surface_hpa",
+            "co2p_albedo": "co2_ppm,p_surface_hpa,albedo"}
 
 
 def parse_list(s, cast):
@@ -190,22 +191,60 @@ def _payload_flat_sy_inv(path) -> bool:
         return False
 
 
-def resolve_existing(cid, jacobian, tag_dir, flat_sy_inv=False):
+def _payload_overlap(path) -> int:
+    """Best-effort read of a cached pkl's own `overlap` -- pkls from before
+    window-overlap tiling existed have no such key, and are treated as 0
+    (they predate the feature entirely, so that's what they in fact are)."""
+    try:
+        with open(path, "rb") as f:
+            return int(pickle.load(f).get("overlap", 0))
+    except Exception:
+        return 0
+
+
+def _payload_prior_form(path) -> str:
+    """Best-effort read of a cached pkl's own `prior_form` -- pkls from
+    before this field existed default to `"exponential"`, matching this
+    project's own current default (`input/retrieval_defaults.yml`)."""
+    try:
+        with open(path, "rb") as f:
+            return str(pickle.load(f).get("prior_form", "exponential"))
+    except Exception:
+        return "exponential"
+
+
+def _payload_vary_albedo(path) -> bool:
+    """Best-effort read of a cached pkl's own `vary_albedo` -- pkls from
+    before this feature existed have no such key, and are treated as False
+    (they predate it entirely, so that's what they in fact are)."""
+    try:
+        with open(path, "rb") as f:
+            return bool(pickle.load(f).get("vary_albedo", False))
+    except Exception:
+        return False
+
+
+def resolve_existing(cid, jacobian, tag_dir, flat_sy_inv=False, overlap=0, prior_form="exponential",
+                     vary_albedo=False):
     """(path, source) if this exact config/solver already has output
     somewhere -- this tag's own folder first, then (for bare ids only) the
     closed regression's archive. `source` is "own" or "archive"/None.
 
-    A file that exists at the expected path but whose own flat_sy_inv
-    metadata does NOT match the requested one is treated as NOT found
-    (forces a fresh run) rather than silently returned -- config_id() has
-    no flat_sy_inv axis (that flag is meant to be paired with its own
-    --tag, not mixed into an existing tag's own configs), so this is the
-    guard against a --flat-sy-inv run silently reusing a same-path
-    corrected-weighting result, or vice versa."""
+    A file that exists at the expected path but whose own flat_sy_inv/
+    overlap/prior_form metadata does NOT match what was requested is
+    treated as NOT found (forces a fresh run) rather than silently
+    returned -- config_id() has no axis for any of these (they're meant to
+    be paired with their own --tag, not mixed into an existing tag's own
+    configs), so this is the guard against e.g. a --overlap 2 run silently
+    reusing a same-path overlap=0 result, or vice versa. Same pattern as
+    the original flat_sy_inv check."""
     own = tag_dir / f"{cid}_{jacobian}.pkl"
-    if own.exists() and _payload_flat_sy_inv(own) == flat_sy_inv:
+    if (own.exists() and _payload_flat_sy_inv(own) == flat_sy_inv
+           and _payload_overlap(own) == overlap and _payload_prior_form(own) == prior_form
+           and _payload_vary_albedo(own) == vary_albedo):
         return own, "own"
-    if is_bare(cid) and not flat_sy_inv:
+    if (is_bare(cid) and not flat_sy_inv and overlap == 0 and prior_form == "exponential"
+           and not vary_albedo):
         arch = ARCHIVE / f"{cid}_{jacobian}.pkl"
         if arch.exists():
             return arch, "archive"
@@ -215,7 +254,11 @@ def resolve_existing(cid, jacobian, tag_dir, flat_sy_inv=False):
 def run_one(cid, jacobian, n_workers, env, tag_dir, force=False):
     free_key, nwin, gratio, adens, si, scene, barcode_bars, prior_fields = parse_config(cid)
     flat_sy_inv = env.get("_FLAT_SY_INV") == "1"
-    path, source = (None, None) if force else resolve_existing(cid, jacobian, tag_dir, flat_sy_inv)
+    overlap = int(env.get("_OVERLAP", "0"))
+    prior_form = env.get("_PRIOR_FORM", "exponential")
+    vary_albedo = env.get("_VARY_ALBEDO") == "1"
+    path, source = (None, None) if force else resolve_existing(
+        cid, jacobian, tag_dir, flat_sy_inv, overlap, prior_form, vary_albedo)
     if path is not None:
         tag = "archive (already validated)" if source == "archive" else "exists"
         print(f"  {cid:26s} {jacobian:8s} {tag}, skipping", flush=True)
@@ -246,9 +289,16 @@ def run_one(cid, jacobian, n_workers, env, tag_dir, force=False):
         cmd.append("--no-truth-cache")
     if env.get("_FLAT_SY_INV") == "1":
         cmd.append("--flat-sy-inv")
+    if overlap:
+        cmd += ["--overlap", str(overlap)]
+    if prior_form != "exponential":
+        cmd += ["--prior-form", prior_form]
+    if vary_albedo:
+        cmd.append("--vary-albedo")
     print(f"  {cid:26s} {jacobian:8s} running ...", flush=True)
     t0 = time.time()
-    _internal_keys = ("_HIRES_ONLY", "_CONFIG_PATH", "_NO_TRUTH_CACHE", "_FLAT_SY_INV")
+    _internal_keys = ("_HIRES_ONLY", "_CONFIG_PATH", "_NO_TRUTH_CACHE", "_FLAT_SY_INV",
+                      "_OVERLAP", "_PRIOR_FORM", "_VARY_ALBEDO")
     r = subprocess.run(cmd, cwd=REPO_ROOT, env={k: v for k, v in env.items() if k not in _internal_keys},
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     dt = time.time() - t0
@@ -414,6 +464,24 @@ def main() -> int:
                          "instead of silently returning the wrong-weighting result), but a "
                          "dedicated tag is still the intended way to keep the two comparable "
                          "runs' outputs cleanly separated on disk.")
+    ap.add_argument("--overlap", type=int, default=0,
+                    help="forwarded to every shelled-out sweep invocation -- rows of symmetric "
+                         "overlap between adjacent windows (see build_window_tiles/along_slit_"
+                         "query.query_state, docs/PROJECT_STATUS.md Sec.6). Default 0 (today's "
+                         "exact tiling). Part of resolve_existing()'s own metadata check, same "
+                         "reasoning as --flat-sy-inv: use a --tag no other overlap value has "
+                         "used, or reuse will correctly force a fresh run rather than silently "
+                         "returning a mismatched-overlap result.")
+    ap.add_argument("--prior-form", default="exponential", choices=("exponential", "tikhonov"),
+                    help="forwarded to every shelled-out sweep invocation -- ParamSpec's own "
+                         "prior_form (default: exponential, matching input/retrieval_defaults."
+                         "yml). Also part of resolve_existing()'s metadata check.")
+    ap.add_argument("--vary-albedo", action="store_true",
+                    help="forwarded to every shelled-out sweep invocation -- render the truth "
+                         "scene with real along-slit surface heterogeneity instead of a "
+                         "constant scalar albedo (geocarb_gert.along_slit_scene.albedo_at). "
+                         "Required by the sweep script itself whenever 'albedo' is in --free. "
+                         "Also part of resolve_existing()'s metadata check.")
     ap.add_argument("--force", action="store_true",
                     help="re-run configs even if found in this tag's folder OR the archive")
     ap.add_argument("--tol", type=float, default=1e-5)
@@ -468,6 +536,12 @@ def main() -> int:
         env["_NO_TRUTH_CACHE"] = "1"
     if args.flat_sy_inv:
         env["_FLAT_SY_INV"] = "1"
+    if args.overlap:
+        env["_OVERLAP"] = str(args.overlap)
+    if args.prior_form != "exponential":
+        env["_PRIOR_FORM"] = args.prior_form
+    if args.vary_albedo:
+        env["_VARY_ALBEDO"] = "1"
 
     rows = np.arange(float(N_COLS))
     _, s = xy_to_wavelength_slit(2, np.full(N_COLS, 512.0), rows)

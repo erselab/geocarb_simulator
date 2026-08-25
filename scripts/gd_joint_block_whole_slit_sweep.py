@@ -49,6 +49,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import gd_test as gdt  # noqa: E402
 from gd_joint_block_retrieve import FPA, GERT_ROOT, _eta_of, band_basics  # noqa: E402
+from geocarb_gert.instrument import GEOCARB_BANDS  # noqa: E402
 from gd_joint_block_diagnostics import pixel_density_bin_centers  # noqa: E402
 
 import geosat_geometry as gg  # noqa: E402
@@ -169,16 +170,27 @@ def build_window_tiles(fpa: int, row_min: int = 0, row_max: int = ROW_MAX_IDX,
 
 
 def _make_state_spectrum(absco, wide_inst, geo, solar, albedo):
-    """spectrum(params_dict) -> hi-res radiance, built straight from
-    `als.atmosphere_from_params`. Deliberately NOT gert's
+    """spectrum(params_dict[, surface_dict]) -> hi-res radiance, built
+    straight from `als.atmosphere_from_params`. Deliberately NOT gert's
     StateVector.gas_scaling, which only knows how to scale gases and would
-    reintroduce the CO2-is-special asymmetry. Albedo stays fixed: it is not
-    part of AtmosphericProfile (see als.STATE_FIELDS)."""
-    def spectrum(params: dict):
+    reintroduce the CO2-is-special asymmetry.
+
+    `albedo` (the module-level scalar from `_SWEEP["albedo"]`) is the
+    fallback used whenever there is no free/frozen `surface`-target
+    `albedo` row in the state at all -- every pre-2026-08-25 caller, and
+    any current one that doesn't free "albedo". When `build_forward_state`
+    DOES have a surface row (see its own docstring: "called instead as
+    spectrum(params, surface)"), `surface["albedo"]` -- the state's own
+    per-position value, not the fixed scalar -- is what actually reaches
+    the forward model, matching `state_spec_from_scene`'s whole point in
+    adding that row in the first place.
+    """
+    def spectrum(params: dict, surface: dict | None = None):
         atm = als.atmosphere_from_params(**params)
         fm = ForwardModel(atm, absco, wide_inst, geo, solver=SingleScatterSolver(),
                           solar_spectrum=solar)
-        res = fm.run(albedo=np.array([albedo]), albedo_slope=np.zeros(1))
+        px_albedo = surface["albedo"] if surface is not None else albedo
+        res = fm.run(albedo=np.array([px_albedo]), albedo_slope=np.zeros(1))
         return np.asarray(res.I_hires[0], dtype=float)
     return spectrum
 
@@ -207,6 +219,7 @@ def _solve_window(row_lo: int, row_hi: int):
     anchor_density = int(_SWEEP.get("anchor_density", 1))
     state_interp = _SWEEP.get("state_interp", "linear")  # interp1d kind: "linear" or "nearest"
     prior_fields = _SWEEP.get("prior_fields")            # an als.PRIOR_FIELD_SETS[...] dict, always explicit (never None)
+    surface_fields = _SWEEP.get("surface_fields")        # an als.SURFACE_PRIOR_FIELD_SETS[...] dict, always explicit (never None)
     prior_anchor_density = _SWEEP.get("prior_anchor_density")  # None -> exact-per-bin (today's default)
 
     rows_win = np.arange(row_lo, row_hi + 1)
@@ -258,6 +271,7 @@ def _solve_window(row_lo: int, row_hi: int):
               prior_co2_ppm_bins=prior_co2_ppm_bins)
 
     free = tuple(_SWEEP.get("free", ("co2_ppm",)))
+    band_label = GEOCARB_BANDS[FPA][0] if "albedo" in free else None
     corr_length = _SWEEP.get("corr_length")          # None -> per-row physical defaults
     prior_form = _SWEEP.get("prior_form", "exponential")
     spectrum = _make_state_spectrum(absco, wide_inst, geo, solar, albedo)
@@ -290,7 +304,8 @@ def _solve_window(row_lo: int, row_hi: int):
         t0 = time.time()
         spec_c = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length,
                                        prior_form=prior_form, uniform=uniform_priors,
-                                       fields=prior_fields,
+                                       fields=prior_fields, band_label=band_label,
+                                       surface_fields=surface_fields,
                                        prior_anchor_density=prior_anchor_density)
         # coarse: scene positions ARE the state positions, so interpolation is
         # the identity regardless of kind -- state_interp is genuinely a no-op here.
@@ -326,7 +341,8 @@ def _solve_window(row_lo: int, row_hi: int):
     # HI-RES: scene on the finer anchor grid, every row interpolated there.
     spec_h = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length,
                                    prior_form=prior_form, uniform=uniform_priors,
-                                   fields=prior_fields,
+                                   fields=prior_fields, band_label=band_label,
+                                   surface_fields=surface_fields,
                                    prior_anchor_density=prior_anchor_density)
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
                                 wn_hires, ils, pad=PAD, state_interp=state_interp)
@@ -550,6 +566,16 @@ def main() -> int:
                     help="root directory for output files, replacing 'results' (default: "
                          "'results', or 'results/realistic_prior' under a non-'exact' "
                          "--prior-fields).")
+    ap.add_argument("--vary-albedo", action="store_true",
+                    help="render the TRUTH scene with real along-slit surface heterogeneity "
+                         "(als.SURFACE_PATCHES' 4 land-cover archetypes + fine-scale texture, "
+                         "als.albedo_at) instead of a single constant scalar albedo per band. "
+                         "REQUIRED whenever 'albedo' is in --free (enforced below) -- fitting "
+                         "a free albedo row against a constant-albedo truth was exactly the "
+                         "2026-08-18 CAVEAT this flag closes (see along_slit_scene.py's "
+                         "SURFACE_FIELDS docstring). Safe to pass without freeing albedo too "
+                         "(tests whether OTHER rows are robust to unmodeled surface "
+                         "heterogeneity) -- only the reverse (free, not rendered) is blocked.")
     ap.add_argument("--prior-anchor-density", type=float, default=None,
                     help="resolution knob for the prior, independent of --prior-fields: "
                          "None (default) samples the prior fields exactly at each bin's own "
@@ -576,6 +602,12 @@ def main() -> int:
         ap.error("--prior-fields changes what the PRIOR knows; --uniform/--barcode/"
                  "--realistic-barcode flatten the TRUTH scene -- combining them mixes two "
                  "different kinds of idealization/de-idealization in one run. Drop one.")
+    free_check = tuple(x.strip() for x in args.free.split(","))
+    if "albedo" in free_check and not args.vary_albedo:
+        ap.error("'albedo' is in --free but --vary-albedo was not passed -- this fits a free "
+                 "albedo row against a truth scene rendered with a single CONSTANT albedo, "
+                 "exactly the 2026-08-18 CAVEAT documented in along_slit_scene.py's "
+                 "SURFACE_FIELDS. Add --vary-albedo.")
     fpa_list = tuple(int(x.strip()) for x in args.fpa.split(","))
     if len(fpa_list) != 1:
         ap.error(f"--fpa currently supports exactly one band (got {args.fpa!r}); multi-band "
@@ -605,7 +637,8 @@ def main() -> int:
     snr = gdt.DEFAULT_SNR_BY_FPA[fpa]
     band = gdt._band_setup_cached(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples, None,
                                   args.uniform, args.barcode, args.barcode_bars, False, 0,
-                                  args.realistic_barcode, use_cache=not args.no_truth_cache)
+                                  args.realistic_barcode, vary_albedo=args.vary_albedo,
+                                  use_cache=not args.no_truth_cache)
     wide_win, wide_inst, albedo = band_basics(fpa, atm_center, absco, geo, solar)
     print("done.\n", flush=True)
 
@@ -637,8 +670,10 @@ def main() -> int:
                        corr_length=args.corr_length, prior_form=args.prior_form,
                        jacobian=args.jacobian,
                        prior_fields=als.PRIOR_FIELD_SETS[args.prior_fields],
+                       surface_fields=als.SURFACE_PRIOR_FIELD_SETS.get(
+                           args.prior_fields, als.SURFACE_FIELDS),
                        prior_anchor_density=args.prior_anchor_density,
-                       flat_sy_inv=args.flat_sy_inv))
+                       flat_sy_inv=args.flat_sy_inv, vary_albedo=args.vary_albedo))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
     print(f"solving with {n_workers} workers...", flush=True)
@@ -688,6 +723,8 @@ def main() -> int:
         suffix += "_flatsyinv"
     if args.overlap:
         suffix += f"_ovlp{args.overlap}"
+    if args.vary_albedo:
+        suffix += "_valb"
     payload = {"results": results, "tiles": all_tiles, "fpa": fpa, "uniform": args.uniform,
               "barcode": args.barcode, "realistic_barcode": args.realistic_barcode,
               "barcode_bars": args.barcode_bars if (args.barcode or args.realistic_barcode) else None,
@@ -705,7 +742,8 @@ def main() -> int:
               "window_scale": window_scale, "prior_fields": args.prior_fields,
               "n_lookup_samples": n_lookup_samples,
               "prior_anchor_density": args.prior_anchor_density,
-              "flat_sy_inv": args.flat_sy_inv, "overlap": args.overlap}
+              "flat_sy_inv": args.flat_sy_inv, "overlap": args.overlap,
+              "vary_albedo": args.vary_albedo}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
         out_dir = REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{fpa}{suffix}_parts"
