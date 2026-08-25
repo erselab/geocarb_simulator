@@ -689,3 +689,305 @@ stitch()`, `gd_retrieval_bingrid_plot.py`,
 until the mechanism itself was proven correct. Whether `overlap>0` should
 become the new default for production sweeps, or stay an explicit
 per-run opt-in, is also still an open decision.
+
+## 7. Heterogeneous surface albedo: feature, bugs found, and what the errors actually look like (2026-08-25)
+
+### 7.1 What was built
+
+Freed `albedo` as a real, jointly-retrieved state row (alongside `co2_ppm`,
+`p_surface_hpa`) against a genuinely spatially-varying surface truth scene,
+instead of every prior run's single constant scalar albedo per band.
+Almost none of this was new engineering -- `geocarb_gert/along_slit_scene.py`
+already had a fully-worked heterogeneous-albedo model (4 land-cover
+archetypes -- desert/forest/grass/water -- arranged into 13 large-scale
+patches with soft tanh edges, plus Gaussian-smoothed fine-scale texture on
+top) sitting dormant since 2026-08-18, never turned on in the production
+sweep path. This pass:
+
+- Added `--vary-albedo` to `gd_joint_block_whole_slit_sweep.py` (required,
+  and validated, whenever `"albedo"` is in `--free`).
+- Threaded `band_label`/`surface_fields` through `joint_state.
+  state_spec_from_scene` so a free albedo row actually gets added, and
+  added the missing imperfect ("structural") surface prior --
+  `albedo_for_label_prior`/`SURFACE_FIELDS_PRIOR`/`SURFACE_PRIOR_FIELD_SETS`
+  (patches known, fine texture unknown -- the surface-side sibling of the
+  atmosphere `structural` prior from Sec.6).
+- Shortened the fine-texture correlation length `ALBEDO_CORR_KM` 30km ->
+  10km, matching the CO2 hot-spot scale, per user request.
+- New free-set `co2p_albedo` (`gd_joint_block_matrix.py::FREE_SETS`) and
+  matching `--vary-albedo`/`resolve_existing()` metadata-guard plumbing,
+  same pattern as `--overlap`/`--prior-form` in Sec.6.
+
+### 7.2 Three real bugs found while validating this end-to-end
+
+1. **`_make_state_spectrum`'s forward closure never accepted the surface
+   argument** `build_forward_state` already knew how to pass whenever a
+   `surface`-target row exists -- a hard blocker, not an edge case. Fixed
+   in `gd_joint_block_whole_slit_sweep.py`.
+
+2. **`pressure_to_alt_std_atm` silently returned `NaN`** for any
+   `p_surface_hpa` above the US Standard Atmosphere's 1013.25 hPa
+   sea-level reference (an entirely ordinary value -- 1014.27 hPa is what
+   triggered it) -- the tabulated troposphere layer had an upper pressure
+   bound with nothing beyond it. `geocarb_gert/scene.py::_std_temperature`
+   then turned that `NaN` into **uninitialized-memory garbage** (built
+   from `np.empty_like` + a `np.where` chain that never touches an entry
+   whose condition is `NaN`, which fails every comparison) instead of
+   propagating it -- in the case that surfaced this, the "temperature"
+   that came out was literally the leftover bit pattern of the *pressure*
+   array computed one line earlier (~650 K after layer-averaging, later
+   confirmed as literally `1014.27`, the pressure value itself, before
+   averaging). This crashed `gert`'s ABSCO lookup (`int(NaN)`) deep inside
+   the RT solver, initially looking like a `gert` bug -- it wasn't; `gert`
+   has no forward-model or RT-solver code of its own anywhere in this
+   repo, confirmed by grep. Fixed both: extended the troposphere formula
+   past the tabulated ceiling (`model_sampler.py::pressure_to_alt_std_atm`,
+   `i==0`'s mask no longer upper-bounded), and made `_std_temperature`
+   start from `np.full_like(z, np.nan)` so any future unhandled case fails
+   loudly instead of silently returning garbage.
+
+3. **SLURM CID-naming mismatch in the sweep launcher**, found running the
+   real 30-config sweep (not a code bug, an operational one):
+   `submit_retrieval_prior_albedo_v1.sbatch` wrote files as
+   `co2p-58-g{G}...` while `gd_joint_block_matrix.py`'s own `config_id()`
+   (given `--free co2p_albedo`) looked for `co2p_albedo-58-g{G}...` --
+   and separately, `config_id()` elides the `-pf-exact` suffix entirely
+   for the (default) `exact` prior, which the sbatch script appended
+   unconditionally. `resolve_existing()` correctly decided the array
+   job's own pkls "weren't there" and the postprocess step tried to
+   regenerate all 30 configs from scratch inside its own tiny 8GB
+   allocation -- timed out and OOM'd. Fixed by renaming the 30
+   already-computed pkls to match `config_id()`'s real convention (no
+   data lost, no recompute) and correcting the sbatch script for future
+   reruns.
+
+### 7.3 Sweep results: `retrieval_prior_albedo_{exact,structural}_v1`
+
+Both free `co2_ppm, p_surface_hpa, albedo` jointly, `--vary-albedo
+--overlap 2 --prior-form exponential`, across the standard `g_ratio` x
+`anchor_density` grid (this was the last sweep to include `g_ratio=0.5` --
+see 7.6).
+
+| g_ratio | ad1 (exact) | ad4 | ad16 | ad1 (structural) | ad4 | ad16 |
+|---|---|---|---|---|---|---|
+| 0.5 | 4.04 | 0.91 | 0.27 | 4.68 | 1.03 | 0.30 |
+| 1   | 3.77 | 0.68 | 0.32 | 4.72 | 0.69 | 0.27 |
+| 3   | 3.48 | 0.64 | 0.31 | 3.93 | 0.75 | 0.39 |
+| 6   | 3.85 | 3.07 | 3.00 | 4.90 | 4.21 | 4.20 |
+| 12  | 8.95 | 8.46 | 8.43 | 11.88| 11.06| 10.98|
+
+(CO2 rms, ppm, row-interpolated per `gd_joint_block_matrix.py::stitch()`
+-- see 7.4's caveat on this).
+
+Best case (`ad16`, fine `g_ratio`) is ~0.27-0.4 ppm -- roughly 40-50x
+worse than `co2p` without albedo at the same settings (Sec.6: ~0.005-0.007
+ppm). Freeing a third, only-weakly-constrained jointly-fit parameter costs
+real accuracy even in the best case.
+
+**A sharp break at `g6`/`g12`, unrelated to gradual diminishing returns.**
+At `g0.5`-`g3`, `anchor_density` gives huge, fast-then-slower gains
+(`g1`: 3.77 -> 0.68 -> 0.32, ~5.5x then ~2x). At `g6`/`g12` the curve is
+nearly flat from the start (`g12`: 8.95 -> 8.46 -> 8.43, 6% then 0.4%) --
+not diminishing returns, a near-immediate plateau. `residRMS` (against
+real data, not truth) is also markedly higher at `g6`/`g12` (0.017-0.038)
+than at `g0.5`-`g3` (0.0009-0.014), confirming the fit itself is worse
+there, not merely biased relative to truth. Consistent with a
+degrees-of-freedom collapse once three correlated parameters share too
+few, too-wide bins -- `gauss_newton_state(..., return_avk=True)`
+(7.5) exists now specifically to test this quantitatively, not yet wired
+into `_solve_window`'s saved snapshot.
+
+### 7.4 Native-resolution error methodology
+
+Every number in every `REPORT.md` this whole project (Sec.5, Sec.6, and
+7.3 above) is computed by `gd_joint_block_matrix.py::stitch()`, which
+`np.interp`s each window's own bin values onto the fixed 1024-row grid
+*before* comparing to truth and taking an RMS. That conflates genuine
+retrieval error with row-interpolation smearing -- worst at coarse
+`g_ratio` (bins sparse, interpolation between them doesn't track true
+curvature), negligible at fine `g_ratio` (bins dense).
+
+All analysis below instead uses `geocarb_gert.along_slit_state.
+stack_windows_along_slit(windows, name)` directly -- the real,
+uninterpolated bin positions/values/covariance, no `query_state`
+involved, truth evaluated exactly at each bin's own position (no
+interpolation needed on the truth side either, since it's a known
+closed-form function). This is the bin-native error the retrieval's own
+piecewise-linear forward model can actually be judged against; see the
+2026-08-25 conversation this section documents for the full derivation
+(the state's own bin value is a node of a piecewise-linear interpolant,
+not a footprint average -- error is therefore only rigorously defined
+pointwise, at the bin's own position).
+
+### 7.5 CO2 error vs. local truth curvature -- theory-consistent, but swamped at coarse resolution
+
+Piecewise-linear interpolation error is a curvature (2nd-derivative)
+effect, not a gradient (1st-derivative) one (`error ~ kappa * h^2 / 8`,
+classical). Checked directly: split native CO2 bins into curvature
+quartiles (`retrieval_prior_albedo_exact_v1`, `co2p_albedo-58-g1-ad16`):
+
+- `g1-ad16`: high-curvature bins have **1.16x** the mean `|error|` of
+  low-curvature bins -- small, but correctly signed.
+- `g12-ad16`: **0.61x** -- inverted. Overall error there is 25-35x
+  larger than at `g1` and dominated entirely by the DOF-collapse
+  mechanism above (7.3), which swamps and even reverses the smaller
+  curvature-driven signal (plausibly because high-curvature = hot-spot
+  peak = more absorption signal = partially offsetting SNR benefit).
+
+Conclusion: finer `g_ratio` doesn't specifically fix error near sharp
+features -- it fixes the dominant DOF problem everywhere, which happens
+to unmask a real but secondary curvature effect only once the dominant
+one is gone.
+
+### 7.6 `anchor_density`'s real mechanism: not noise averaging, a stepping-bias fix
+
+Checked whether `anchor_density` mainly shrinks posterior uncertainty
+(`S_ret`, more independent measurements pooled) as originally assumed.
+It does not: mean posterior sigma for `co2_ppm` at `g1` stays flat across
+`ad1/4/16` (1.05, 1.02, 1.02 ppm) while actual mean `|error|` drops
+sharply (1.65 -> 0.38 -> 0.15 ppm) and `residRMS` drops in lockstep
+(0.0137 -> 0.0037 -> 0.00094).
+
+The real mechanism, already documented in `build_forward_state`'s own
+docstring (the "~(1/4)|f'|h stepping error... a property of the SAMPLING,
+not of the state"): `anchor_density` doesn't add real data at all (`y_true`
+is the fixed real-pixel image, independent of it) -- it controls how
+finely `nearest_bin_scene` approximates the continuous piecewise-linear
+state when assigning real pixels to predicted radiance. Coarse anchor
+spacing snaps physically-distinct pixels to the same anchor's prediction,
+dumping their genuine difference into the residual as if it were noise.
+Finer spacing lets the model actually explain that real pixel-to-pixel
+variation as signal. Confirms as a genuine *bias* fix, not noise
+averaging: at `ad1`, mean `|error|` (1.65) exceeds the posterior's own
+claimed sigma (1.05) -- the fit is biased beyond what its own error bars
+represent; at `ad16`, error (0.15) falls well below sigma (1.02) -- the
+bias is gone and what remains is close to the genuine noise/prior floor
+`S_ret` was always describing correctly. This is a third, distinct error
+axis from `g_ratio` (model capacity / smoothing error) and from
+prior-driven regularization.
+
+**User decision (2026-08-25): drop `g_ratio=0.5` from future sweeps.**
+It is the one axis point asking for state resolution finer than the
+detector's own native pixel sampling (`g_ratio<1` means `G > width`, more
+than one bin per detector row) -- extra degrees of freedom no single
+row's own data can independently constrain, filled almost entirely by
+the prior's own correlation structure rather than real information (low
+`trace(AVK)` expected there, not yet directly measured). Default sweep
+axis going forward: `g_ratio in {1, 3, 6, 12}`.
+
+### 7.7 Albedo error is sharply concentrated at patch boundaries
+
+Patch edges (tanh-smoothed over only `ALBEDO_EDGE_KM=3km`, far sharper
+than a Gaussian CO2 hot spot) are the cleanest confirmation of the
+smoothing-error story anywhere in this project:
+
+| config | overall mean\|err\| | near boundary (<=15km) | far (>15km) | ratio |
+|---|---|---|---|---|
+| `g1-ad16` (exact) | 0.0017 (0.9% frac.) | 0.0090 | 0.0007 | **12.8x** |
+| `g12-ad16` (exact) | 0.0058 (3.7% frac.) | 0.0154 | 0.0044 | **3.5x** |
+
+Away from any land-cover transition, albedo recovers to well under 1%
+fractional error at fine resolution -- genuinely accurate. Essentially
+all the meaningful error lives in a narrow band straddling each of the
+13 patch edges.
+
+**This leaks into CO2** despite CO2's own truth field having nothing
+special at patch-edge positions -- the joint fit can partially "explain
+away" an albedo-driven model mismatch by nudging the correlated CO2
+estimate instead of leaving it as unexplained residual:
+
+| config | CO2 overall mean\|err\| | near patch edge | far | ratio |
+|---|---|---|---|---|
+| `g1-ad16` | 0.147 ppm | 0.579 ppm | 0.080 ppm | **7.2x** |
+| `g12-ad16`| 3.70 ppm | 6.78 ppm | 3.19 ppm | **2.1x** |
+
+**Open, unexplained**: the `structural`-prior run showed *smaller*
+absolute albedo error than `exact` at the same `g1-ad16` config (0.0002
+vs 0.0017, boundary ratio 2.1x vs 12.8x) -- surprising, since the
+imperfect prior should make things harder. Not chased down; possibly the
+smoother structural prior acts as extra regularization that happens to
+track the local average better than a strongly-pulled exact prior can
+when the fine-texture realization aliases against the bin grid.
+
+### 7.8 Cross-parameter error correlation: two different objects, easy to conflate
+
+Checked whether CO2 and albedo errors are correlated near boundaries, two
+ways:
+
+- **Empirical, across windows** (per-window mean signed error, `g1-ad16`,
+  exact prior): far from any boundary, `corr(co2_err, albedo_err) =
+  +0.79` (strong). Near boundaries, `+0.02` (n=10 windows -- small
+  sample, treat the near-zero reading as "much weaker," not confidently
+  "none").
+- **Posterior-claimed, within one window's own fit** (`S_ret`'s
+  `co2 x albedo` cross-covariance block, converted to a correlation):
+  essentially zero everywhere, both near and far (~0.002-0.003).
+
+These are not the same question and shouldn't be expected to agree: the
+posterior cross-covariance describes *within-one-window* noise
+sensitivity (how co2 and albedo would covary if that same window were
+refit with different noise) -- small here because `Sa_inv` has no
+cross-row coupling and the data-driven `K^T Sy_inv K` coupling is
+apparently weak at the bin-pair level. The empirical cross-window
+correlation describes something the posterior was never built to
+represent: whether some windows are systematically easier or harder for
+*both* parameters at once (shared SNR/data-quality driver). The strong
+far-field empirical correlation is real and unmodeled by `S_ret`; the
+near-zero posterior cross-covariance is not wrong, it is just answering
+a different question.
+
+### 7.9 Error sign and magnitude are a near-linear function of the true jump size
+
+The strongest, cleanest relationship found in this whole investigation.
+For each of the 12 internal patch boundaries, correlated the true
+reflectance jump (`_BAND_ALBEDO[type_next] - _BAND_ALBEDO[type_prev]`)
+against the mean signed albedo error in the 10km bands immediately before
+and after that boundary (`g1-ad16`, exact prior):
+
+- `corr(jump, error_before) = +0.91`; `corr(jump, error_after) = -0.96`.
+- `corr(|jump|, |error_before|) = +0.66`; `corr(|jump|, |error_after|) =
+  +0.85`.
+
+**Sign**: the bin just before a boundary is biased *toward* the value on
+the other side (same sign as the jump); the bin just after is biased
+back toward the value it just left (opposite sign). A textbook
+leakage/blur pattern, symmetric about the boundary -- both the ILS/PSF
+genuinely mixing radiance from both sides of a sharp transition, and the
+piecewise-linear state's own inability to represent a step, contribute.
+**Magnitude**: scales close to linearly with how sharp the true
+transition is (desert<->forest, the largest jump at 0.33, gives the two
+largest errors of any boundary; forest<->grass, jump 0.06, gives errors
+5-10x smaller) -- strong evidence this is a genuine smoothing artifact,
+not SNR-driven scatter (which wouldn't care how big the true step is).
+
+Because sign and magnitude are this predictable from information already
+available (the truth-scene design, or estimable from the retrieved levels
+on either side of a detected boundary), this is a strong candidate for a
+direct bias correction -- the same spirit as the window-overlap merge fix
+for the analogous CO2 window-boundary bias (Sec.6), not yet built.
+
+### 7.10 New tooling: averaging kernel, not yet wired into production
+
+`geocarb_gert.joint_state.gauss_newton_state(..., return_avk=True)`
+returns the Rodgers averaging kernel `AVK = Gain @ K` (`Gain = S_ret @
+K^T @ Sy_inv`), one extra matmul reusing quantities the last iteration
+already built -- no extra solve. Row `k` is the linear combination of the
+TRUE state (at every other free element's own position) retrieved
+element `k` actually reflects; `trace(AVK)` is the degrees-of-freedom-
+for-signal for the whole solve. Validated on a synthetic well-/poorly-
+constrained pair (`trace(AVK)/n` -> 1.0 and -> 0.0 respectively, exactly
+as theory predicts). Explicitly does NOT see true sub-bin structure --
+`AVK = Gain @ K_fine @ W`, and the trailing interpolation-weight matrix
+`W` means it can only ever express sensitivity as filtered through the
+same piecewise-linear model the retrieval already assumes. Quantifying
+that gap (the Rodgers "smoothing error") would need a `K_fine` (Jacobian
+w.r.t. the true field at every fine position, not just packed state
+elements) that doesn't exist yet -- a real, separate undertaking, though
+`S_true_hires` (the other ingredient) is unusually cheap here since the
+truth scene's own statistics (`ALBEDO_COV`/`ALBEDO_CORR_KM`, hot-spot
+width/amplitude) are already known exactly.
+
+**Not yet done**: `return_avk` isn't called anywhere in `_solve_window`
+or saved in any snapshot -- the DOF-collapse hypothesis in 7.3/7.5 is
+argued from indirect evidence (flat `S_ret`, flat-then-dropping
+`residRMS`), not yet directly confirmed via `trace(AVK)` per config.

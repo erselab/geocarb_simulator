@@ -613,7 +613,7 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
 def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
                        step: float = 1e-3, max_iter: int = 15, tol: float = 1e-5,
                        label: str = "", verbose: bool = True, jacobian_fn=None,
-                       return_cov: bool = False):
+                       return_cov: bool = False, return_avk: bool = False):
     """Regularized Gauss-Newton over whatever :class:`StateSpec` says is free.
 
     The generic counterpart of `gd_joint_block_retrieve.gauss_newton_
@@ -661,6 +661,28 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     block, convert to physical units, and (optionally) project onto
     arbitrary eta positions through the same interpolation the point
     estimate itself uses.
+
+    ``return_avk=True`` additionally returns the averaging kernel ``AVK =
+    Gain @ K``, ``Gain = S_ret @ K^T @ Sy_inv`` -- both already available
+    at the final iteration (``KtSyinv`` is reused, ``S_ret`` computed once
+    regardless of ``return_cov``), so this is one extra matmul, not a
+    second solve. ``AVK`` is ``(n_free, n_free)`` in the SAME packed order
+    as the covariance (`spec.slices()`); row ``k`` is the linear
+    combination of the TRUE state (at every other free element's own
+    position) the retrieved element ``k`` actually reflects -- ``x_hat =
+    AVK @ x_true + (I - AVK) @ x_a`` (Rodgers). A well-constrained element's
+    row is close to a delta function at its own position (the retrieved
+    value behaves like a genuine point estimate of truth there); a poorly
+    -constrained one spreads across neighbors and the prior. ``trace(AVK)``
+    is the degrees-of-freedom-for-signal for this whole solve -- the
+    rigorous "how many independent pieces of information" answer, cheap to
+    derive from the returned matrix rather than something this function
+    computes itself, since a caller may want it per-row, for a row subset,
+    or as the one whole-solve scalar.
+
+    Return shape depends on which of `return_cov`/`return_avk` are set:
+    ``x`` (neither), ``(x, S_ret)`` (cov only, unchanged from before this
+    parameter existed), ``(x, AVK)`` (avk only), ``(x, S_ret, AVK)`` (both).
     """
     if jacobian_fn is None:
         for p in spec.free_params:
@@ -701,9 +723,15 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
                   f"rms_resid={rms:.4g}", flush=True)
         if np.linalg.norm(dx) < tol:
             break
+    if not (return_cov or return_avk):
+        return x
+    S_ret = np.linalg.inv(A)
+    if not return_avk:
+        return x, S_ret
+    avk = (S_ret @ KtSyinv) @ K
     if return_cov:
-        return x, np.linalg.inv(A)
-    return x
+        return x, S_ret, avk
+    return x, avk
 
 
 def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
