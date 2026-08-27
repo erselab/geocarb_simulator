@@ -342,10 +342,18 @@ def score(path, eta_rows, truth):
         # jacobian_used is per-solve truth; falls back to the requested flag
         # only for pre-gating archives that never recorded it at all.
         jac_used.discard(None)
+        # dof_frac: mean over windows of trace(AVK)/n_free -- the degrees-
+        # of-freedom-for-signal fraction (0 = fully prior-dominated, 1 =
+        # fully data-dominated), averaged across this config's own windows.
+        # Absent (nan) for any pkl from before gauss_newton_state's
+        # return_avk existed -- docs/PROJECT_STATUS.md Sec.7.10.
+        dof_fracs = [w[solve]["dof"] / w[solve]["n_free"] for w in res.values()
+                    if solve in w and "dof" in w[solve] and w[solve].get("n_free", 0) > 0]
         rec = {"resid_rms_median": float(np.nanmedian(rr)), "_resid_rms": rr,
               "jacobian_used": (jac_used.pop() if len(jac_used) == 1
                                 else "mixed" if jac_used else out["requested_jacobian"]),
-              "t_total": float(sum(w.get(f"t_{solve}", 0.0) for w in res.values()))}
+              "t_total": float(sum(w.get(f"t_{solve}", 0.0) for w in res.values())),
+              "dof_frac": float(np.mean(dof_fracs)) if dof_fracs else float("nan")}
         for name in ("co2_ppm", "p_surface_hpa"):
             if name in st:
                 dv = st[name] - truth[name]
@@ -589,7 +597,8 @@ def main() -> int:
         f"scene={scenes}, prior_fields={prior_fields_list}, hires_only={args.hires_only}\n")
     emit("## Accuracy against truth\n")
     hdr = (f"| {'config':26s} | jac(req) | solve  | jac(used) | {'CO2 rms':>9s} | "
-          f"{'CO2 max':>9s} | {'dP rms':>8s} | {'dP max':>8s} | {'residRMS':>10s} | src |")
+          f"{'CO2 max':>9s} | {'dP rms':>8s} | {'dP max':>8s} | {'residRMS':>10s} | "
+          f"{'DOF frac':>8s} | src |")
     emit(hdr)
     emit("|" + "|".join(["-" * len(c) for c in hdr.split("|")[1:-1]]) + "|")
     for cid in cids:
@@ -604,7 +613,8 @@ def main() -> int:
                     f"{r.get('co2_ppm_max', float('nan')):9.4f} | "
                     f"{r.get('p_surface_hpa_rms', float('nan')):8.4f} | "
                     f"{r.get('p_surface_hpa_max', float('nan')):8.4f} | "
-                    f"{r['resid_rms_median']:10.3e} | {sources[(cid,j)]:7s} |")
+                    f"{r['resid_rms_median']:10.3e} | "
+                    f"{r.get('dof_frac', float('nan')):8.3f} | {sources[(cid,j)]:7s} |")
 
     if "analytic" in jacobians and "fd" in jacobians:
         emit("\n## Solver agreement (analytic vs finite difference)\n")

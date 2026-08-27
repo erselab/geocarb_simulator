@@ -311,10 +311,10 @@ def _solve_window(row_lo: int, row_hi: int):
         # the identity regardless of kind -- state_interp is genuinely a no-op here.
         fwd_c = build_forward_state(FPA, rows_win, bin_centers, spec_c, spectrum,
                                     wn_hires, ils, pad=PAD, state_interp="linear")
-        x_c, S_ret_c = gauss_newton_state(fwd_c, y_true, spec_c, Sy_inv_diag,
-                                          label=f"[{row_lo}-{row_hi}] coarse", verbose=False,
-                                          jacobian_fn=_linearizer(spec_c, bin_centers, use_analytic, "linear"),
-                                          return_cov=True)
+        x_c, S_ret_c, avk_c = gauss_newton_state(fwd_c, y_true, spec_c, Sy_inv_diag,
+                                                 label=f"[{row_lo}-{row_hi}] coarse", verbose=False,
+                                                 jacobian_fn=_linearizer(spec_c, bin_centers, use_analytic, "linear"),
+                                                 return_cov=True, return_avk=True)
         resid_c = y_true - fwd_c(x_c)
         # Standing rule: save the ENTIRE state vector (free AND frozen) and
         # the FULL residual field, never just summary scalars. `jacobian_used`
@@ -323,11 +323,15 @@ def _solve_window(row_lo: int, row_hi: int):
         # `cov` is the packed posterior covariance in SCALE units, over
         # exactly the free elements `slices`/`x` describe -- see
         # StateSpec.cov_for/project_cov to get one row's own physical-units
-        # block (or a projection onto arbitrary rows).
+        # block (or a projection onto arbitrary rows). `avk` is the Rodgers
+        # averaging kernel over the same packed order (see
+        # gauss_newton_state's own docstring); `dof` = trace(avk), the
+        # degrees-of-freedom-for-signal for this window's whole solve --
+        # docs/PROJECT_STATUS.md Sec.7.10/7.3's DOF-collapse hypothesis.
         out["coarse"] = spec_c.snapshot(x_c, resid=resid_c,
                                         resid_rms=float(np.sqrt(np.mean(resid_c ** 2))),
                                         jacobian_used=("analytic" if use_analytic else "fd"),
-                                        cov=S_ret_c)
+                                        cov=S_ret_c, avk=avk_c, dof=float(np.trace(avk_c)))
         out["x_coarse"] = x_c                      # back-compat with existing plotters
         out["resid_coarse"] = resid_c
         out["resid_coarse_rms"] = float(np.sqrt(np.mean(resid_c ** 2)))
@@ -346,16 +350,16 @@ def _solve_window(row_lo: int, row_hi: int):
                                    prior_anchor_density=prior_anchor_density)
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
                                 wn_hires, ils, pad=PAD, state_interp=state_interp)
-    x_h, S_ret_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
-                                      label=f"[{row_lo}-{row_hi}] hires", verbose=False,
-                                      jacobian_fn=_linearizer(spec_h, anchor_etas, use_analytic_hires,
-                                                              state_interp),
-                                      return_cov=True)
+    x_h, S_ret_h, avk_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
+                                             label=f"[{row_lo}-{row_hi}] hires", verbose=False,
+                                             jacobian_fn=_linearizer(spec_h, anchor_etas, use_analytic_hires,
+                                                                     state_interp),
+                                             return_cov=True, return_avk=True)
     resid_h = y_true - fwd_h(x_h)
     out["hires"] = spec_h.snapshot(x_h, resid=resid_h,
                                    resid_rms=float(np.sqrt(np.mean(resid_h ** 2))),
                                    jacobian_used=("analytic" if use_analytic_hires else "fd"),
-                                   cov=S_ret_h)
+                                   cov=S_ret_h, avk=avk_h, dof=float(np.trace(avk_h)))
     out["x_hires"] = x_h
     out["resid_hires"] = resid_h
     out["anchor_etas"] = anchor_etas
