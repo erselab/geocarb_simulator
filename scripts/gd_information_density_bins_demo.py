@@ -57,8 +57,30 @@ information exists" without also confirming the DATA (anchor grid) can
 support that redistribution can make things worse exactly where you
 meant to help.
 
+RESULT 2 (2026-08-25, --shared-grid, --window-index 38, rows 418-438, G=19,
+anchor_density=16): extends the comparison with a THIRD scheme -- co2_ppm/
+p_surface_hpa/albedo all sharing ONE combined_information_weighted_bin_
+centers grid (driven by albedo's own boundary proxy, since no CO2 proxy
+was built), with albedo alone set to state_interp="nearest" (co2/p_surface
+stay "linear"). Same three-way pattern holds at this smaller window too --
+flat: near 0.0031/far 0.0015; info-weighted (still separate grid, still
+"linear"): near 0.0069/far 0.0013 (near got worse again, consistent with
+RESULT above). Shared grid + nearest for albedo: near 0.0065/far 0.0064 --
+overall WORSE than the flat baseline (0.0065 vs 0.0022), but the near/far
+GAP essentially vanishes. That's a real, informative difference in
+character, not just magnitude: "nearest" has no leakage between adjacent
+bins at all (each anchor gets exactly its own bin's value, no blending
+across the boundary), which removes the specific asymmetric leakage/blur
+pattern Sec.7.9 documented for LINEAR interpolation -- but piecewise-
+constant assignment is a cruder approximation everywhere else in the
+window that isn't right at a hard edge, which is the likely source of the
+uniformly-elevated (not just near-boundary) error here. Matches the
+tradeoff named in conversation before building this: "nearest" trades
+the linear leakage pattern for a different, more uniform but not smaller,
+error source -- not a strict improvement, a different one.
+
 Run:  PYTHONPATH=. python3 scripts/gd_information_density_bins_demo.py
-        [--window-index 54] [--anchor-density 16]
+        [--window-index 54] [--anchor-density 16] [--shared-grid]
 Output: plots/joint_block/gd_information_density_bins_r<lo>-<hi>.png,
         plus a printed before/after accuracy table.
 """
@@ -89,7 +111,8 @@ from geocarb_gert import along_slit_scene as als, sample_geometries  # noqa: E40
 from geocarb_gert.instrument import GEOCARB_BANDS  # noqa: E402
 from geocarb_gert.joint_state import (build_forward_state, gauss_newton_state,  # noqa: E402
                                       state_spec_from_scene, albedo_positions_for,
-                                      information_weighted_bin_centers)
+                                      information_weighted_bin_centers,
+                                      combined_information_weighted_bin_centers)
 from geocarb_gert.along_slit_state import stack_windows_along_slit  # noqa: E402
 from geocarb_gert import jacobians as jac  # noqa: E402
 from geocarb_gert.radiometry import geocarb_noise_model  # noqa: E402
@@ -142,12 +165,14 @@ def _plot_bin_placement(fpa, row_lo, row_hi, flat, info, out_path):
 
 
 def _solve_one(fpa, row_lo, row_hi, band, absco, wide_inst, geo, solar, albedo,
-               wn_hires, ils, anchor_density, bin_centers, surface_positions):
+               wn_hires, ils, anchor_density, bin_centers, surface_positions,
+               row_state_interp=None):
     """Minimal hires-only solve for co2_ppm+p_surface_hpa+albedo, mirroring
     gd_joint_block_whole_slit_sweep.py::_solve_window's hires branch exactly,
-    with one difference: surface_positions is supplied directly rather than
-    computed internally by albedo_positions_for -- the one hook this demo
-    needs that the production function doesn't expose."""
+    with two differences: surface_positions is supplied directly rather than
+    computed internally by albedo_positions_for, and row_state_interp lets a
+    caller set a per-row interpolation kind -- the two hooks this demo needs
+    that the production function doesn't expose."""
     rows_win = np.arange(row_lo, row_hi + 1)
     y_true = band["A"][rows_win, :].ravel()
     noise_model = geocarb_noise_model(fpa)
@@ -163,7 +188,8 @@ def _solve_one(fpa, row_lo, row_hi, band, absco, wide_inst, geo, solar, albedo,
     anchor_etas = np.sort(_eta_of(fpa, np.full(len(anchor_rows), 512.0), anchor_rows.astype(float)))
 
     spec = state_spec_from_scene(bin_centers, free=("co2_ppm", "p_surface_hpa", "albedo"),
-                                 band_label=band_label, surface_positions=surface_positions)
+                                 band_label=band_label, surface_positions=surface_positions,
+                                 row_state_interp=row_state_interp)
     fwd = build_forward_state(fpa, rows_win, anchor_etas, spec, spectrum, wn_hires, ils,
                               pad=PAD, state_interp="linear")
 
@@ -205,6 +231,14 @@ def main() -> int:
                          "whole feature is about: too few bins to say anything meaningful either "
                          "way -- confirmed directly against als.SURFACE_PATCHES, not guessed.")
     ap.add_argument("--anchor-density", type=int, default=16)
+    ap.add_argument("--shared-grid", action="store_true",
+                    help="2026-08-25 extension: instead of comparing flat-vs-info-weighted on "
+                         "albedo's OWN separate grid, solve ONCE more with co2_ppm/p_surface_hpa/"
+                         "albedo all sharing a single combined_information_weighted_bin_centers "
+                         "grid (combining albedo's info-density with a flat CO2 floor, so the "
+                         "grid shape is still driven by the boundary proxy), with albedo alone "
+                         "set to state_interp='nearest' (co2/p_surface stay 'linear'). Compared "
+                         "against the flat-scheme baseline already reported without this flag.")
     args = ap.parse_args()
 
     fpa = FPA
@@ -257,10 +291,32 @@ def main() -> int:
     s_flat = _native_error_summary([w_flat], "albedo", truth_fn, boundary_km)
     s_info = _native_error_summary([w_info], "albedo", truth_fn, boundary_km)
 
-    print("\n=== native-resolution albedo error, flat vs. info-weighted (same G) ===")
-    print(f"{'':20s} {'n_bins':>8s} {'overall':>10s} {'near (<=15km)':>15s} {'far (>15km)':>12s}")
-    for label, s in [("flat", s_flat), ("info-weighted", s_info)]:
-        print(f"{label:20s} {s['n']:8d} {s['mean_abs_err']:10.4f} "
+    results = [("flat (separate grid)", s_flat), ("info-weighted (separate grid)", s_info)]
+
+    if args.shared_grid:
+        print("\nsolving (shared grid, albedo=nearest)...", flush=True)
+        G_shared = len(flat_pos)
+        # co2_ppm contributes no real information-density proxy of its own here
+        # (none built this pass) -- a flat weight at albedo_info_density's own
+        # floor value, so the combined (max) grid is driven entirely by
+        # albedo's boundary proxy, exactly like the separate-grid case above,
+        # just now applied to ALL rows instead of albedo alone.
+        shared_grid = combined_information_weighted_bin_centers(
+            bin_centers.min(), bin_centers.max(), G_shared,
+            {"albedo": lambda eta: als.albedo_info_density(eta * als.SLIT_HALF_KM),
+             "co2_ppm": lambda eta: np.full_like(eta, 0.1)})
+        t0 = time.time()
+        w_shared = _solve_one(fpa, row_lo, row_hi, band, absco, wide_inst, geo, solar, albedo,
+                              band["wn_hires"], band["ils"], args.anchor_density,
+                              shared_grid, None, row_state_interp={"albedo": "nearest"})
+        print(f"  done in {time.time()-t0:.0f}s")
+        s_shared = _native_error_summary([w_shared], "albedo", truth_fn, boundary_km)
+        results.append(("shared grid + nearest", s_shared))
+
+    print("\n=== native-resolution albedo error ===")
+    print(f"{'':30s} {'n_bins':>8s} {'overall':>10s} {'near (<=15km)':>15s} {'far (>15km)':>12s}")
+    for label, s in results:
+        print(f"{label:30s} {s['n']:8d} {s['mean_abs_err']:10.4f} "
              f"{s['near_mean_abs_err']:15.4f} {s['far_mean_abs_err']:12.4f}")
     return 0
 

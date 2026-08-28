@@ -145,6 +145,15 @@ class ParamSpec:
     prior_form: str = "exponential"  # "exponential" (default) or "tikhonov"
     gamma: float = 3.0             # tikhonov: first-difference smoothness strength
     target: str = "atmosphere"     # where this row enters the forward model; see TARGETS
+    state_interp: str | None = None  # this row's OWN interp1d kind override (2026-08-25);
+                                     # None -> fall back to whatever the caller passes to
+                                     # interp_to/interp_weights (today's behaviour,
+                                     # unchanged for every row that never sets this). Lets
+                                     # one row use "nearest" (a hard-edged feature, e.g. an
+                                     # albedo patch boundary) while another shares the same
+                                     # bin positions but stays "linear" (a smooth feature,
+                                     # e.g. a CO2 hot spot) -- see StateSpec.interp_to/
+                                     # interp_weights for the resolution rule.
 
     def __post_init__(self):
         self.positions = np.atleast_1d(np.asarray(self.positions, dtype=float))
@@ -334,7 +343,11 @@ class StateSpec:
         constant: each anchor takes its single nearest row-position's own
         value, no blending). Any other `interp1d`-supported kind (e.g.
         `"quadratic"`, `"cubic"`) works too with no code change here -- see
-        :func:`_row_interp1d`.
+        :func:`_row_interp1d`. This is the FALLBACK kind, used for any row
+        whose own `ParamSpec.state_interp` is `None` (every row, until one
+        opts in) -- a row with its own `state_interp` set always uses that
+        instead, letting different rows share the same bin positions with
+        genuinely different interpolation behaviour (2026-08-25).
 
         `instrument` rows are EXCLUDED by default and must be: their
         `positions` are not along-slit coordinates, so interpolating them
@@ -348,8 +361,9 @@ class StateSpec:
             if p.target not in targets:
                 continue
             v = vals[p.name]
+            kind = p.state_interp if p.state_interp is not None else state_interp
             out[p.name] = (np.full(etas.shape, v[0]) if p.n == 1
-                           else _row_interp1d(p.positions, v, state_interp)(etas))
+                           else _row_interp1d(p.positions, v, kind)(etas))
         return out
 
     def values_for(self, x, *targets) -> dict:
@@ -378,13 +392,19 @@ class StateSpec:
         This is the whole chain rule from a row's own elements to the anchor
         values a forward model sees. Combined with `d(value)/dx = prior` for
         `kind="scale"`, it gives `d(param at anchor g)/dx_k` exactly.
+
+        `state_interp` is the FALLBACK kind, overridden by this row's own
+        `ParamSpec.state_interp` when set -- same resolution rule as
+        `interp_to`, so the two can never disagree about which kind is
+        actually in effect for a given row.
         """
         p = self[name]
         etas = np.asarray(etas, dtype=float)
         if p.n == 1:
             return np.ones((etas.size, 1))
+        kind = p.state_interp if p.state_interp is not None else state_interp
         basis = np.eye(p.n)
-        return _row_interp1d(p.positions, basis, state_interp, axis=0)(etas)
+        return _row_interp1d(p.positions, basis, kind, axis=0)(etas)
 
     def cov_for(self, name: str, S_ret_scale: np.ndarray) -> np.ndarray:
         """One row's own ``(n, n)`` posterior covariance sub-matrix, in
@@ -518,13 +538,35 @@ def information_weighted_bin_centers(eta_lo: float, eta_hi: float, G: int,
     return np.interp(np.linspace(0.0, 1.0, int(G)), cdf, eta_grid)
 
 
+def combined_information_weighted_bin_centers(eta_lo: float, eta_hi: float, G: int,
+                                               weight_fns: dict, n_grid: int = 2000) -> np.ndarray:
+    """`G` bin centers shared across every row named in `weight_fns`,
+    placed by the ELEMENTWISE MAX across their own individual weight
+    functions (2026-08-25) -- the shared grid refines wherever ANY row
+    wants it (a CO2 hot spot here, an albedo patch boundary there),
+    instead of one row's own need being diluted by averaging with a row
+    that doesn't care about that location. `weight_fns` values are only
+    used for their VALUES, not their keys -- the dict is keyed by row name
+    purely so a caller's own weight-function collection stays
+    self-documenting at the call site (e.g. `{"albedo": als.albedo_info_
+    density, "co2_ppm": some_hotspot_proxy}`).
+
+    Thin wrapper around `information_weighted_bin_centers` -- no duplicated
+    inverse-CDF logic, this only builds its `weight_fn` argument.
+    """
+    def combined(eta):
+        return np.maximum.reduce([np.asarray(fn(eta), dtype=float) for fn in weight_fns.values()])
+    return information_weighted_bin_centers(eta_lo, eta_hi, G, combined, n_grid=n_grid)
+
+
 def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                           sigmas=None, corr_length=None, kinds=None,
                           prior_form="exponential", gamma=3.0,
                           band_label=None, surface_positions=None,
                           surface_density: int = 3, uniform: bool = False,
                           prior_anchor_density: float | None = None,
-                          surface_fields=None) -> StateSpec:
+                          surface_fields=None,
+                          row_state_interp: dict | None = None) -> StateSpec:
     """Build a :class:`StateSpec` whose priors are the truth scene's own
     values at `bin_centers` -- the joint block's existing "local-truth
     nuisance idealization", but now with every quantity present as a real,
@@ -546,11 +588,33 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
     SURFACE_FIELDS`, i.e. the exact truth -- pass `along_slit_scene.
     SURFACE_PRIOR_FIELD_SETS[key]` for an imperfect surface prior, the same
     way `fields` selects an imperfect atmosphere prior via `PRIOR_FIELD_SETS`;
-    added 2026-08-25, previously hardcoded to `SURFACE_FIELDS`), on their
-    own denser grid (`surface_positions`, or `albedo_positions_for(
-    bin_centers, surface_density)`). Omitting `band_label` reproduces the
-    pre-2026-08-18 atmosphere-only state exactly, so every existing caller
-    is unaffected.
+    added 2026-08-25, previously hardcoded to `SURFACE_FIELDS`). Omitting
+    `band_label` reproduces the pre-2026-08-18 atmosphere-only state
+    exactly, so every existing caller is unaffected.
+
+    Surface rows now share `bin_centers` -- the SAME positions the
+    atmosphere rows use -- by default (changed 2026-08-25; was `albedo_
+    positions_for(bin_centers, surface_density)`, a separate, uniformly
+    3x-denser grid). Pass `surface_positions` explicitly for a genuinely
+    different grid (an information-weighted one via `joint_state.
+    information_weighted_bin_centers`/`combined_information_weighted_bin_
+    centers`, or the old flat-oversampling behaviour via `albedo_positions_
+    for(bin_centers, surface_density)` computed by the caller) -- `surface_
+    density` itself is now IGNORED unless the caller uses it to build that
+    override. This is a real, deliberate behaviour change for any caller
+    that frees a surface row and does NOT pass `surface_positions`
+    (`scripts/gd_joint_block_whole_slit_sweep.py`'s own production path
+    included) -- previously-banked results with a free albedo row
+    (`docs/PROJECT_STATUS.md` Sec.7) used the old separate-grid behaviour
+    and are unaffected (already saved), but a fresh rerun of the same
+    command will now place albedo on the shared grid instead.
+
+    `row_state_interp` (default None) sets `ParamSpec.state_interp` on
+    matching rows at construction time -- e.g. `{"albedo": "nearest"}`
+    lets one row use piecewise-constant interpolation on the SAME shared
+    grid another row (still `None`, falling back to whatever `state_interp`
+    the solve itself is called with) interpolates linearly. See `StateSpec.
+    interp_to`/`interp_weights`'s own docstrings for the resolution rule.
 
     `uniform=True` evaluates every field at a single fixed position
     (`x_km=0.0`, matching `along_slit_scene.atmosphere_at(0.0)`'s own
@@ -630,12 +694,16 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                          sigma=float(sigmas.get(name, 0.10)),
                          corr_length=float(_corr_for(name, corr_length)),
                          free=(name in free), kind=kinds.get(name, "scale"),
-                         prior_form=prior_form, gamma=float(gamma), target=target)
+                         prior_form=prior_form, gamma=float(gamma), target=target,
+                         state_interp=(row_state_interp or {}).get(name))
 
     rows = [_row(name, fn, bin_centers, "atmosphere") for name, fn in fields.items()]
     if band_label is not None:
-        pos = (albedo_positions_for(bin_centers, surface_density)
-               if surface_positions is None
+        # Shared grid by default (2026-08-25) -- surface rows use the SAME
+        # bin_centers atmosphere rows use, unless surface_positions is
+        # explicitly given. See this function's own docstring for why this
+        # is a deliberate behaviour change, not an oversight.
+        pos = (bin_centers if surface_positions is None
                else np.atleast_1d(np.asarray(surface_positions, dtype=float)))
         rows += [_row(name, fn, pos, "surface")
                  for name, fn in surface_fields.items()]

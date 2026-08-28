@@ -1061,3 +1061,65 @@ actually support that redistribution is not automatically a win, and can
 make things worse exactly where you meant to help. Worth treating as a
 real constraint on any future adaptive-resolution scheme, not a detail to
 paper over.
+
+## 9. A common grid across rows, with per-row interpolation kind (2026-08-25)
+
+Follow-on to Sec.8, per user direction: albedo's own separate,
+information-weighted grid from Sec.8 gave way to **one shared grid across
+every jointly-free row** (`co2_ppm`, `p_surface_hpa`, `albedo` all on the
+SAME bin positions), plus the ability for a row to pick a different
+`interp1d` kind on that shared grid (`"nearest"` for a hard-edged feature
+like a patch boundary, `"linear"` for a smooth one like a CO2 hot spot).
+
+**Built, no core-architecture changes beyond what already existed:**
+- `ParamSpec.state_interp: str | None = None` -- a row's own interpolation
+  kind override; `None` (every row, until one opts in) falls back to
+  whatever kind the caller passes to `interp_to`/`interp_weights`/
+  `build_forward_state`/`linearize`, so every existing call site is
+  byte-identical unless a row explicitly sets its own. `StateSpec.interp_
+  to`/`interp_weights` resolve it with one line each (`kind = p.state_
+  interp if p.state_interp is not None else state_interp`); `build_
+  forward_state`/`jac.linearize` needed NO changes at all, since they
+  already just forward their own argument into those two methods.
+- `state_spec_from_scene`'s surface rows now default to the SAME
+  `bin_centers` atmosphere rows use (previously `albedo_positions_for(
+  bin_centers, surface_density)`, a separate 3x-denser grid) -- a real,
+  deliberate behaviour change for any caller freeing a surface row without
+  passing `surface_positions` explicitly, including the production sweep
+  path. Already-banked results with a free albedo row (Sec.7's sweep) are
+  unaffected (saved data doesn't change), but a bare rerun of the same
+  command now places albedo on the shared grid instead of its own. New
+  `row_state_interp: dict | None` parameter sets `ParamSpec.state_interp`
+  on named rows at construction.
+- `combined_information_weighted_bin_centers(eta_lo, eta_hi, G,
+  weight_fns: dict)` -- the shared grid is placed by the ELEMENTWISE MAX
+  across every row's own weight function, so it refines wherever ANY row
+  wants it rather than diluting toward an average. Thin wrapper around
+  `information_weighted_bin_centers` (Sec.8), no duplicated logic.
+
+Validated: with every `state_interp` left `None`, `interp_to`/`interp_
+weights` are provably unchanged (direct comparison against the pure-global-
+kind call); setting one row to `"nearest"` while another stays `None`
+(falling back to a global `"linear"`) gives each row its own, independently
+correct interpolation. `state_spec_from_scene` confirmed to actually share
+positions across rows now (`co2_ppm`/`albedo` positions `np.array_equal`)
+and to honor `row_state_interp`.
+
+**Result, extending Sec.8's demo with a third scheme (`--shared-grid` on
+`gd_information_density_bins_demo.py`)**: co2/p_surface/albedo on one
+combined-density shared grid, albedo alone `state_interp="nearest"`. At two
+different boundary windows (rows 884-924 and rows 418-438), the near/far
+error asymmetry that both linear-interpolation schemes showed (worse near
+the boundary, better far -- the leakage/blur pattern from Sec.7.9) mostly
+**disappears** under `"nearest"` (rows 418-438: near 0.0065 vs far 0.0064,
+essentially equal) -- but overall accuracy is not better, it's a uniformly
+elevated 0.0065 against the flat baseline's 0.0022. This is the tradeoff
+named in conversation before building it, now measured directly:
+piecewise-constant interpolation removes the specific asymmetric leakage
+`"linear"` produces at a hard edge, but is a cruder approximation
+everywhere else in the window that isn't a hard edge, and that costs more
+than the leakage fix saves, at least in this configuration. Not yet tried:
+`"nearest"` restricted to just the near-boundary bins with `"linear"`
+elsewhere (mixing kinds along a single row, not just across rows) -- the
+per-row field as built doesn't support per-BIN kind, only per-row, so that
+would need a further extension, not implemented here.
