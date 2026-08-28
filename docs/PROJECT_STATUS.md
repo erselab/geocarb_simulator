@@ -1123,3 +1123,89 @@ than the leakage fix saves, at least in this configuration. Not yet tried:
 elsewhere (mixing kinds along a single row, not just across rows) -- the
 per-row field as built doesn't support per-BIN kind, only per-row, so that
 would need a further extension, not implemented here.
+
+## 10. Sub-bin modulation: riding a reference function on the piecewise-linear interpolant (2026-08-25)
+
+Follow-on to Sec.9, per user direction: instead of switching a row's whole
+interpolation KIND (Sec.9's `"nearest"` vs `"linear"` choice), let a row
+carry sub-bin TEXTURE from an external reference function `g(eta)` while
+still solving for only the bin-level mean -- e.g. a real 500m MODIS albedo
+product supplying the shape between GeoCarb's own coarser retrieval bins,
+with the bin values still the only thing Gauss-Newton actually adjusts.
+
+**Built:**
+- `bin_footprint_means(positions, g_fn, state_interp="linear", ...)` --
+  `mean_g_k`, `g` averaged over bin `k`'s own `interp_weights` hat-function
+  footprint (not a narrower Voronoi/nearest-midpoint footprint, since
+  production interpolation is linear by default and a bin's weight already
+  reaches into both neighbors). Optionally takes `g_positions` and returns
+  the matrix `C` such that `mean_g = C @ g_values`, needed for Sec.10's own
+  uncertainty machinery below.
+- `ParamSpec.sub_bin_modulation: SubBinModulation | None` -- `None` (every
+  row, until one opts in) is a byte-identical no-op. When set,
+  `interp_to`/`interp_weights` both apply the same two elementwise
+  scalings: divide bin values by their own `mean_g_k` before interpolating,
+  multiply the interpolated result by `g(eta)` after --
+  `modulated_value(eta) = g(eta) * sum_k(W[eta,k] * bin_value_k/mean_g_k)`.
+  `state_spec_from_scene` gained `row_sub_bin_modulation: dict | None` to
+  set this per row at construction, same pattern as Sec.9's
+  `row_state_interp`.
+- `K_g` uncertainty-propagation machinery (`jacobians._g_modulation_
+  sensitivity`, `jac.linearize`'s new `(y, K, K_g)` three-tuple return,
+  `gauss_newton_state`'s new `g_cov` parameter): lets a row's `g` itself be
+  represented as uncertain (`g_positions`/`g_cov`, `g(eta) = Wg[eta,:] @
+  g_values`) and propagates that into the retrieved posterior via `Gain @
+  K_g @ g_cov @ K_g.T @ Gain.T`, returned as a SEPARATE output, never
+  folded into `S_ret`. Strict no-op (skipped outright, not computed-and-
+  zeroed) whenever `g_cov` is `None`/empty -- every existing caller pays
+  nothing.
+
+**A genuine math error caught during implementation, not after:** the
+plan's own original claim -- "integrating the modulated curve back against
+bin k's own weight recovers bin_value_k exactly" -- was checked directly
+and found FALSE (differences up to 0.2 on a synthetic test), because
+adjacent bins' linear hat functions overlap and pick up real contamination
+from neighbors. The identity that DOES hold, verified to machine precision:
+if every bin's `bin_value_j/mean_g_j` ratio equals the SAME constant `c`,
+`modulated_value(eta) = c * g(eta)` exactly everywhere (linear
+interpolation's partition-of-unity property, `sum_j W[eta,j] = 1`). The
+plan file was corrected in place before continuing.
+
+**Validated (unit level):** `sub_bin_modulation=None` no-op; constant-`g`
+no-op (machine precision); the corrected self-consistency identity (machine
+precision); `g_cov=None`/empty reproduces `gauss_newton_state`'s
+`return_cov`/`return_avk` outputs byte-identically (a synthetic linear
+problem); a nonzero `g_cov` strictly increases the reported posterior
+variance and never decreases it (a synthetic problem, `S_g_total`
+symmetric PSD with strictly positive diagonal entries).
+
+**End-to-end result (real window, rows 418-438, same window Sec.9 used,
+`G=19`, `anchor_density=16`, `g_cov=None` -- an oracle `g =
+als.albedo_for_label(..., include_fine=True)`, exact by construction, so
+this run doubles as the `g_cov=None` no-op regression check in a real
+solve, not just a synthetic unit test):**
+
+| scheme | overall | near (<=15km) | far (>15km) |
+|---|---|---|---|
+| flat (separate grid) | 0.0022 | 0.0031 | 0.0015 |
+| info-weighted (separate grid) | 0.0057 | 0.0069 | 0.0013 |
+| shared grid + nearest | 0.0065 | 0.0065 | 0.0064 |
+| shared grid + linear + modulation (g=truth) | 0.0068 | 0.0075 | 0.0042 |
+
+Giving the shared-grid solve the TRUE fine-scale albedo texture as an
+oracle `g` did NOT recover anything close to the flat, denser separate-grid
+scheme's accuracy -- it's the worst of the four (0.0068 overall), even
+though `g` here is exact, not estimated. It does partially split the
+difference between `"nearest"`'s two failure modes: far-field error drops
+relative to `"nearest"` (0.0042 vs 0.0064, since a real texture now
+supplies far-field variation `"nearest"`'s piecewise-constant assignment
+can't), but near-boundary error stays elevated (0.0075, no better than
+`"nearest"`'s own 0.0065). This says the coarse `G=19` shared grid's own
+dominant error source is NOT sub-bin interpolation texture at all -- since
+even a perfect oracle `g` barely moves the near-boundary number -- but
+something at the BIN level itself: the shared, coarser grid's own bin
+values (co2/p_surface/albedo jointly solved on 19 shared positions instead
+of albedo's own 3x-denser, separate grid) are the real bottleneck, and no
+amount of sub-bin texture on top of them recovers what a genuinely finer
+retrieval grid would. A real, informative negative result: sub-bin
+modulation is solving a texture problem this window's error mostly isn't.

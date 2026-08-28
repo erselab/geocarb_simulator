@@ -108,7 +108,7 @@ import numpy as np
 
 from . import gd_render
 from .focalplane import nearest_bin_scene
-from .joint_state import StateSpec
+from .joint_state import StateSpec, ParamSpec, _row_interp1d
 
 #: State row -> the `gert` molecule whose optical depth it scales. A row
 #: whose molecule is absent from the band gets an exact zero column (that
@@ -344,6 +344,40 @@ def anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
     return S, dS
 
 
+def _g_modulation_sensitivity(p: ParamSpec, scene_etas, bin_values, state_interp):
+    """`d(modulated_value)/d(g_value_m)` at each anchor, shape `(n_scene,
+    n_g_positions)` -- the piece of `K_g` before chaining to radiance via
+    `dS_row` (2026-08-25). Quotient rule, since `mean_g_k` sits in the
+    denominator of the modulation term and ALSO depends linearly on `g`'s
+    own uncertain values through `C` (`geocarb_gert.joint_state.bin_
+    footprint_means`):
+
+        d(modulated_value)/d(g_value_m) at eta =
+            Wg[eta,m] * sum_k( W_plain[eta,k]*bin_value_k / mean_g_k )
+          - g(eta) * sum_k( W_plain[eta,k]*bin_value_k / mean_g_k**2 * C[k,m] )
+
+    `W_plain` is the row's own UNMODULATED hat-function weights -- built
+    directly here (not via `StateSpec.interp_weights`, which now always
+    returns the modulated version once `sub_bin_modulation` is set) since
+    this formula needs the pre-modulation weights explicitly.
+    """
+    sbm = p.sub_bin_modulation
+    kind = p.state_interp if p.state_interp is not None else state_interp
+    basis = np.eye(p.n)
+    W_plain = _row_interp1d(p.positions, basis, kind, axis=0)(scene_etas)  # (n_scene, n_bins)
+
+    g_throwaway = ParamSpec(name="_gpos", positions=sbm.g_positions, prior=sbm.g_positions,
+                            sigma=1.0, free=True, kind="scale")
+    Wg = StateSpec([g_throwaway]).interp_weights(scene_etas, "_gpos", kind)  # (n_scene, n_g_positions)
+    g_at_scene = np.asarray(sbm.g_fn(scene_etas), dtype=float)
+
+    ratio1 = W_plain * (bin_values / sbm.mean_g)[None, :]         # (n_scene, n_bins)
+    term1 = Wg * ratio1.sum(axis=1)[:, None]                      # (n_scene, n_g_positions)
+    ratio2 = W_plain * (bin_values / sbm.mean_g ** 2)[None, :]    # (n_scene, n_bins)
+    term2 = g_at_scene[:, None] * (ratio2 @ sbm.C)                # (n_scene, n_g_positions)
+    return term1 - term2
+
+
 def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
               wn_hires, ils, x, pad: int = 4, state_interp: str = "linear"):
     """``(y, K)`` -- the predicted sub-image and its analytic Jacobian.
@@ -402,6 +436,8 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
     y = L(S)
     K = np.empty((y.size, spec.n_free))
     slices = spec.slices()
+    unpacked = spec.unpack(x)
+    K_g = {}   # row name -> (y.size, n_g_positions); empty unless a row declares g_cov (2026-08-25)
     for p in free:
         W = spec.interp_weights(scene_etas, p.name, state_interp=state_interp)  # (n_scene, p.n)
         dS_row = np.asarray([d[p.name] for d in dS])     # (n_scene, n_hires)
@@ -409,4 +445,8 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
         for k in range(p.n):
             # d(param at anchor g)/dx_k = W[g,k] * prior[k]   (kind="scale")
             K[:, sl.start + k] = L(dS_row * (W[:, k] * p.prior[k])[:, None])
-    return y, K
+        if p.sub_bin_modulation is not None and p.sub_bin_modulation.g_cov is not None:
+            dmod_dg = _g_modulation_sensitivity(p, scene_etas, unpacked[p.name], state_interp)
+            K_g[p.name] = np.stack([L(dS_row * dmod_dg[:, m][:, None])
+                                    for m in range(dmod_dg.shape[1])], axis=1)
+    return y, K, K_g

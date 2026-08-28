@@ -122,8 +122,8 @@ def main() -> int:
     # analytic
     spectrum_jac = jac.make_spectrum_jac(absco, wide_inst, geo, solar, albedo)
     t0 = time.time()
-    y_ana, K_ana = jac.linearize(FPA, rows_win, anchor_etas, spec, spectrum_jac,
-                                 wn_hires, ils, x0, pad=PAD, state_interp=args.interp_kind)
+    y_ana, K_ana, _K_g = jac.linearize(FPA, rows_win, anchor_etas, spec, spectrum_jac,
+                                       wn_hires, ils, x0, pad=PAD, state_interp=args.interp_kind)
     t_ana = time.time() - t0
     print(f"analytic: y {y_ana.shape}, K {K_ana.shape}  ({t_ana:.1f}s)")
 

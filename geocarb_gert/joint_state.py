@@ -131,6 +131,44 @@ def _row_interp1d(positions, values, kind: str, axis: int = -1):
 
 
 @dataclass
+class SubBinModulation:
+    """A known reference function `g` riding on one row's piecewise-linear
+    interpolant, without adding any new retrieved degrees of freedom
+    (2026-08-25) -- see `geocarb_gert.joint_state.bin_footprint_means` for
+    how `mean_g`/`C` are actually built; this is just the bundle a
+    `ParamSpec` carries once built, so `interp_to`/`interp_weights` have
+    one thing to check (`is None` or not) rather than several loosely
+    related fields.
+
+    `g_fn` : callable, `g_fn(eta_array) -> values`. The reference function
+        itself -- e.g. a real fine-resolution external product, or (for
+        validating the mechanism) the truth scene's own known fine
+        structure used as an oracle.
+    `mean_g` : `(n_bins,)`, `g` averaged over each bin's own footprint
+        (its `interp_weights` hat-function support, not a narrower
+        Voronoi/nearest partition -- see this module's own plan-time
+        rationale). Precomputed once; never depends on `x`.
+    `g_positions`, `g_cov` : optional. Only set when `g`'s OWN uncertainty
+        should propagate into the retrieved bin values' posterior --
+        `g_positions` is where `g` is itself known/uncertain (e.g. real
+        external-product pixel positions), `g_cov` its covariance there.
+        Both `None` (the default) means no uncertainty machinery runs at
+        all for this row -- not "zero uncertainty", genuinely skipped, so
+        every existing caller pays zero added cost.
+    `C` : `(n_bins, n_g_positions)`, precomputed alongside `mean_g` only
+        when `g_positions` is given -- `mean_g = C @ g_values`, the linear
+        map `jac.linearize`'s own `K_g` sensitivity needs (quotient rule
+        through `mean_g`'s own dependence on `g`'s uncertain values).
+    """
+
+    g_fn: object
+    mean_g: np.ndarray
+    g_positions: np.ndarray | None = None
+    g_cov: np.ndarray | None = None
+    C: np.ndarray | None = None
+
+
+@dataclass
 class ParamSpec:
     """One state-vector element: where it lives, its prior, and whether it
     is currently being retrieved."""
@@ -154,6 +192,12 @@ class ParamSpec:
                                      # bin positions but stays "linear" (a smooth feature,
                                      # e.g. a CO2 hot spot) -- see StateSpec.interp_to/
                                      # interp_weights for the resolution rule.
+    sub_bin_modulation: SubBinModulation | None = None  # (2026-08-25) a known reference
+                                     # function riding on this row's interpolant between
+                                     # bin centers, no new retrieved DOF -- None (every row,
+                                     # until one opts in) reproduces today's exact plain
+                                     # piecewise-linear/nearest behaviour. See SubBinModulation
+                                     # and bin_footprint_means's own docstrings.
 
     def __post_init__(self):
         self.positions = np.atleast_1d(np.asarray(self.positions, dtype=float))
@@ -362,8 +406,11 @@ class StateSpec:
                 continue
             v = vals[p.name]
             kind = p.state_interp if p.state_interp is not None else state_interp
-            out[p.name] = (np.full(etas.shape, v[0]) if p.n == 1
-                           else _row_interp1d(p.positions, v, kind)(etas))
+            sbm = p.sub_bin_modulation
+            v_eff = v / sbm.mean_g if sbm is not None else v
+            plain = (np.full(etas.shape, v_eff[0]) if p.n == 1
+                    else _row_interp1d(p.positions, v_eff, kind)(etas))
+            out[p.name] = np.asarray(sbm.g_fn(etas), dtype=float) * plain if sbm is not None else plain
         return out
 
     def values_for(self, x, *targets) -> dict:
@@ -400,11 +447,18 @@ class StateSpec:
         """
         p = self[name]
         etas = np.asarray(etas, dtype=float)
+        sbm = p.sub_bin_modulation
         if p.n == 1:
-            return np.ones((etas.size, 1))
+            W = np.ones((etas.size, 1))
+            if sbm is not None:
+                W = W / sbm.mean_g[0] * np.asarray(sbm.g_fn(etas), dtype=float)[:, None]
+            return W
         kind = p.state_interp if p.state_interp is not None else state_interp
         basis = np.eye(p.n)
-        return _row_interp1d(p.positions, basis, kind, axis=0)(etas)
+        W = _row_interp1d(p.positions, basis, kind, axis=0)(etas)
+        if sbm is not None:
+            W = (W / sbm.mean_g[None, :]) * np.asarray(sbm.g_fn(etas), dtype=float)[:, None]
+        return W
 
     def cov_for(self, name: str, S_ret_scale: np.ndarray) -> np.ndarray:
         """One row's own ``(n, n)`` posterior covariance sub-matrix, in
@@ -559,6 +613,64 @@ def combined_information_weighted_bin_centers(eta_lo: float, eta_hi: float, G: i
     return information_weighted_bin_centers(eta_lo, eta_hi, G, combined, n_grid=n_grid)
 
 
+def bin_footprint_means(positions, g_fn, state_interp: str = "linear",
+                        n_grid: int = 2000, pad_frac: float = 1.0,
+                        g_positions=None) -> SubBinModulation:
+    """`SubBinModulation` for one row: `g` averaged over each bin's own
+    `interp_weights` hat-function footprint (2026-08-25) -- NOT the
+    narrower Voronoi/nearest-midpoint partition, because the forward model
+    actually blends bin values via linear (or whatever `state_interp` is in
+    effect) interpolation, so a bin's own weight is nonzero out to both
+    neighbors, not just up to the midpoint. Normalizing against the region
+    a bin's weight actually spans is what keeps a modulated retrieved value
+    a genuine, self-consistent mean of `g` over that same region.
+
+    `positions` : this row's own bin centers.
+    `g_fn` : `g(eta_array) -> values`, the reference function.
+    `n_grid`/`pad_frac` : how finely, and how far past `positions`' own
+        min/max, the footprint integral is approximated -- padded so an end
+        bin's own clamped ("constant beyond the last real bin") weight tail
+        is actually captured, not cut off at the window's own edge.
+    `g_positions` : optional. When given, ALSO returns `C` (`(n_bins,
+        n_g_positions)`) such that `mean_g = C @ g(g_positions)` exactly --
+        the linear map `jac.linearize`'s `K_g` sensitivity needs. Uses a
+        throwaway single-row `StateSpec` purely for `interp_weights`'s own
+        geometry (safe: `interp_weights` only depends on positions, same
+        reasoning `along_slit_query.py` already documents for its own
+        throwaway-spec reuse) -- built fresh for BOTH `positions` and
+        `g_positions`, since they are generally different grids.
+    """
+    positions = np.atleast_1d(np.asarray(positions, dtype=float))
+    gap0 = positions[1] - positions[0] if positions.size > 1 else 0.0
+    gap_last = positions[-1] - positions[-2] if positions.size > 1 else 0.0
+    lo = positions.min() - pad_frac * gap0
+    hi = positions.max() + pad_frac * gap_last
+    fine_grid = np.linspace(lo, hi, n_grid)
+
+    throwaway = ParamSpec(name="_g", positions=positions, prior=positions,
+                          sigma=1.0, free=True, kind="scale")
+    W_fine = StateSpec([throwaway]).interp_weights(fine_grid, "_g", state_interp)
+    col_sums = W_fine.sum(axis=0)
+    col_sums[col_sums == 0] = 1.0  # defensive; every real bin's own column sums > 0
+
+    if g_positions is None:
+        g_vals = np.asarray(g_fn(fine_grid), dtype=float)
+        mean_g = (W_fine.T @ g_vals) / col_sums
+        return SubBinModulation(g_fn=g_fn, mean_g=mean_g)
+
+    g_positions = np.atleast_1d(np.asarray(g_positions, dtype=float))
+    throwaway_g = ParamSpec(name="_gpos", positions=g_positions, prior=g_positions,
+                            sigma=1.0, free=True, kind="scale")
+    Wg_fine = StateSpec([throwaway_g]).interp_weights(fine_grid, "_gpos", state_interp)
+    # mean_g_k = sum_j (W_fine[j,k]/col_sums[k]) * g(fine_grid_j)
+    #          = sum_j (W_fine[j,k]/col_sums[k]) * sum_m Wg_fine[j,m]*g_value_m
+    #          = sum_m C[k,m] * g_value_m
+    C = (W_fine / col_sums[None, :]).T @ Wg_fine   # (n_bins, n_g_positions)
+    g_vals_at_positions = np.asarray(g_fn(g_positions), dtype=float)
+    mean_g = C @ g_vals_at_positions
+    return SubBinModulation(g_fn=g_fn, mean_g=mean_g, g_positions=g_positions, C=C)
+
+
 def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                           sigmas=None, corr_length=None, kinds=None,
                           prior_form="exponential", gamma=3.0,
@@ -566,7 +678,8 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                           surface_density: int = 3, uniform: bool = False,
                           prior_anchor_density: float | None = None,
                           surface_fields=None,
-                          row_state_interp: dict | None = None) -> StateSpec:
+                          row_state_interp: dict | None = None,
+                          row_sub_bin_modulation: dict | None = None) -> StateSpec:
     """Build a :class:`StateSpec` whose priors are the truth scene's own
     values at `bin_centers` -- the joint block's existing "local-truth
     nuisance idealization", but now with every quantity present as a real,
@@ -615,6 +728,20 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
     grid another row (still `None`, falling back to whatever `state_interp`
     the solve itself is called with) interpolates linearly. See `StateSpec.
     interp_to`/`interp_weights`'s own docstrings for the resolution rule.
+
+    `row_sub_bin_modulation` (default None, 2026-08-25) attaches a
+    `SubBinModulation` to matching rows -- a known reference function
+    riding on that row's interpolant, no new retrieved DOF. Each value is
+    a dict: `{"g_fn": callable}` (required), plus optional `g_positions`/
+    `g_cov` if that reference function's own uncertainty should propagate
+    into the retrieved posterior (see `gauss_newton_state`'s `g_cov`
+    parameter and `jacobians.linearize`'s `K_g` return value) -- e.g.
+    `{"albedo": {"g_fn": modis_albedo_fn}}` for the no-uncertainty case, or
+    `{"albedo": {"g_fn": modis_albedo_fn, "g_positions": modis_px_eta,
+    "g_cov": modis_cov}}` for the full machinery. Built via `bin_footprint_
+    means(positions, ...)`, called once per row here at construction --
+    never depends on `x`, so it's a one-time cost per solve, not per
+    Gauss-Newton iteration.
 
     `uniform=True` evaluates every field at a single fixed position
     (`x_km=0.0`, matching `along_slit_scene.atmosphere_at(0.0)`'s own
@@ -689,13 +816,21 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                          else np.linspace(positions.min(), positions.max(), n_anchor))
             anchor_vals = _eval(anchor_pos * als.SLIT_HALF_KM)
             prior = np.interp(positions, anchor_pos, anchor_vals)
+        row_kind = (row_state_interp or {}).get(name)
+        modulation_opts = (row_sub_bin_modulation or {}).get(name)
+        modulation = None
+        if modulation_opts is not None:
+            opts = dict(modulation_opts)
+            g_cov = opts.pop("g_cov", None)  # not a bin_footprint_means arg -- set after
+            modulation = bin_footprint_means(positions, state_interp=row_kind or "linear", **opts)
+            modulation.g_cov = g_cov
         return ParamSpec(name=name, positions=positions,
                          prior=np.asarray(prior, dtype=float),
                          sigma=float(sigmas.get(name, 0.10)),
                          corr_length=float(_corr_for(name, corr_length)),
                          free=(name in free), kind=kinds.get(name, "scale"),
                          prior_form=prior_form, gamma=float(gamma), target=target,
-                         state_interp=(row_state_interp or {}).get(name))
+                         state_interp=row_kind, sub_bin_modulation=modulation)
 
     rows = [_row(name, fn, bin_centers, "atmosphere") for name, fn in fields.items()]
     if band_label is not None:
@@ -713,7 +848,8 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
 def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
                        step: float = 1e-3, max_iter: int = 15, tol: float = 1e-5,
                        label: str = "", verbose: bool = True, jacobian_fn=None,
-                       return_cov: bool = False, return_avk: bool = False):
+                       return_cov: bool = False, return_avk: bool = False,
+                       g_cov: dict | None = None):
     """Regularized Gauss-Newton over whatever :class:`StateSpec` says is free.
 
     The generic counterpart of `gd_joint_block_retrieve.gauss_newton_
@@ -780,9 +916,35 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     computes itself, since a caller may want it per-row, for a row subset,
     or as the one whole-solve scalar.
 
-    Return shape depends on which of `return_cov`/`return_avk` are set:
-    ``x`` (neither), ``(x, S_ret)`` (cov only, unchanged from before this
-    parameter existed), ``(x, AVK)`` (avk only), ``(x, S_ret, AVK)`` (both).
+    ``g_cov`` (paired with `jacobian_fn` -- only meaningful in analytic
+    mode, since it consumes the `K_g` dict `jac.linearize` now returns as
+    a third tuple element) propagates a `sub_bin_modulation` reference
+    function's OWN uncertainty into the retrieved posterior, Rodgers-style:
+    ``S_g_total = sum over rows( Gain @ K_g[name] @ g_cov[name] @
+    K_g[name].T @ Gain.T )``, ``Gain = S_ret @ KtSyinv`` (the same `Gain`
+    `AVK` is already built from, reused rather than rebuilt). This is a
+    SEPARATE output, never folded into `S_ret` -- `S_ret` stays exactly the
+    noise-driven posterior covariance it always was, so a caller can see
+    the two contributions apart. Default `None`: every row's `K_g` is
+    empty (`jac.linearize` returns an empty dict for any row that never
+    declared `sub_bin_modulation.g_cov`), and passing `g_cov=None` (or an
+    empty dict) skips the whole computation outright -- no extra matmuls,
+    no shape/None-handling risk to `S_ret`/`AVK`, for every caller that
+    never uses this feature. `g_cov[name]` must line up with `K_g[name]`'s
+    own columns (`g_positions` for that row); the two are only checked
+    for shape agreement, not for what `g_positions` values they came from.
+
+    Return shape depends on which of `return_cov`/`return_avk`/`g_cov` are
+    set: ``x`` (neither cov flag), ``(x, S_ret)`` (cov only, unchanged from
+    before this parameter existed), ``(x, AVK)`` (avk only), ``(x, S_ret,
+    AVK)`` (both) -- and, whenever `g_cov` is given and nonempty, `S_g_
+    total` is appended as the LAST element of whichever of those tuples
+    would otherwise be returned (e.g. ``(x, S_ret, S_g_total)`` with only
+    `return_cov`, ``(x, AVK, S_g_total)`` with only `return_avk`, ``(x,
+    S_ret, AVK, S_g_total)`` with both). `g_cov` with neither `return_cov`
+    nor `return_avk` still returns bare ``x`` -- `S_g_total` needs `S_ret`
+    (via `Gain`), so requesting it without `return_cov`/`return_avk` is a
+    no-op, not an implicit `return_cov=True`.
     """
     if jacobian_fn is None:
         for p in spec.free_params:
@@ -800,9 +962,10 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     Sa_inv = spec.Sa_inv()
     Sy_inv_diag = np.asarray(Sy_inv_diag, dtype=float)
 
+    K_g_dict: dict = {}
     for it in range(max_iter):
         if jacobian_fn is not None:
-            y0, K = jacobian_fn(x)
+            y0, K, K_g_dict = jacobian_fn(x)
             resid = y_true - y0
         else:
             y0 = forward(x)
@@ -826,12 +989,30 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     if not (return_cov or return_avk):
         return x
     S_ret = np.linalg.inv(A)
+
+    def _s_g_total():
+        # Strict no-op: skipped outright (not computed-and-zeroed) unless
+        # g_cov is given and nonempty, per the plan's own no-op guarantee.
+        if not g_cov:
+            return None
+        Gain = S_ret @ KtSyinv
+        total = np.zeros((n, n))
+        for name, cov in g_cov.items():
+            Kg = K_g_dict.get(name)
+            if Kg is None or Kg.size == 0:
+                continue
+            GKg = Gain @ Kg
+            total = total + GKg @ cov @ GKg.T
+        return total
+
     if not return_avk:
-        return x, S_ret
+        s_g_total = _s_g_total()
+        return (x, S_ret) if s_g_total is None else (x, S_ret, s_g_total)
     avk = (S_ret @ KtSyinv) @ K
+    s_g_total = _s_g_total()
     if return_cov:
-        return x, S_ret, avk
-    return x, avk
+        return (x, S_ret, avk) if s_g_total is None else (x, S_ret, avk, s_g_total)
+    return (x, avk) if s_g_total is None else (x, avk, s_g_total)
 
 
 def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
