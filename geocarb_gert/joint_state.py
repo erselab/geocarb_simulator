@@ -486,6 +486,38 @@ def albedo_positions_for(bin_centers, density: int = 3) -> np.ndarray:
     return np.linspace(bc.min(), bc.max(), (bc.size - 1) * int(density) + 1)
 
 
+def information_weighted_bin_centers(eta_lo: float, eta_hi: float, G: int,
+                                     weight_fn, n_grid: int = 2000) -> np.ndarray:
+    """`G` bin centers between `eta_lo`/`eta_hi`, at equal quantiles of
+    `weight_fn`'s own cumulative density -- the same equal-population
+    placement principle `gd_joint_block_diagnostics.pixel_density_bin_
+    centers` uses for raw pixel density, generalized to an arbitrary
+    weight FUNCTION instead of a sample array (2026-08-25).
+
+    `pixel_density_bin_centers` calls `np.quantile` directly on real pixel
+    eta samples -- correct there because "one sample = one unit of desired
+    density" already holds. `np.quantile` has no weight argument, so a
+    density *function* (rather than samples already drawn proportional to
+    it) needs its own inverse-CDF construction: evaluate `weight_fn` on a
+    fine grid, build its empirical CDF, then invert (interpolate) at `G`
+    equally-spaced quantile levels. A constant `weight_fn` reproduces a
+    uniform grid; this deliberately does NOT reproduce `pixel_density_bin_
+    centers` bit-for-bit even when fed something proportional to pixel
+    density, since it is quantizing a continuous density estimate, not
+    resampling the original discrete pixels.
+
+    `ParamSpec.positions` (and everything downstream -- `Sa_block`/`Sa_inv_
+    block`, `interp_weights`/`_row_interp1d`) already handles arbitrary
+    irregular positions under the `exponential` prior form (today's
+    default), so bins placed this way need no other change to use.
+    """
+    eta_grid = np.linspace(float(eta_lo), float(eta_hi), int(n_grid))
+    w = np.maximum(np.asarray(weight_fn(eta_grid), dtype=float), 1e-12)
+    cdf = np.cumsum(w)
+    cdf = (cdf - cdf[0]) / (cdf[-1] - cdf[0])
+    return np.interp(np.linspace(0.0, 1.0, int(G)), cdf, eta_grid)
+
+
 def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                           sigmas=None, corr_length=None, kinds=None,
                           prior_form="exponential", gamma=3.0,

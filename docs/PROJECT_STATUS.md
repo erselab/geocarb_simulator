@@ -987,7 +987,77 @@ elements) that doesn't exist yet -- a real, separate undertaking, though
 truth scene's own statistics (`ALBEDO_COV`/`ALBEDO_CORR_KM`, hot-spot
 width/amplitude) are already known exactly.
 
-**Not yet done**: `return_avk` isn't called anywhere in `_solve_window`
-or saved in any snapshot -- the DOF-collapse hypothesis in 7.3/7.5 is
-argued from indirect evidence (flat `S_ret`, flat-then-dropping
-`residRMS`), not yet directly confirmed via `trace(AVK)` per config.
+**Update (2026-08-25):** `return_avk` is now wired into `_solve_window`
+for both coarse and hires solves, saving `avk`/`dof` into every window's
+snapshot, with `dof_frac` (`trace(avk)/n_free`, averaged across a
+config's own windows) surfaced as its own `REPORT.md` column in
+`gd_joint_block_matrix.py`. Validated: a well-constrained `co2p` window
+gives `dof/n_free ~= 0.9995`; a full `co2p`-only `g_ratio=12` run reports
+`DOF frac = 1.000` in `REPORT.md`, consistent with the collapse being
+specific to adding albedo as a third weakly-constrained free row, not an
+inherent property of coarse `g_ratio` alone -- the DOF-collapse
+hypothesis above is no longer argued only from indirect evidence.
+
+## 8. Prior-information-driven bin placement: a synthetic demo, and a real negative result (2026-08-25)
+
+Motivated by a conversation about a shared, information-weighted state
+grid: today `albedo`'s bins are placed by `albedo_positions_for`, a flat
+`surface_density=3` uniform oversampling of the gas grid's own span --
+three times as many bins as `co2_ppm`/`p_surface_hpa`, everywhere,
+whether or not anything actually supports that much local resolution. A
+real mission would often have an external, spatially-resolved product
+(MODIS albedo, ~500m) usable as a genuinely informative prior -- worth
+concentrating retrieval resolution there rather than spreading it
+uniformly.
+
+**Built** (no core-architecture changes needed -- `ParamSpec.positions`
+already accepts arbitrary irregular arrays under the `exponential` prior
+form, today's default):
+- `geocarb_gert.joint_state.information_weighted_bin_centers(eta_lo,
+  eta_hi, G, weight_fn)` -- generalizes `pixel_density_bin_centers`'s
+  equal-population quantile placement from raw pixel-density SAMPLES to
+  an arbitrary density FUNCTION, via inverse-CDF sampling (`np.quantile`
+  has no weight argument). Unit-tested: a constant `weight_fn` reproduces
+  a uniform grid exactly; a peaked one concentrates bins ~9.7x denser at
+  the peak than at the window edges.
+- `geocarb_gert.along_slit_scene.albedo_info_density(x_km)` -- a
+  SYNTHETIC stand-in for "how much a real fine-resolution external
+  product would inform us here," peaked at each `SURFACE_PATCHES`
+  boundary (a real product would resolve a genuine, sharp transition
+  there), floor elsewhere. Not derived from any real external data --
+  demonstrates the mechanism only. Deliberately correlates with the
+  truth's own patch structure, since a real product genuinely would too.
+- `scripts/gd_information_density_bins_demo.py` -- a standalone,
+  self-contained demo (not wired into the production CLI): a bin-
+  placement diagram (same convention as `gd_window_overlap_diagram.py`),
+  and a before/after native-resolution accuracy comparison at a FIXED
+  total bin budget (redistributed, not grown), reusing `state_spec_from_
+  scene`'s existing `surface_positions` override rather than duplicating
+  the production solve path.
+
+**Result -- a real negative finding, not a bug.** At a properly-sized
+test window (rows 884-924, G=40 albedo bins -- a narrower window with
+only G=7 gave an unusably small, noisy comparison, itself a small
+illustration of the same "too few bins to say anything meaningful"
+problem this feature exists to address): the redistribution mechanism
+works exactly as intended (bins visibly and dramatically cluster at the
+boundary), but native-resolution accuracy right at the boundary got
+WORSE, not better (mean `|error|` 0.0122 -> 0.0185), while the now-sparser
+far field improved (0.0011 -> 0.0003). Ruled out one obvious confound --
+the tightly-packed near-boundary bins are not anchor-starved to the
+`ad1`-pathology degree (Sec.7.6): min anchors-per-bin-gap only drops from
+6 to 3, not to 0. Leading, unconfirmed hypothesis: packing bins closer
+than `ALBEDO_CORR_KM` (10km) apart makes them strongly prior-correlated
+with each other, which is not the same as the data independently
+resolving them, and may hurt Gauss-Newton conditioning exactly where the
+extra resolution was meant to help. The natural next diagnostic --
+comparing `trace(AVK)` per bin between the two schemes (Sec.7.10) -- is
+not yet done.
+
+**Takeaway**: naively moving resolution toward "where prior information
+exists" without also confirming the *data* (anchor grid, and possibly the
+prior's own correlation length relative to the new bin spacing) can
+actually support that redistribution is not automatically a win, and can
+make things worse exactly where you meant to help. Worth treating as a
+real constraint on any future adaptive-resolution scheme, not a detail to
+paper over.

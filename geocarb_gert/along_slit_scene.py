@@ -141,6 +141,30 @@ ALBEDO_FINE_SEED = 20260817
 _ALBEDO_MIN, _ALBEDO_MAX = 0.005, 0.95
 
 
+def albedo_info_density(x_km, peak_width_km: float = 5.0, floor: float = 0.1):
+    """Synthetic stand-in for "how much a real fine-resolution external
+    product (e.g. MODIS albedo, ~500m) would inform us here" -- peaked at
+    each internal `SURFACE_PATCHES` boundary (a real product would resolve
+    a genuine, sharp transition there), a floor elsewhere. NOT derived
+    from any real external data -- built to demonstrate the
+    resolution-follows-information mechanism in
+    `geocarb_gert.joint_state.information_weighted_bin_centers`; see
+    `docs/PROJECT_STATUS.md` Sec.8. In a real system this would instead
+    come from an actual MODIS-derived local-resolving-power/confidence
+    field, reprojected onto the slit.
+
+    Deliberately correlates with the truth's own patch structure -- that
+    is the whole point (a real external product genuinely WOULD show more
+    structure right at a real land-cover transition), not something being
+    hidden.
+    """
+    boundaries = np.array([p[0] for p in SURFACE_PATCHES[1:]])
+    x = np.atleast_1d(np.asarray(x_km, dtype=float))
+    dist = np.min(np.abs(x[:, None] - boundaries[None, :]), axis=1)
+    peak = np.exp(-0.5 * (dist / peak_width_km) ** 2)
+    return floor + (1.0 - floor) * peak
+
+
 def _gauss(x, x0, width, amp):
     return amp * np.exp(-0.5 * ((x - x0) / width) ** 2)
 
