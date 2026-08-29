@@ -1272,3 +1272,41 @@ improvement. The far-field degradation noted in 10.2 as "not yet
 explained" was not chased further given how decisively 10.3 resolves the
 open question -- worth returning to only if a future run at very fine
 g_ratio needs it.
+
+### 10.4 CO2 side effect: sub_bin_anomaly cleans up cross-talk it never targeted
+
+`co2_ppm` and `albedo` are jointly free/solved in every one of these
+9 configs (`--free co2_ppm,p_surface_hpa,albedo`), and `sub_bin_anomaly`
+was only ever set on `albedo`'s own row -- but scoring `co2_ppm` the same
+way (same 9 pkls, same `stack_windows_along_slit`, truth = `als.xco2_
+ppm`, near/far against the same 12 patch boundaries) shows a real,
+substantial side effect:
+
+| setup | anchor_density | overall (ppm) | near (<=15km) | far | rel. err |
+|---|---|---|---|---|---|
+| none  | 1  | 17.43 | 54.57 | 12.27 | 4.19% |
+| none  | 4  | 18.27 | 52.69 | 13.49 | 4.40% |
+| none  | 16 | 18.43 | 53.08 | 13.62 | 4.43% |
+| truth | 1  |  9.50 | 12.38 |  9.10 | 2.29% |
+| truth | 4  |  3.33 |  3.92 |  3.24 | 0.80% |
+| truth | 16 | **1.48** | **1.21** | 1.51 | **0.36%** |
+| prior | 1  | 24.97 | 38.97 | 23.03 | 6.01% |
+| prior | 4  | 23.66 | 31.10 | 22.62 | 5.69% |
+| prior | 16 | 24.05 | 33.00 | 22.81 | 5.79% |
+
+Baseline CO2 error is dominated by exactly the patch-boundary leakage
+Sec.7.8 documented: near-boundary error (~53-55 ppm) is ~4x the far-field
+number (~12-14 ppm) -- an imperfectly-represented albedo boundary bleeding
+into the jointly-solved CO2 retrieval right where the surface changes.
+Giving albedo an accurate high-resolution `g` (truth) collapses this: CO2
+near-boundary error drops from ~55 ppm to 1.21 ppm at `anchor_density=16`
+(~45x), overall relative error from 4.4% to 0.36%, and the near/far GAP
+essentially disappears (1.21 vs. 1.51 -- comparable, unlike baseline's 4x
+split) -- once albedo's own forward-model value is accurate at high
+resolution, there is much less unmodeled surface signal left for CO2 to
+wrongly absorb near a boundary. `g=prior` degrades CO2 too (~24 ppm vs.
+baseline's ~18 ppm), the same uncorrelated-texture penalty propagating
+through the joint fit into a row `sub_bin_anomaly` was never applied to.
+So the mechanism's real value here is larger than the albedo-only numbers
+in 10.3 suggest -- it substantially cleans up known CO2-albedo cross-talk
+as a side effect, not just albedo's own accuracy.
