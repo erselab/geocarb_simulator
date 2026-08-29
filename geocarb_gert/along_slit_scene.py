@@ -134,9 +134,13 @@ SURFACE_PATCHES = [
 ]
 ALBEDO_EDGE_KM = 3.0      # boundary softness, ~1 detector row
 ALBEDO_COV = 0.10         # fractional 1-sigma within-patch variability
-ALBEDO_CORR_KM = 10.0     # its correlation length -- matches the CO2 hot-spot scale
-                          # (~1.7 detector rows at 6km/row GSD); shorter than any gas
-                          # feature besides the hot spots themselves (2026-08-25, was 30.0)
+ALBEDO_CORR_KM = 0.5      # its correlation length -- 2026-08-28: set to match a real
+                          # MODIS-like external product's own ~500m resolution (the
+                          # motivating example from the start of this feature's design
+                          # conversation), well below anything a detector row (~6km GSD)
+                          # or a retrieval bin can resolve directly -- genuine sub-bin
+                          # texture, not just sub-detector-row-per-CO2-hotspot-scale
+                          # (was 10.0, "matches the CO2 hot-spot scale", 2026-08-25).
 ALBEDO_FINE_SEED = 20260817
 _ALBEDO_MIN, _ALBEDO_MAX = 0.005, 0.95
 
@@ -169,29 +173,80 @@ def _gauss(x, x0, width, amp):
     return amp * np.exp(-0.5 * ((x - x0) / width) ** 2)
 
 
-@lru_cache(maxsize=1)
-def _albedo_fine_field():
-    """Deterministic smooth fractional-perturbation field on a 1 km grid.
+def _correlated_field(seed, corr_km=None, cov=None, oversample=5.0):
+    """Deterministic Gaussian-smoothed white noise, grid spacing chosen to
+    actually RESOLVE `corr_km` rather than a fixed 1 km grid.
 
-    Gaussian-smoothed white noise, renormalised so its own standard
-    deviation is exactly `ALBEDO_COV` -- smoothing otherwise shrinks the
-    variance by an amount that depends on `ALBEDO_CORR_KM`, which would
-    make the requested coefficient of variation silently wrong.
+    Before 2026-08-28, this hardcoded a 1 km grid, fine when `ALBEDO_
+    CORR_KM` was 10-30 km (5-30 grid points per correlation length) but
+    silently wrong once it dropped to a MODIS-like 500m: a correlation
+    length SHORTER than the grid spacing can't be represented at all (the
+    Gaussian kernel's own half-width, `4*corr_km` grid points, would round
+    to 2 -- a couple of adjacent 1km cells, not a genuinely finer field).
+    Grid spacing is now `min(1.0, corr_km/oversample)` km, `oversample=5`
+    points per correlation length by default -- enough for the smoothing
+    kernel to be resolved rather than aliased, capped at the original 1km
+    so nothing changes for any existing caller using the original
+    10-30km scale.
 
-    Seeded and `lru_cache`d rather than drawn per call, so every process
-    (including `build_lookup_radiance`'s forked pool workers) sees the
-    identical field and the scene stays reproducible.
+    Renormalised so its own standard deviation is exactly `cov` --
+    smoothing otherwise shrinks the variance by an amount that depends on
+    `corr_km`, which would make the requested coefficient of variation
+    silently wrong.
+
+    Seeded (not drawn fresh per call) so every process (including
+    `build_lookup_radiance`'s forked pool workers) sees the identical
+    field and the scene stays reproducible; callers `lru_cache` this
+    themselves since the grid itself, not just the seed, determines cost.
     """
-    x = np.arange(-SLIT_HALF_KM, SLIT_HALF_KM + 1.0, 1.0)
-    rng = np.random.default_rng(ALBEDO_FINE_SEED)
+    corr_km = ALBEDO_CORR_KM if corr_km is None else corr_km
+    cov = ALBEDO_COV if cov is None else cov
+    dx = min(1.0, corr_km / oversample)
+    x = np.arange(-SLIT_HALF_KM, SLIT_HALF_KM + dx, dx)
+    rng = np.random.default_rng(seed)
     w = rng.standard_normal(len(x))
-    # Gaussian kernel, truncated at 4 sigma
-    half = int(4 * ALBEDO_CORR_KM)
-    k = np.exp(-0.5 * (np.arange(-half, half + 1) / ALBEDO_CORR_KM) ** 2)
+    # Gaussian kernel, truncated at 4 sigma (in grid points, not km)
+    half = max(1, int(round(4 * corr_km / dx)))
+    k = np.exp(-0.5 * (np.arange(-half, half + 1) * dx / corr_km) ** 2)
     k /= k.sum()
     f = np.convolve(w, k, mode="same")
-    f *= ALBEDO_COV / f.std()
+    f *= cov / f.std()
     return x, f
+
+
+@lru_cache(maxsize=1)
+def _albedo_fine_field():
+    """The true fine-scale albedo perturbation field -- see
+    `_correlated_field`. Seeded and `lru_cache`d so the scene is
+    reproducible across processes (including `build_lookup_radiance`'s
+    forked pool workers)."""
+    return _correlated_field(ALBEDO_FINE_SEED)
+
+
+#: A real fine-resolution external product (MODIS-like) knows the fine-
+#: scale texture's own STATISTICS (ALBEDO_COV, ALBEDO_CORR_KM) but not the
+#: true field's own phase -- it is an independent, imperfect measurement
+#: of a correlated random field, not a second copy of the same noise draw.
+#: Distinct seed (2026-08-28), same generation as `_albedo_fine_field`.
+ALBEDO_PRIOR_FINE_SEED = 20260828
+
+
+@lru_cache(maxsize=1)
+def _albedo_prior_fine_field():
+    """Like `_albedo_fine_field`, but an INDEPENDENT noise realization with
+    the SAME statistics -- the sub-bin_modulation oracle for "a real,
+    imperfect prior product" (docs/PROJECT_STATUS.md Sec.10's follow-up),
+    as opposed to `albedo_for_label(..., include_fine=True)`'s exact-truth
+    oracle. Genuinely correlated with the truth's own patch structure
+    (same `_patch_type_weights` blend underneath), but the fine-scale
+    texture riding on top of that blend is a different draw, so a bin's
+    OWN true value need not equal `c * mean_g_k` for the corrected self-
+    consistency identity (Sec.10) to hold exactly here -- unlike the g=truth
+    run, this is a genuine test of whether sub_bin_modulation still helps
+    when g is informative but imperfect, not an oracle that already knows
+    the answer.
+    """
+    return _correlated_field(ALBEDO_PRIOR_FINE_SEED)
 
 
 def _patch_type_weights(x_km):
@@ -219,6 +274,31 @@ def _patch_type_weights(x_km):
     return types, w / total
 
 
+def _albedo_compose(x, labels, pert):
+    """Shared by every `albedo_at*` variant: patch-archetype blend times a
+    fine-scale perturbation `pert` (already evaluated at `x`, 1.0 for
+    "no fine texture"). Factored out (2026-08-28) so a caller can swap in
+    a DIFFERENT fine-scale field (the true one, none, or an independent
+    "prior product" realization -- `_albedo_prior_fine_field`) without
+    duplicating the patch-blend logic three times.
+    """
+    from .scene import _BAND_ALBEDO
+
+    types, w = _patch_type_weights(x)
+    out = np.empty((len(labels), len(x)))
+    for j, lab in enumerate(labels):
+        try:
+            table = _BAND_ALBEDO[lab]
+        except KeyError:
+            raise KeyError(f"no albedo defined for band {lab!r}; "
+                           f"add it to geocarb_gert.scene._BAND_ALBEDO") from None
+        base = np.zeros(len(x))
+        for i, t in enumerate(types):
+            base += w[i] * table[t]
+        out[j] = np.clip(base * pert, _ALBEDO_MIN, _ALBEDO_MAX)
+    return out
+
+
 def albedo_at(x_km, labels, include_fine: bool = True):
     """Surface albedo at along-slit position(s) `x_km`, for bands `labels`.
 
@@ -240,11 +320,8 @@ def albedo_at(x_km, labels, include_fine: bool = True):
     -------
     ndarray, shape (n_labels,) for scalar `x_km`, else (n_labels, n_x)
     """
-    from .scene import _BAND_ALBEDO
-
     scalar = np.isscalar(x_km) or np.asarray(x_km).ndim == 0
     x = np.atleast_1d(np.asarray(x_km, dtype=float))
-    types, w = _patch_type_weights(x)
 
     if include_fine:
         xf, f = _albedo_fine_field()
@@ -252,17 +329,22 @@ def albedo_at(x_km, labels, include_fine: bool = True):
     else:
         pert = 1.0
 
-    out = np.empty((len(labels), len(x)))
-    for j, lab in enumerate(labels):
-        try:
-            table = _BAND_ALBEDO[lab]
-        except KeyError:
-            raise KeyError(f"no albedo defined for band {lab!r}; "
-                           f"add it to geocarb_gert.scene._BAND_ALBEDO") from None
-        base = np.zeros(len(x))
-        for i, t in enumerate(types):
-            base += w[i] * table[t]
-        out[j] = np.clip(base * pert, _ALBEDO_MIN, _ALBEDO_MAX)
+    out = _albedo_compose(x, labels, pert)
+    return out[:, 0] if scalar else out
+
+
+def albedo_at_prior_fine(x_km, labels):
+    """Like `albedo_at(..., include_fine=True)`, but the fine-scale texture
+    is `_albedo_prior_fine_field`'s INDEPENDENT realization, not the true
+    field's own -- "a real, imperfect external product" oracle for
+    `sub_bin_modulation`, as opposed to the exact-truth oracle `albedo_at`
+    itself supplies. See `_albedo_prior_fine_field`'s own docstring.
+    """
+    scalar = np.isscalar(x_km) or np.asarray(x_km).ndim == 0
+    x = np.atleast_1d(np.asarray(x_km, dtype=float))
+    xf, f = _albedo_prior_fine_field()
+    pert = 1.0 + np.interp(x, xf, f)
+    out = _albedo_compose(x, labels, pert)
     return out[:, 0] if scalar else out
 
 
@@ -288,6 +370,20 @@ def albedo_for_label_prior(x_km, label):
     `SURFACE_FIELDS_PRIOR`/`SURFACE_PRIOR_FIELD_SETS` below.
     """
     return albedo_for_label(x_km, label, include_fine=False)
+
+
+def albedo_for_label_prior_fine(x_km, label):
+    """`albedo_at_prior_fine` for a single band -- the `sub_bin_modulation`
+    "real, imperfect product" oracle (2026-08-28), as opposed to
+    `albedo_for_label(..., include_fine=True)`'s exact-truth oracle used
+    for docs/PROJECT_STATUS.md Sec.10's first result. NOT the same thing
+    as `albedo_for_label_prior` above -- that one has NO fine-scale texture
+    at all (`include_fine=False`); this one has real, resolved sub-bin
+    texture, just not the true field's own phase.
+    """
+    scalar = np.isscalar(x_km) or np.asarray(x_km).ndim == 0
+    out = np.atleast_2d(albedo_at_prior_fine(np.atleast_1d(x_km), [label]))[0]
+    return float(out[0]) if scalar else out
 
 
 #: Truth-state parameters that are NOT part of `AtmosphericProfile` and so

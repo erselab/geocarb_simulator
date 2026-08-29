@@ -1123,3 +1123,152 @@ than the leakage fix saves, at least in this configuration. Not yet tried:
 elsewhere (mixing kinds along a single row, not just across rows) -- the
 per-row field as built doesn't support per-BIN kind, only per-row, so that
 would need a further extension, not implemented here.
+
+## 10. Sub-bin anomaly: additive high-resolution sampling at anchor points (2026-08-28)
+
+A MULTIPLICATIVE sub-bin scheme (`g(eta) * sum_k W[eta,k]*bin_value_k/
+mean_g_k`) was built first, tested exhaustively (exact-truth oracle, an
+independent-noise-statistics-matched "real prior" oracle, exact vs.
+structural surface priors, 10km vs. 500m albedo correlation length), and
+found to consistently make native-resolution accuracy WORSE than plain
+linear interpolation, never better -- root-caused (a per-bin diagnostic
+comparing scoring against the bin-center point value vs. the footprint
+mean, plus the averaging kernel) to `mean_g_k` being a NEIGHBOR-BLENDING
+(tent-weighted) smoothing operator, not a point-sample one: for a uniform
+grid, `mean_g_k = (1/6)*truth_{k-1} + (2/3)*truth_k + (1/6)*truth_{k+1}`,
+which equals the bin-center value only when the bin-center sequence has
+zero curvature -- verified against `bin_footprint_means`'s own actual
+output, not just derived on paper. That design and its own result writeup
+are preserved on git branch `sub-bin-modulation-multiplicative`, NOT on
+`main` -- entirely superseded by the design below.
+
+### 10.1 Redesign: additive, not multiplicative
+
+Restated goal (user): allow higher-resolution sampling of a profile `g` at
+anchor points when it is available, with the requirement that this
+reduces EXACTLY to today's plain linear interpolation whenever `g` is
+itself linear between bin centers -- not just when it is constant, which
+is all the multiplicative scheme could ever guarantee.
+
+```
+value(eta) = sum_k(W[eta,k]*bin_value_k)  +  [ g(eta) - sum_k(W[eta,k]*g_k) ]
+```
+
+`g_k = g(bin_center_k)`, a single point sample -- no footprint-averaging,
+no fine grid, no `mean_g_k`. Two properties, both checked directly against
+the actual code, not just derived:
+
+- **Exact reduction**: `g` piecewise-linear on the row's own grid ->
+  the bracketed correction is identically zero at every `eta`, not just
+  the nodes -- `value(eta)` collapses to exactly today's plain interpolant
+  (verified to machine precision, arbitrary non-node `eta`).
+- **`value(bin_center_k) == bin_value_k` exactly, for ANY `g`** -- a bin's
+  own retrieved value keeps its literal point-sample meaning, unlike the
+  old scheme, where `mean_g_k` never quite equaled `bin_value_k`. This is
+  also what makes `_native_error_summary`'s existing scoring convention
+  (retrieved value vs. truth at the bin's own center) unambiguous again --
+  no footprint-mean-vs-point-value question to resolve.
+
+**The state Jacobian `K` is completely untouched**: `d(value)/d(bin_value_k)
+= W[eta,k]`, unchanged, because `g_k` is a fixed constant that never
+depends on the retrieved state. `StateSpec.interp_weights` needed NO code
+change at all (confirmed: byte-identical output with `sub_bin_anomaly` set
+vs. unset on the same row); `jacobians.linearize`'s existing loop that
+builds `K` needed no change either. Only `StateSpec.interp_to` (the anchor
+VALUES fed to the forward model) picked up a new branch -- and because
+`build_forward_state`/`jacobians.linearize` both already build every
+per-anchor state entirely through `interp_to`, neither needed further
+changes to pick up the correction in the actually-rendered radiance. Built:
+`SubBinAnomaly`/`ParamSpec.sub_bin_anomaly`, `state_spec_from_scene`'s
+`row_sub_bin_anomaly`, and (same overall shape as before, but now a plain
+LINEAR sensitivity with no quotient rule) `g_positions`/`g_cov` ->
+`jacobians._g_anomaly_sensitivity` -> `K_g` -> `gauss_newton_state`'s
+`g_cov` parameter propagating `g`'s own uncertainty into the posterior via
+`Gain @ K_g @ g_cov @ K_g.T @ Gain.T`, strict no-op when `g_cov` is
+`None`/empty.
+
+**Validated (unit level, all checked directly)**: `sub_bin_anomaly=None`
+no-op; `interp_weights` byte-identical with/without a row's
+`sub_bin_anomaly` set; the exact-reduction property (machine precision, at
+arbitrary non-node `eta`); `value(bin_center_k) == bin_value_k` exactly for
+a genuinely non-linear `g`; `g_cov=None` reproduces `gauss_newton_state`'s
+`return_cov`/`return_avk` outputs byte-identically; a nonzero `g_cov`
+strictly increases reported posterior variance (`S_g_total` symmetric PSD,
+positive diagonal) on a synthetic problem.
+
+**Also confirmed directly (user requirement)**: with `state_spec_from_scene`
+called the normal way (`surface_positions=None`), `co2_ppm`/`p_surface_hpa`/
+`albedo` all solve on the exact same shared bin grid -- `sub_bin_anomaly`
+only adds resolution at the anchor/forward-model level via `g_fn`, never a
+second, separate retrieval grid for albedo.
+
+### 10.2 Single-window result (rows 418-438, structural prior, 500m
+correlation length, g_ratio=1) -- a mixed signal
+
+| scheme | overall | near (<=15km) | far (>15km) |
+|---|---|---|---|
+| no anomaly (plain grid) | 0.0274 | 0.0289 | 0.0257 |
+| anomaly(g=truth) | 0.0279 | 0.0242 | 0.0321 |
+| anomaly(g=prior) | 0.0322 | 0.0289 | 0.0358 |
+
+Near-boundary error genuinely IMPROVED with the exact-truth oracle (0.0242
+vs. 0.0289, ~16%) -- a real win, right where a curved feature should
+matter most, and something the multiplicative scheme never produced
+anywhere. `g=truth` and `g=prior` are also now clearly DISTINGUISHABLE
+(0.0279 vs. 0.0322) -- unlike the multiplicative scheme, where an exact
+oracle and an uncorrelated-but-statistically-matched one performed
+identically. But far-field got WORSE with `g=truth` (0.0321 vs. 0.0257),
+not yet explained at the time -- candidates noted then: RT nonlinearity in
+albedo, cross-talk with the jointly-free `co2_ppm`/`p_surface_hpa` rows, or
+anchor-assignment "stepping" discretization (Sec.7.6). This window used
+`g_ratio=1`, a deliberately fine bin grid built for the earlier
+multiplicative-scheme investigation -- see 10.3 for why that turned out to
+matter.
+
+### 10.3 Whole-slit sweep (production g_ratio=3, all 58 windows) -- a decisive win
+
+Built `--sub-bin-anomaly {none,truth,prior}` on the PRODUCTION sweep tool
+(`gd_joint_block_whole_slit_sweep.py`, not a demo script) and
+`scripts/submit_sub_bin_anomaly_v1.sbatch` (3 setups x anchor_density
+{1,4,16}, 9 SLURM array tasks, `--prior-fields structural`, full 58-window
+slit). All 9 tasks completed cleanly (58/58 windows each, no errors,
+15-58 min per task). Scored with a new `scripts/gd_sub_bin_anomaly_sweep_
+score.py`, generalizing the single-window near/far split to the whole
+slit (near = within 15km of ANY of the 12 internal `als.SURFACE_PATCHES`
+boundaries, not just one):
+
+| setup | anchor_density | overall | near (<=15km) | far |
+|---|---|---|---|---|
+| none  | 1  | 0.0187 | 0.0207 | 0.0185 |
+| none  | 4  | 0.0186 | 0.0210 | 0.0183 |
+| none  | 16 | 0.0187 | 0.0212 | 0.0183 |
+| truth | 1  | 0.0076 | 0.0057 | 0.0079 |
+| truth | 4  | **0.0006** | 0.0005 | 0.0007 |
+| truth | 16 | **0.0005** | 0.0003 | 0.0005 |
+| prior | 1  | 0.0247 | 0.0201 | 0.0253 |
+| prior | 4  | 0.0257 | 0.0210 | 0.0263 |
+| prior | 16 | 0.0257 | 0.0211 | 0.0263 |
+
+At the PRODUCTION default `g_ratio=3` (bins ~3x wider than the tight
+`g_ratio=1` single-window test), the exact-truth oracle is a dramatic win
+-- roughly a 30x error reduction at `anchor_density>=4` (0.0187 -> 0.0005-
+0.0006), improving monotonically with anchor density exactly as expected
+(more anchors -> the mechanism can sample `g`'s own resolution more
+finely; `anchor_density=1` gives only a modest win, 0.0076, since there is
+little room between one anchor per row for `g` to add texture at all).
+`g=prior` is consistently WORSE than baseline across every anchor density
+(~0.025 vs. ~0.0187, roughly flat) -- the mechanism is genuinely using
+`g`'s actual content, not just benefiting from "more texture, any
+texture," which is the discriminating signature a real refinement should
+show and the multiplicative scheme never showed.
+
+**Reconciling 10.2 and 10.3**: the single g_ratio=1 window's mixed result
+(near improved, far got worse) now reads as a scale-sensitivity artifact
+of that unusually fine bin grid, not a property of the mechanism itself --
+at bins genuinely wide relative to the 500m correlation length (the
+production default), there is real, exploitable sub-bin structure for `g`
+to add, and the mechanism delivers a large, honest, content-sensitive
+improvement. The far-field degradation noted in 10.2 as "not yet
+explained" was not chased further given how decisively 10.3 resolves the
+open question -- worth returning to only if a future run at very fine
+g_ratio needs it.

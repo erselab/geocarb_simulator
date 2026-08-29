@@ -79,6 +79,22 @@ tradeoff named in conversation before building this: "nearest" trades
 the linear leakage pattern for a different, more uniform but not smaller,
 error source -- not a strict improvement, a different one.
 
+2026-08-28: a MULTIPLICATIVE `--modulation`/`sub_bin_modulation` scheme
+(`g(eta) * sum_k W[eta,k]*bin_value_k/mean_g_k`) was built, tested
+exhaustively (exact-truth oracle, an independent-noise-statistics-matched
+"real prior" oracle, exact vs. structural priors, 10km vs. 500m
+correlation length), found to consistently make native-resolution accuracy
+WORSE than plain linear interpolation, and root-caused (a per-bin
+diagnostic + the averaging kernel) to `mean_g_k` being a neighbor-blending
+smoothing operator, not a point-sample one. That design and its own
+result writeup are preserved on branch `sub-bin-modulation-multiplicative`,
+NOT on `main` -- superseded here by the ADDITIVE `sub_bin_anomaly` scheme
+below (`--linear-only`/`--modulation-source`/`--prior-fields`), which
+reduces EXACTLY to plain linear interpolation whenever the higher-
+resolution profile is itself linear between bin centers (a property the
+multiplicative scheme never had). See docs/PROJECT_STATUS.md Sec.10 for
+that result.
+
 Run:  PYTHONPATH=. python3 scripts/gd_information_density_bins_demo.py
         [--window-index 54] [--anchor-density 16] [--shared-grid]
 Output: plots/joint_block/gd_information_density_bins_r<lo>-<hi>.png,
@@ -87,6 +103,8 @@ Output: plots/joint_block/gd_information_density_bins_r<lo>-<hi>.png,
 from __future__ import annotations
 
 import argparse
+import functools
+import multiprocessing as mp
 import sys
 import time
 from pathlib import Path
@@ -166,13 +184,22 @@ def _plot_bin_placement(fpa, row_lo, row_hi, flat, info, out_path):
 
 def _solve_one(fpa, row_lo, row_hi, band, absco, wide_inst, geo, solar, albedo,
                wn_hires, ils, anchor_density, bin_centers, surface_positions,
-               row_state_interp=None):
+               row_state_interp=None, row_sub_bin_anomaly=None, surface_fields=None,
+               return_avk=False):
     """Minimal hires-only solve for co2_ppm+p_surface_hpa+albedo, mirroring
     gd_joint_block_whole_slit_sweep.py::_solve_window's hires branch exactly,
-    with two differences: surface_positions is supplied directly rather than
-    computed internally by albedo_positions_for, and row_state_interp lets a
-    caller set a per-row interpolation kind -- the two hooks this demo needs
-    that the production function doesn't expose."""
+    with five differences: surface_positions is supplied directly rather
+    than computed internally by albedo_positions_for, row_state_interp lets
+    a caller set a per-row interpolation kind, row_sub_bin_anomaly lets a
+    caller set a per-row additive high-resolution reference profile
+    (2026-08-28, docs/PROJECT_STATUS.md Sec.10), surface_fields lets a
+    caller swap the surface PRIOR away from state_spec_from_scene's default
+    (exact truth, als.SURFACE_FIELDS) to an imperfect one, e.g.
+    als.SURFACE_FIELDS_PRIOR, and return_avk additionally computes the
+    averaging kernel (gauss_newton_state's own return_avk=True) so a
+    caller can compare trace(AVK) -- degrees-of-freedom-for-signal --
+    between two solves -- the five hooks this demo needs that the
+    production function doesn't expose."""
     rows_win = np.arange(row_lo, row_hi + 1)
     y_true = band["A"][rows_win, :].ravel()
     noise_model = geocarb_noise_model(fpa)
@@ -189,7 +216,9 @@ def _solve_one(fpa, row_lo, row_hi, band, absco, wide_inst, geo, solar, albedo,
 
     spec = state_spec_from_scene(bin_centers, free=("co2_ppm", "p_surface_hpa", "albedo"),
                                  band_label=band_label, surface_positions=surface_positions,
-                                 row_state_interp=row_state_interp)
+                                 row_state_interp=row_state_interp,
+                                 row_sub_bin_anomaly=row_sub_bin_anomaly,
+                                 surface_fields=surface_fields)
     fwd = build_forward_state(fpa, rows_win, anchor_etas, spec, spectrum, wn_hires, ils,
                               pad=PAD, state_interp="linear")
 
@@ -197,15 +226,63 @@ def _solve_one(fpa, row_lo, row_hi, band, absco, wide_inst, geo, solar, albedo,
         return jac.linearize(fpa, rows_win, anchor_etas, spec, spectrum_jac, wn_hires, ils, x,
                              pad=PAD, state_interp="linear")
 
-    x, S_ret = gauss_newton_state(fwd, y_true, spec, Sy_inv_diag, verbose=False,
-                                  jacobian_fn=lin, return_cov=True)
+    if return_avk:
+        x, S_ret, avk = gauss_newton_state(fwd, y_true, spec, Sy_inv_diag, verbose=False,
+                                           jacobian_fn=lin, return_cov=True, return_avk=True)
+    else:
+        avk = None
+        x, S_ret = gauss_newton_state(fwd, y_true, spec, Sy_inv_diag, verbose=False,
+                                      jacobian_fn=lin, return_cov=True)
     resid = y_true - fwd(x)
-    return dict(row_lo=row_lo, row_hi=row_hi,
-               hires=spec.snapshot(x, resid=resid, resid_rms=float(np.sqrt(np.mean(resid ** 2))),
-                                   jacobian_used="analytic", cov=S_ret))
+    extra = dict(resid=resid, resid_rms=float(np.sqrt(np.mean(resid ** 2))),
+                jacobian_used="analytic", cov=S_ret)
+    if avk is not None:
+        extra["avk"] = avk
+    return dict(row_lo=row_lo, row_hi=row_hi, hires=spec.snapshot(x, **extra))
 
 
-GD_GRATIO = 3.0  # matches retrieval_defaults.yml's own default; fixed here for a self-contained demo
+GD_GRATIO = 3.0  # matches retrieval_defaults.yml's own default; overridable via --g-ratio
+
+
+# Module-level slots for the big, expensive-to-build, fork-shareable objects
+# (absco/solar/band/etc.) -- set once in main() BEFORE the worker pool is
+# created, so `multiprocessing`'s fork start method gives every worker a
+# copy-on-write view of them for free, with no pickling of ABSCOTable/
+# SolarSpectrum objects across the task queue (only the small per-job
+# scalars/arrays below are ever pickled).
+_CTX: dict = {}
+
+
+def _oracle_g(eta, fpa):
+    """The `sub_bin_anomaly` oracle `g`: true fine-scale albedo texture
+    (docs/PROJECT_STATUS.md Sec.10). A module-level function (not a lambda)
+    so `functools.partial(_oracle_g, fpa=fpa)` is picklable across
+    `multiprocessing`'s task queue for `--linear-only`'s worker pool."""
+    return als.albedo_for_label(eta * als.SLIT_HALF_KM, GEOCARB_BANDS[fpa][0], include_fine=True)
+
+
+def _oracle_g_prior(eta, fpa):
+    """The `sub_bin_anomaly` "real, imperfect product" oracle `g`
+    (2026-08-28): `als.albedo_for_label_prior_fine`, an independent noise
+    realization with the true field's own statistics but not its phase --
+    what a real MODIS-like product would actually supply, as opposed to
+    `_oracle_g`'s exact-truth oracle."""
+    return als.albedo_for_label_prior_fine(eta * als.SLIT_HALF_KM, GEOCARB_BANDS[fpa][0])
+
+
+def _solve_worker(job: dict):
+    """Runs in a forked worker: pulls the big shared objects from `_CTX`
+    (already present via fork's copy-on-write, set up before the pool was
+    created) and the small per-job parameters from `job`."""
+    c = _CTX
+    return _solve_one(c["fpa"], c["row_lo"], c["row_hi"], c["band"], c["absco"],
+                      c["wide_inst"], c["geo"], c["solar"], c["albedo"],
+                      c["band"]["wn_hires"], c["band"]["ils"], c["anchor_density"],
+                      job["bin_centers"], job.get("surface_positions"),
+                      row_state_interp=job.get("row_state_interp"),
+                      row_sub_bin_anomaly=job.get("row_sub_bin_anomaly"),
+                      surface_fields=c.get("surface_fields"),
+                      return_avk=c.get("return_avk", False))
 
 
 def _native_error_summary(windows, name, truth_fn, boundary_km, tol_km=15.0):
@@ -231,6 +308,43 @@ def main() -> int:
                          "whole feature is about: too few bins to say anything meaningful either "
                          "way -- confirmed directly against als.SURFACE_PATCHES, not guessed.")
     ap.add_argument("--anchor-density", type=int, default=16)
+    ap.add_argument("--g-ratio", type=float, default=GD_GRATIO,
+                    help=f"G = max(2, round(width/g_ratio)) -- default {GD_GRATIO} matches "
+                         f"retrieval_defaults.yml's own default; a smaller g_ratio (e.g. 1) "
+                         f"gives a denser bin grid (more DOF, less leaning on interpolation).")
+    ap.add_argument("--linear-only", action="store_true",
+                    help="2026-08-28 extension: skip the flat/info-weighted/'nearest' schemes "
+                         "entirely and run ONLY two-or-three solves, all on the shared grid with "
+                         "state_interp='linear' throughout (no per-row kind override) -- "
+                         "with vs. without sub_bin_anomaly's additive high-resolution reference "
+                         "profile at anchor points. The solves are independent, so they run in "
+                         "parallel worker processes (--workers) via multiprocessing's fork start "
+                         "method, which shares the already-loaded absco/solar/band objects "
+                         "copy-on-write instead of re-loading or pickling them per worker.")
+    ap.add_argument("--workers", type=int, default=2,
+                    help="worker processes for --linear-only's independent solves (default 2; "
+                         "raised automatically to match the job count under "
+                         "--modulation-source=both -- more workers than jobs buys nothing "
+                         "since there's no further split within a single Gauss-Newton solve)")
+    ap.add_argument("--modulation-source", choices=["truth", "prior", "both"], default="truth",
+                    help="2026-08-28 extension, only with --linear-only: which g_fn oracle "
+                         "sub_bin_anomaly uses. 'truth' (default): als.albedo_for_label(..., "
+                         "include_fine=True), the EXACT true fine-scale texture. 'prior': "
+                         "als.albedo_for_label_prior_fine, an INDEPENDENT noise realization "
+                         "with the same statistics (ALBEDO_COV, ALBEDO_CORR_KM) -- what a real, "
+                         "imperfect external product (MODIS-like) would supply, genuinely "
+                         "informative but not the true phase. 'both' adds a third parallel job "
+                         "so all three (no anomaly, g=truth, g=prior) print in one table.")
+    ap.add_argument("--prior-fields", choices=["exact", "structural"], default="exact",
+                    help="2026-08-28 extension, only with --linear-only: which surface prior "
+                         "state_spec_from_scene starts albedo's bin_value_k from. 'exact' "
+                         "(default): als.SURFACE_FIELDS, a single point-sample of the TRUE "
+                         "fine-scale field at each bin's own center -- meaning even the no-"
+                         "anomaly baseline already has some real truth leaking in through the "
+                         "prior. 'structural': als.SURFACE_FIELDS_PRIOR (fine texture dropped, "
+                         "patch-archetype blend only) -- isolates sub_bin_anomaly's OWN "
+                         "contribution, since now the only place fine-scale information can "
+                         "enter the retrieval at all is through g_fn, not through the prior.")
     ap.add_argument("--shared-grid", action="store_true",
                     help="2026-08-25 extension: instead of comparing flat-vs-info-weighted on "
                          "albedo's OWN separate grid, solve ONCE more with co2_ppm/p_surface_hpa/"
@@ -239,6 +353,14 @@ def main() -> int:
                          "grid shape is still driven by the boundary proxy), with albedo alone "
                          "set to state_interp='nearest' (co2/p_surface stay 'linear'). Compared "
                          "against the flat-scheme baseline already reported without this flag.")
+    ap.add_argument("--anomaly", action="store_true",
+                    help="2026-08-28 extension (was --modulation, multiplicative scheme, "
+                         "preserved on branch sub-bin-modulation-multiplicative): implies "
+                         "--shared-grid, then solves once more with albedo's sub_bin_anomaly "
+                         "set to als.albedo_for_label(..., include_fine=True) as an oracle g -- "
+                         "the true fine-scale albedo texture, riding ADDITIVELY on top of the "
+                         "shared-grid bin values (kept 'linear', not 'nearest'). g_cov is left "
+                         "None (no real Var(g) for an oracle).")
     args = ap.parse_args()
 
     fpa = FPA
@@ -262,14 +384,63 @@ def main() -> int:
     cols = np.arange(1024.0)
     rows_win = np.arange(row_lo, row_hi + 1)
     eta_all = np.stack([_eta_of(fpa, cols, np.full(1024, float(r))) for r in rows_win])
-    G = max(2, round(len(rows_win) / GD_GRATIO))
+    G = max(2, round(len(rows_win) / args.g_ratio))
+    print(f"g_ratio={args.g_ratio} -> G={G} bins")
     bin_centers = pixel_density_bin_centers(eta_all.ravel(), G)
-
-    flat_pos, info_pos = _bin_placements(bin_centers, surface_density=3)
 
     x_km_center = 0.5 * (bin_centers.min() + bin_centers.max()) * als.SLIT_HALF_KM
     boundary_km = min((p[0] for p in als.SURFACE_PATCHES[1:]), key=lambda b: abs(b - x_km_center))
     print(f"window center ~{x_km_center:.1f}km, nearest patch boundary at {boundary_km:.1f}km")
+
+    truth_fn = lambda x_km: als.albedo_for_label(x_km, GEOCARB_BANDS[fpa][0])  # noqa: E731
+
+    if args.linear_only:
+        # Plain, uniform bin_centers -- the SAME points co2_ppm/p_surface_hpa
+        # use -- not an info-weighted redistribution (that's Sec.8's own,
+        # separately-answered question). state_spec_from_scene's surface
+        # rows default to these exact positions whenever surface_positions
+        # is left None (below), so albedo is never on a different grid from
+        # the other state variables here; sub_bin_anomaly is the only
+        # source of any resolution beyond this shared grid, applied purely
+        # at the anchor/forward-model level (2026-08-28, user).
+        shared_grid = bin_centers
+
+        surface_fields = als.SURFACE_PRIOR_FIELD_SETS[args.prior_fields]
+        print(f"prior-fields={args.prior_fields}")
+        _CTX.update(dict(fpa=fpa, row_lo=row_lo, row_hi=row_hi, band=band, absco=absco,
+                         wide_inst=wide_inst, geo=geo, solar=solar, albedo=albedo,
+                         anchor_density=args.anchor_density, surface_fields=surface_fields))
+        jobs = {"shared grid + linear (no anomaly)": dict(bin_centers=shared_grid)}
+        if args.modulation_source in ("truth", "both"):
+            jobs["shared grid + linear + anomaly(g=truth)"] = dict(
+                bin_centers=shared_grid,
+                row_sub_bin_anomaly={"albedo": {
+                    "g_fn": functools.partial(_oracle_g, fpa=fpa)}})
+        if args.modulation_source in ("prior", "both"):
+            jobs["shared grid + linear + anomaly(g=prior)"] = dict(
+                bin_centers=shared_grid,
+                row_sub_bin_anomaly={"albedo": {
+                    "g_fn": functools.partial(_oracle_g_prior, fpa=fpa)}})
+        names = list(jobs.keys())
+        n_workers = max(args.workers, len(jobs)) if args.modulation_source == "both" else args.workers
+        print(f"\nsolving {names} in parallel, {min(n_workers, len(jobs))} workers...",
+              flush=True)
+        t0 = time.time()
+        ctx = mp.get_context("fork")
+        with ctx.Pool(processes=min(n_workers, len(jobs))) as pool:
+            outs = pool.map(_solve_worker, [jobs[n] for n in names])
+        print(f"  all done in {time.time()-t0:.0f}s (parallel)")
+
+        results = [(name, _native_error_summary([w], "albedo", truth_fn, boundary_km))
+                  for name, w in zip(names, outs)]
+        print("\n=== native-resolution albedo error ===")
+        print(f"{'':40s} {'n_bins':>8s} {'overall':>10s} {'near (<=15km)':>15s} {'far (>15km)':>12s}")
+        for label, s in results:
+            print(f"{label:40s} {s['n']:8d} {s['mean_abs_err']:10.4f} "
+                 f"{s['near_mean_abs_err']:15.4f} {s['far_mean_abs_err']:12.4f}")
+        return 0
+
+    flat_pos, info_pos = _bin_placements(bin_centers, surface_density=3)
 
     plots_dir = REPO_ROOT / "plots" / "joint_block"
     _plot_bin_placement(fpa, row_lo, row_hi, flat_pos, info_pos,
@@ -287,13 +458,12 @@ def main() -> int:
                         band["wn_hires"], band["ils"], args.anchor_density, bin_centers, info_pos)
     print(f"  done in {time.time()-t0:.0f}s")
 
-    truth_fn = lambda x_km: als.albedo_for_label(x_km, GEOCARB_BANDS[fpa][0])  # noqa: E731
     s_flat = _native_error_summary([w_flat], "albedo", truth_fn, boundary_km)
     s_info = _native_error_summary([w_info], "albedo", truth_fn, boundary_km)
 
     results = [("flat (separate grid)", s_flat), ("info-weighted (separate grid)", s_info)]
 
-    if args.shared_grid:
+    if args.shared_grid or args.anomaly:
         print("\nsolving (shared grid, albedo=nearest)...", flush=True)
         G_shared = len(flat_pos)
         # co2_ppm contributes no real information-density proxy of its own here
@@ -312,6 +482,19 @@ def main() -> int:
         print(f"  done in {time.time()-t0:.0f}s")
         s_shared = _native_error_summary([w_shared], "albedo", truth_fn, boundary_km)
         results.append(("shared grid + nearest", s_shared))
+
+    if args.anomaly:
+        print("\nsolving (shared grid, albedo=linear + sub-bin anomaly oracle)...", flush=True)
+        g_fn = lambda eta: als.albedo_for_label(eta * als.SLIT_HALF_KM, GEOCARB_BANDS[fpa][0],  # noqa: E731
+                                                include_fine=True)
+        t0 = time.time()
+        w_mod = _solve_one(fpa, row_lo, row_hi, band, absco, wide_inst, geo, solar, albedo,
+                           band["wn_hires"], band["ils"], args.anchor_density,
+                           shared_grid, None,
+                           row_sub_bin_anomaly={"albedo": {"g_fn": g_fn}})
+        print(f"  done in {time.time()-t0:.0f}s")
+        s_mod = _native_error_summary([w_mod], "albedo", truth_fn, boundary_km)
+        results.append(("shared grid + linear + anomaly(g=truth)", s_mod))
 
     print("\n=== native-resolution albedo error ===")
     print(f"{'':30s} {'n_bins':>8s} {'overall':>10s} {'near (<=15km)':>15s} {'far (>15km)':>12s}")

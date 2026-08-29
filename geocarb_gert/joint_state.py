@@ -45,6 +45,7 @@ Design notes
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 import numpy as np
 from scipy.interpolate import interp1d
@@ -131,6 +132,35 @@ def _row_interp1d(positions, values, kind: str, axis: int = -1):
 
 
 @dataclass
+class SubBinAnomaly:
+    """A row's OPT-IN higher-resolution reference profile `g`, riding
+    additively on top of the plain piecewise-linear bin interpolant
+    (2026-08-28; see `StateSpec.interp_to`'s own docstring for the exact
+    formula and why it is additive, not multiplicative).
+
+    `g_at_centers` (`g_fn` evaluated once at this row's own bin `positions`,
+    precomputed at construction, not per call) is what makes the anomaly
+    correction vanish exactly wherever `g` is itself piecewise-linear on
+    this same grid -- the property this whole mechanism exists for.
+
+    `g_positions`/`g_cov` are optional and only needed to propagate `g`'s
+    OWN uncertainty into the retrieved posterior (`gauss_newton_state`'s
+    `g_cov` parameter) -- `g_cov=None` (default) means "no uncertainty
+    machinery for this row at all", a strict no-op. `Wg_at_centers` (this
+    row's bin centers expressed as `g_positions`' own `interp_weights`
+    matrix) is precomputed alongside `g_positions` since it's needed by
+    `jacobians._g_anomaly_sensitivity` and never depends on the retrieved
+    state.
+    """
+
+    g_fn: Callable
+    g_at_centers: np.ndarray
+    g_positions: np.ndarray | None = None
+    g_cov: np.ndarray | None = None
+    Wg_at_centers: np.ndarray | None = None
+
+
+@dataclass
 class ParamSpec:
     """One state-vector element: where it lives, its prior, and whether it
     is currently being retrieved."""
@@ -154,6 +184,10 @@ class ParamSpec:
                                      # bin positions but stays "linear" (a smooth feature,
                                      # e.g. a CO2 hot spot) -- see StateSpec.interp_to/
                                      # interp_weights for the resolution rule.
+    sub_bin_anomaly: SubBinAnomaly | None = None  # this row's opt-in additive
+                                     # high-resolution reference profile (2026-08-28);
+                                     # None (every row, until one opts in) is a
+                                     # byte-identical no-op. See SubBinAnomaly.
 
     def __post_init__(self):
         self.positions = np.atleast_1d(np.asarray(self.positions, dtype=float))
@@ -353,6 +387,17 @@ class StateSpec:
         `positions` are not along-slit coordinates, so interpolating them
         against `etas` would be meaningless arithmetic on mismatched axes
         rather than a harmless no-op. Use :meth:`values_for` to read them.
+
+        A row with `ParamSpec.sub_bin_anomaly` set (2026-08-28) additionally
+        picks up `g`'s own deviation from ITS OWN plain interpolant on this
+        row's positions: ``value(eta) = plain_interp(eta) + (g(eta) -
+        plain_interp_of_g(eta))``. This vanishes identically (not just at
+        the bin centers) whenever `g` is itself piecewise-linear on this
+        row's grid -- the exact-reduction property the mechanism is built
+        around -- and always leaves `value(bin_center_k) == bin_value_k`
+        exactly, for any `g`, since both interpolants agree exactly at
+        their own nodes. `None` (every row, until one opts in) is a
+        byte-identical no-op.
         """
         etas = np.asarray(etas, dtype=float)
         vals = self.unpack(x)
@@ -362,8 +407,15 @@ class StateSpec:
                 continue
             v = vals[p.name]
             kind = p.state_interp if p.state_interp is not None else state_interp
-            out[p.name] = (np.full(etas.shape, v[0]) if p.n == 1
-                           else _row_interp1d(p.positions, v, kind)(etas))
+            plain = (np.full(etas.shape, v[0]) if p.n == 1
+                     else _row_interp1d(p.positions, v, kind)(etas))
+            sba = p.sub_bin_anomaly
+            if sba is not None:
+                g_at_etas = np.asarray(sba.g_fn(etas), dtype=float)
+                g_plain = (np.full(etas.shape, sba.g_at_centers[0]) if p.n == 1
+                          else _row_interp1d(p.positions, sba.g_at_centers, kind)(etas))
+                plain = plain + (g_at_etas - g_plain)
+            out[p.name] = plain
         return out
 
     def values_for(self, x, *targets) -> dict:
@@ -397,6 +449,14 @@ class StateSpec:
         `ParamSpec.state_interp` when set -- same resolution rule as
         `interp_to`, so the two can never disagree about which kind is
         actually in effect for a given row.
+
+        Deliberately UNAFFECTED by `ParamSpec.sub_bin_anomaly` (2026-08-28):
+        that mechanism adds `g(eta) - plain_interp_of_g(eta)`, a term that
+        depends only on `g` and this row's own fixed positions, never on
+        the retrieved bin values themselves -- so `d(value)/d(bin_value_k)`
+        is exactly this same `W` whether or not a row has an anomaly set.
+        `jacobians.linearize`'s state Jacobian `K` needs no change either,
+        for the same reason.
         """
         p = self[name]
         etas = np.asarray(etas, dtype=float)
@@ -566,7 +626,8 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                           surface_density: int = 3, uniform: bool = False,
                           prior_anchor_density: float | None = None,
                           surface_fields=None,
-                          row_state_interp: dict | None = None) -> StateSpec:
+                          row_state_interp: dict | None = None,
+                          row_sub_bin_anomaly: dict | None = None) -> StateSpec:
     """Build a :class:`StateSpec` whose priors are the truth scene's own
     values at `bin_centers` -- the joint block's existing "local-truth
     nuisance idealization", but now with every quantity present as a real,
@@ -615,6 +676,17 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
     grid another row (still `None`, falling back to whatever `state_interp`
     the solve itself is called with) interpolates linearly. See `StateSpec.
     interp_to`/`interp_weights`'s own docstrings for the resolution rule.
+
+    `row_sub_bin_anomaly` (default None, 2026-08-28) sets `ParamSpec.
+    sub_bin_anomaly` on matching rows at construction time -- a per-row
+    dict `{"g_fn": callable, "g_positions": array (optional), "g_cov":
+    array (optional)}`. `g_fn(eta_array) -> values` is a higher-resolution
+    reference profile that rides ADDITIVELY on top of this row's own plain
+    interpolant (see `StateSpec.interp_to`'s docstring for the exact
+    formula); `g_positions`/`g_cov` are only needed to propagate `g`'s own
+    uncertainty into the posterior via `gauss_newton_state`'s `g_cov`
+    parameter, and are `None` by default (no uncertainty machinery at
+    all, not "zero uncertainty").
 
     `uniform=True` evaluates every field at a single fixed position
     (`x_km=0.0`, matching `along_slit_scene.atmosphere_at(0.0)`'s own
@@ -689,13 +761,34 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                          else np.linspace(positions.min(), positions.max(), n_anchor))
             anchor_vals = _eval(anchor_pos * als.SLIT_HALF_KM)
             prior = np.interp(positions, anchor_pos, anchor_vals)
+
+        row_kind = (row_state_interp or {}).get(name)
+        anomaly_opts = (row_sub_bin_anomaly or {}).get(name)
+        anomaly = None
+        if anomaly_opts is not None:
+            opts = dict(anomaly_opts)
+            g_cov = opts.pop("g_cov", None)
+            g_fn = opts["g_fn"]
+            g_positions = opts.get("g_positions")
+            g_at_centers = np.asarray(g_fn(positions), dtype=float)
+            Wg_at_centers = None
+            if g_positions is not None:
+                g_positions = np.asarray(g_positions, dtype=float)
+                g_throwaway = ParamSpec(name="_gpos", positions=g_positions,
+                                        prior=g_positions, sigma=1.0, free=True, kind="scale")
+                Wg_at_centers = StateSpec([g_throwaway]).interp_weights(
+                    positions, "_gpos", row_kind or "linear")
+            anomaly = SubBinAnomaly(g_fn=g_fn, g_at_centers=g_at_centers,
+                                    g_positions=g_positions, g_cov=g_cov,
+                                    Wg_at_centers=Wg_at_centers)
+
         return ParamSpec(name=name, positions=positions,
                          prior=np.asarray(prior, dtype=float),
                          sigma=float(sigmas.get(name, 0.10)),
                          corr_length=float(_corr_for(name, corr_length)),
                          free=(name in free), kind=kinds.get(name, "scale"),
                          prior_form=prior_form, gamma=float(gamma), target=target,
-                         state_interp=(row_state_interp or {}).get(name))
+                         state_interp=row_kind, sub_bin_anomaly=anomaly)
 
     rows = [_row(name, fn, bin_centers, "atmosphere") for name, fn in fields.items()]
     if band_label is not None:
@@ -713,7 +806,8 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
 def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
                        step: float = 1e-3, max_iter: int = 15, tol: float = 1e-5,
                        label: str = "", verbose: bool = True, jacobian_fn=None,
-                       return_cov: bool = False, return_avk: bool = False):
+                       return_cov: bool = False, return_avk: bool = False,
+                       g_cov: dict | None = None):
     """Regularized Gauss-Newton over whatever :class:`StateSpec` says is free.
 
     The generic counterpart of `gd_joint_block_retrieve.gauss_newton_
@@ -780,9 +874,35 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     computes itself, since a caller may want it per-row, for a row subset,
     or as the one whole-solve scalar.
 
-    Return shape depends on which of `return_cov`/`return_avk` are set:
-    ``x`` (neither), ``(x, S_ret)`` (cov only, unchanged from before this
-    parameter existed), ``(x, AVK)`` (avk only), ``(x, S_ret, AVK)`` (both).
+    ``g_cov`` (paired with `jacobian_fn` -- only meaningful in analytic
+    mode, since it consumes the `K_g` dict `jac.linearize` now returns as
+    a third tuple element) propagates a `sub_bin_anomaly` reference
+    function's OWN uncertainty into the retrieved posterior, Rodgers-style:
+    ``S_g_total = sum over rows( Gain @ K_g[name] @ g_cov[name] @
+    K_g[name].T @ Gain.T )``, ``Gain = S_ret @ KtSyinv`` (the same `Gain`
+    `AVK` is already built from, reused rather than rebuilt). This is a
+    SEPARATE output, never folded into `S_ret` -- `S_ret` stays exactly the
+    noise-driven posterior covariance it always was, so a caller can see
+    the two contributions apart. Default `None`: every row's `K_g` is
+    empty (`jac.linearize` returns an empty dict for any row that never
+    declared `sub_bin_anomaly.g_cov`), and passing `g_cov=None` (or an
+    empty dict) skips the whole computation outright -- no extra matmuls,
+    no shape/None-handling risk to `S_ret`/`AVK`, for every caller that
+    never uses this feature. `g_cov[name]` must line up with `K_g[name]`'s
+    own columns (`g_positions` for that row); the two are only checked
+    for shape agreement, not for what `g_positions` values they came from.
+
+    Return shape depends on which of `return_cov`/`return_avk`/`g_cov` are
+    set: ``x`` (neither cov flag), ``(x, S_ret)`` (cov only, unchanged from
+    before this parameter existed), ``(x, AVK)`` (avk only), ``(x, S_ret,
+    AVK)`` (both) -- and, whenever `g_cov` is given and nonempty, `S_g_
+    total` is appended as the LAST element of whichever of those tuples
+    would otherwise be returned (e.g. ``(x, S_ret, S_g_total)`` with only
+    `return_cov`, ``(x, AVK, S_g_total)`` with only `return_avk`, ``(x,
+    S_ret, AVK, S_g_total)`` with both). `g_cov` with neither `return_cov`
+    nor `return_avk` still returns bare ``x`` -- `S_g_total` needs `S_ret`
+    (via `Gain`), so requesting it without `return_cov`/`return_avk` is a
+    no-op, not an implicit `return_cov=True`.
     """
     if jacobian_fn is None:
         for p in spec.free_params:
@@ -800,9 +920,10 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     Sa_inv = spec.Sa_inv()
     Sy_inv_diag = np.asarray(Sy_inv_diag, dtype=float)
 
+    K_g_dict: dict = {}
     for it in range(max_iter):
         if jacobian_fn is not None:
-            y0, K = jacobian_fn(x)
+            y0, K, K_g_dict = jacobian_fn(x)
             resid = y_true - y0
         else:
             y0 = forward(x)
@@ -826,12 +947,30 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     if not (return_cov or return_avk):
         return x
     S_ret = np.linalg.inv(A)
+
+    def _s_g_total():
+        # Strict no-op: skipped outright (not computed-and-zeroed) unless
+        # g_cov is given and nonempty, per the plan's own no-op guarantee.
+        if not g_cov:
+            return None
+        Gain = S_ret @ KtSyinv
+        total = np.zeros((n, n))
+        for name, cov in g_cov.items():
+            Kg = K_g_dict.get(name)
+            if Kg is None or Kg.size == 0:
+                continue
+            GKg = Gain @ Kg
+            total = total + GKg @ cov @ GKg.T
+        return total
+
     if not return_avk:
-        return x, S_ret
+        s_g_total = _s_g_total()
+        return (x, S_ret) if s_g_total is None else (x, S_ret, s_g_total)
     avk = (S_ret @ KtSyinv) @ K
+    s_g_total = _s_g_total()
     if return_cov:
-        return x, S_ret, avk
-    return x, avk
+        return (x, S_ret, avk) if s_g_total is None else (x, S_ret, avk, s_g_total)
+    return (x, avk) if s_g_total is None else (x, avk, s_g_total)
 
 
 def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,

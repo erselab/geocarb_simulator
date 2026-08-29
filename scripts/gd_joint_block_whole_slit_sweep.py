@@ -37,6 +37,7 @@ Output: results/gd_joint_block_whole_slit_fpa2.pkl
 from __future__ import annotations
 
 import argparse
+import functools
 import multiprocessing as mp
 import pickle
 import sys
@@ -195,6 +196,31 @@ def _make_state_spectrum(absco, wide_inst, geo, solar, albedo):
     return spectrum
 
 
+def _oracle_g_truth(eta, fpa):
+    """`sub_bin_anomaly`'s exact-truth oracle `g` (2026-08-28,
+    docs/PROJECT_STATUS.md Sec.10): the true fine-scale albedo texture.
+    Module-level (not a lambda) so `functools.partial(_oracle_g_truth,
+    fpa=fpa)` is picklable across `multiprocessing`'s task queue -- same
+    reasoning as `gd_information_density_bins_demo.py`'s own `_oracle_g`,
+    duplicated here rather than cross-imported since this is the
+    production sweep, not the demo."""
+    return als.albedo_for_label(eta * als.SLIT_HALF_KM, GEOCARB_BANDS[fpa][0], include_fine=True)
+
+
+def _oracle_g_prior(eta, fpa):
+    """`sub_bin_anomaly`'s "real, imperfect product" oracle `g`: an
+    independent noise realization with the true field's own statistics
+    but not its phase -- `als.albedo_for_label_prior_fine`."""
+    return als.albedo_for_label_prior_fine(eta * als.SLIT_HALF_KM, GEOCARB_BANDS[fpa][0])
+
+
+#: `--sub-bin-anomaly` choice -> the oracle function it wires into
+#: `row_sub_bin_anomaly={"albedo": {"g_fn": ...}}`. "none" (default) means
+#: no `sub_bin_anomaly` at all -- a byte-identical no-op, not an entry
+#: pointing at a trivial g.
+SUB_BIN_ANOMALY_ORACLES = {"truth": _oracle_g_truth, "prior": _oracle_g_prior}
+
+
 def _solve_window(row_lo: int, row_hi: int):
     # Shadows the module-level `FPA` import for the rest of this function:
     # every bare `FPA` reference below (_eta_of, jac.linearize) now resolves
@@ -221,6 +247,7 @@ def _solve_window(row_lo: int, row_hi: int):
     prior_fields = _SWEEP.get("prior_fields")            # an als.PRIOR_FIELD_SETS[...] dict, always explicit (never None)
     surface_fields = _SWEEP.get("surface_fields")        # an als.SURFACE_PRIOR_FIELD_SETS[...] dict, always explicit (never None)
     prior_anchor_density = _SWEEP.get("prior_anchor_density")  # None -> exact-per-bin (today's default)
+    row_sub_bin_anomaly = _SWEEP.get("row_sub_bin_anomaly")  # None -> no sub_bin_anomaly at all (default)
 
     rows_win = np.arange(row_lo, row_hi + 1)
     width = len(rows_win)
@@ -306,7 +333,8 @@ def _solve_window(row_lo: int, row_hi: int):
                                        prior_form=prior_form, uniform=uniform_priors,
                                        fields=prior_fields, band_label=band_label,
                                        surface_fields=surface_fields,
-                                       prior_anchor_density=prior_anchor_density)
+                                       prior_anchor_density=prior_anchor_density,
+                                       row_sub_bin_anomaly=row_sub_bin_anomaly)
         # coarse: scene positions ARE the state positions, so interpolation is
         # the identity regardless of kind -- state_interp is genuinely a no-op here.
         fwd_c = build_forward_state(FPA, rows_win, bin_centers, spec_c, spectrum,
@@ -347,7 +375,8 @@ def _solve_window(row_lo: int, row_hi: int):
                                    prior_form=prior_form, uniform=uniform_priors,
                                    fields=prior_fields, band_label=band_label,
                                    surface_fields=surface_fields,
-                                   prior_anchor_density=prior_anchor_density)
+                                   prior_anchor_density=prior_anchor_density,
+                                   row_sub_bin_anomaly=row_sub_bin_anomaly)
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
                                 wn_hires, ils, pad=PAD, state_interp=state_interp)
     x_h, S_ret_h, avk_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
@@ -590,6 +619,19 @@ def main() -> int:
                          "away sub-anchor-spacing structure even if the underlying field is "
                          "exact truth. >1.0 oversamples. See "
                          "geocarb_gert.joint_state.state_spec_from_scene's own docstring.")
+    ap.add_argument("--sub-bin-anomaly", type=str, default="none",
+                    choices=["none", "truth", "prior"],
+                    help="2026-08-28 (docs/PROJECT_STATUS.md Sec.10): set albedo's "
+                         "ParamSpec.sub_bin_anomaly to an oracle g, riding ADDITIVELY on top "
+                         "of albedo's own retrieved bin values (reduces exactly to plain "
+                         "linear interpolation wherever g is itself linear between bin "
+                         "centers). 'none' (default): no sub_bin_anomaly at all, a byte-"
+                         "identical no-op. 'truth': als.albedo_for_label(..., include_fine="
+                         "True), the EXACT true fine-scale texture. 'prior': als.albedo_for_"
+                         "label_prior_fine, an INDEPENDENT noise realization with the same "
+                         "statistics (ALBEDO_COV, ALBEDO_CORR_KM) but not the true phase -- "
+                         "what a real, imperfect external product (MODIS-like) would supply. "
+                         "Requires 'albedo' in --free (same reasoning as --vary-albedo).")
     args = ap.parse_args()
     if (args.task_id is None) != (args.n_tasks is None):
         ap.error("--task-id and --n-tasks must be given together")
@@ -612,6 +654,9 @@ def main() -> int:
                  "albedo row against a truth scene rendered with a single CONSTANT albedo, "
                  "exactly the 2026-08-18 CAVEAT documented in along_slit_scene.py's "
                  "SURFACE_FIELDS. Add --vary-albedo.")
+    if args.sub_bin_anomaly != "none" and "albedo" not in free_check:
+        ap.error("--sub-bin-anomaly only has an effect on a free 'albedo' row -- add "
+                 "'albedo' to --free, or drop --sub-bin-anomaly.")
     fpa_list = tuple(int(x.strip()) for x in args.fpa.split(","))
     if len(fpa_list) != 1:
         ap.error(f"--fpa currently supports exactly one band (got {args.fpa!r}); multi-band "
@@ -664,6 +709,11 @@ def main() -> int:
     else:
         tiles = all_tiles
 
+    row_sub_bin_anomaly = None
+    if args.sub_bin_anomaly != "none":
+        oracle = SUB_BIN_ANOMALY_ORACLES[args.sub_bin_anomaly]
+        row_sub_bin_anomaly = {"albedo": {"g_fn": functools.partial(oracle, fpa=fpa)}}
+
     _SWEEP.update(dict(band=band, absco=absco, wide_inst=wide_inst, geo=geo, solar=solar,
                        albedo=albedo, wn_hires=band["wn_hires"], ils=band["ils"], fpa=fpa,
                        gamma=args.gamma, sigma_abs=args.sigma_abs, g_ratio=args.g_ratio,
@@ -677,7 +727,8 @@ def main() -> int:
                        surface_fields=als.SURFACE_PRIOR_FIELD_SETS.get(
                            args.prior_fields, als.SURFACE_FIELDS),
                        prior_anchor_density=args.prior_anchor_density,
-                       flat_sy_inv=args.flat_sy_inv, vary_albedo=args.vary_albedo))
+                       flat_sy_inv=args.flat_sy_inv, vary_albedo=args.vary_albedo,
+                       row_sub_bin_anomaly=row_sub_bin_anomaly))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
     print(f"solving with {n_workers} workers...", flush=True)
@@ -729,6 +780,8 @@ def main() -> int:
         suffix += f"_ovlp{args.overlap}"
     if args.vary_albedo:
         suffix += "_valb"
+    if args.sub_bin_anomaly != "none":
+        suffix += f"_anomaly-{args.sub_bin_anomaly}"
     payload = {"results": results, "tiles": all_tiles, "fpa": fpa, "uniform": args.uniform,
               "barcode": args.barcode, "realistic_barcode": args.realistic_barcode,
               "barcode_bars": args.barcode_bars if (args.barcode or args.realistic_barcode) else None,
@@ -747,7 +800,7 @@ def main() -> int:
               "n_lookup_samples": n_lookup_samples,
               "prior_anchor_density": args.prior_anchor_density,
               "flat_sy_inv": args.flat_sy_inv, "overlap": args.overlap,
-              "vary_albedo": args.vary_albedo}
+              "vary_albedo": args.vary_albedo, "sub_bin_anomaly": args.sub_bin_anomaly}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
         out_dir = REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{fpa}{suffix}_parts"

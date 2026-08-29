@@ -108,7 +108,7 @@ import numpy as np
 
 from . import gd_render
 from .focalplane import nearest_bin_scene
-from .joint_state import StateSpec
+from .joint_state import ParamSpec, StateSpec
 
 #: State row -> the `gert` molecule whose optical depth it scales. A row
 #: whose molecule is absent from the band gets an exact zero column (that
@@ -344,9 +344,37 @@ def anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
     return S, dS
 
 
+def _g_anomaly_sensitivity(p: ParamSpec, scene_etas, W, state_interp):
+    """``d(value)/d(g_value_m)`` for a row's `sub_bin_anomaly`, at every
+    `scene_etas` position -- a plain LINEAR formula (no quotient rule,
+    unlike the retired multiplicative scheme's `K_g`), since the additive
+    correction ``g(eta) - plain_interp_of_g(eta)`` never divides by
+    anything:
+
+        d(value)/d(g_value_m) = Wg[eta,m] - sum_k(W[eta,k]*Wg[bin_center_k,m])
+
+    `W` is the SAME `interp_weights` matrix `linearize`'s own loop already
+    computed for this row's state Jacobian `K` -- passed in rather than
+    recomputed. `Wg` is `g`'s own `interp_weights`-style matrix (a
+    throwaway single-row `StateSpec` on `sub_bin_anomaly.g_positions`, the
+    same reusable-throwaway-spec trick used elsewhere in this codebase);
+    `Wg[bin_center_k,:]` (`sub_bin_anomaly.Wg_at_centers`) was precomputed
+    once at `state_spec_from_scene` construction time, since it depends
+    only on positions, never on the retrieved state.
+    """
+    sba = p.sub_bin_anomaly
+    kind = p.state_interp if p.state_interp is not None else state_interp
+    g_throwaway = ParamSpec(name="_gpos", positions=sba.g_positions,
+                            prior=sba.g_positions, sigma=1.0, free=True, kind="scale")
+    Wg_scene = StateSpec([g_throwaway]).interp_weights(scene_etas, "_gpos", kind)
+    return Wg_scene - W @ sba.Wg_at_centers
+
+
 def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
               wn_hires, ils, x, pad: int = 4, state_interp: str = "linear"):
-    """``(y, K)`` -- the predicted sub-image and its analytic Jacobian.
+    """``(y, K, K_g)`` -- the predicted sub-image, its analytic Jacobian,
+    and (only for rows with `sub_bin_anomaly.g_cov` set) the sensitivity
+    of each anchor value to that row's `g` values.
 
     `K` has one column per free element, ordered exactly as
     :meth:`StateSpec.slices` packs them, so it drops straight into the
@@ -402,6 +430,8 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
     y = L(S)
     K = np.empty((y.size, spec.n_free))
     slices = spec.slices()
+    K_g = {}   # row name -> (y.size, n_g_positions); empty unless a row declares
+              # sub_bin_anomaly.g_cov (2026-08-28)
     for p in free:
         W = spec.interp_weights(scene_etas, p.name, state_interp=state_interp)  # (n_scene, p.n)
         dS_row = np.asarray([d[p.name] for d in dS])     # (n_scene, n_hires)
@@ -409,4 +439,8 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
         for k in range(p.n):
             # d(param at anchor g)/dx_k = W[g,k] * prior[k]   (kind="scale")
             K[:, sl.start + k] = L(dS_row * (W[:, k] * p.prior[k])[:, None])
-    return y, K
+        if p.sub_bin_anomaly is not None and p.sub_bin_anomaly.g_cov is not None:
+            dval_dg = _g_anomaly_sensitivity(p, scene_etas, W, state_interp)
+            K_g[p.name] = np.stack([L(dS_row * dval_dg[:, m][:, None])
+                                    for m in range(dval_dg.shape[1])], axis=1)
+    return y, K, K_g
