@@ -298,7 +298,25 @@ def _solve_window(row_lo: int, row_hi: int):
               prior_co2_ppm_bins=prior_co2_ppm_bins)
 
     free = tuple(_SWEEP.get("free", ("co2_ppm",)))
-    band_label = GEOCARB_BANDS[FPA][0] if "albedo" in free else None
+    # `vary_albedo`, not just `"albedo" in free`, decides whether a surface
+    # row exists at all (2026-08-29 fix): before this, freezing albedo
+    # (leaving it out of --free) while --vary-albedo rendered a spatially-
+    # varying TRUTH always meant band_label stayed None -- no surface row
+    # got added to the StateSpec at all, so build_forward_state fell back
+    # to _SWEEP["albedo"]'s single fixed scalar for EVERY anchor, silently
+    # mismatching a truth scene that genuinely varies along the slit. That
+    # was never exercised before -- every prior sweep either froze albedo
+    # AND rendered it constant (`--free` without `--vary-albedo`) or freed
+    # albedo AND varied it (`--free ...,albedo --vary-albedo`, enforced by
+    # main()'s own validation) -- the "freeze albedo at the real per-
+    # position truth" case this fix enables was simply unreachable. Now:
+    # whenever `--vary-albedo` renders a real truth field, a surface row is
+    # always added (frozen unless "albedo" is also in --free), so a frozen
+    # row's own prior IS the true per-bin-center value (surface_fields
+    # defaults to als.SURFACE_FIELDS, exact truth) -- "albedo held fixed at
+    # truth" becomes an actual, correctly-wired configuration.
+    vary_albedo = _SWEEP.get("vary_albedo", False)
+    band_label = GEOCARB_BANDS[FPA][0] if ("albedo" in free or vary_albedo) else None
     corr_length = _SWEEP.get("corr_length")          # None -> per-row physical defaults
     prior_form = _SWEEP.get("prior_form", "exponential")
     spectrum = _make_state_spectrum(absco, wide_inst, geo, solar, albedo)

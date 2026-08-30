@@ -1310,3 +1310,98 @@ through the joint fit into a row `sub_bin_anomaly` was never applied to.
 So the mechanism's real value here is larger than the albedo-only numbers
 in 10.3 suggest -- it substantially cleans up known CO2-albedo cross-talk
 as a side effect, not just albedo's own accuracy.
+
+## 11. Consistency check: albedo frozen at truth, only co2/p_surface free (2026-08-29)
+
+User request: run a whole-slit sweep with albedo FROZEN at the true
+per-position values (not part of the free/retrieved state), only
+`co2_ppm`/`p_surface_hpa` free, as a regression check that the sub_bin_
+anomaly-era codebase still reproduces sensible, historically-consistent
+behavior for this simpler configuration.
+
+### 11.1 A real gap this surfaced, fixed
+
+`gd_joint_block_whole_slit_sweep.py::_solve_window` gated `band_label`
+(whether a surface `albedo` row is added to the `StateSpec` AT ALL) on
+`"albedo" in free` alone: `band_label = GEOCARB_BANDS[FPA][0] if "albedo"
+in free else None`. Every prior sweep either froze albedo AND rendered it
+constant (no `--vary-albedo`, matched truth/retrieval by construction) or
+freed albedo AND varied it (`--vary-albedo` + `"albedo" in --free`,
+enforced by `main()`'s own validation) -- the combination this check
+needs, "vary the TRUTH but freeze the RETRIEVAL's albedo row at that real
+per-position truth," was never reachable: `--vary-albedo` without freeing
+albedo silently fell back to `build_forward_state`'s single fixed scalar
+`_SWEEP["albedo"]` for every anchor, mismatching a truth scene that
+genuinely varies along the slit -- structurally the same class of bug as
+the original 2026-08-18 CAVEAT (Sec.7.2), just the mirror-image case,
+never exercised until now. Fixed: `band_label` is now set whenever
+`--vary-albedo` is on, regardless of `--free` -- a frozen row's own prior
+(default `surface_fields=als.SURFACE_FIELDS`, exact truth) is then
+genuinely the true per-bin-center value. Verified directly on a smoke-test
+window: `albedo free: False`, `max|albedo value - truth| == 0.0`.
+
+### 11.2 Control check: the pipeline itself is sound
+
+Before trusting any number from the fix above, ran the ORIGINAL "co2p"
+configuration this whole heterogeneous-surface feature was built on top
+of -- no `--vary-albedo` at all (constant truth albedo, no state row,
+matching every pre-2026-08-17 result) -- on a 6-window subset (`g_ratio=3,
+anchor_density=16`): `resid_hires_rms` ~0.0 on every window, CO2
+`mean|err|` = **0.0055 ppm (0.0013% relative)**, matching Sec.6's
+historical closed-regression baseline (~0.005-0.007 ppm) almost exactly.
+Confirms the core Jacobian/frozen-row machinery is unaffected by every
+change this session made -- the numbers below are real, not a regression.
+
+### 11.3 Whole-slit result: frozen-at-truth is NOT an accuracy ceiling
+
+Full 58-window sweep, `g_ratio=3`, `--vary-albedo`, `--prior-fields exact`
+(default -- co2/p_surface priors ALSO exact truth here, more informative
+than every `sub_bin_anomaly_v1` config in Sec.10, which used `structural`),
+albedo frozen at truth, `anchor_density in {1,4,16}`:
+
+| row | anchor_density | overall | near (<=15km) | far | rel. err |
+|---|---|---|---|---|---|
+| co2_ppm | 1  | 51.85 ppm | 72.38 | 49.00 | 12.48% |
+| co2_ppm | 4  | 53.74 ppm | 82.70 | 49.71 | 12.93% |
+| co2_ppm | 16 | 54.00 ppm | 84.56 | 49.76 | 12.99% |
+| p_surface_hpa | 1  | 43.48 hPa | 49.13 | 42.69 | 4.49% |
+| p_surface_hpa | 4  | 44.67 hPa | 57.04 | 42.95 | 4.61% |
+| p_surface_hpa | 16 | 44.35 hPa | 54.31 | 42.96 | 4.58% |
+| albedo | 1, 4, 16 | 0.0 (exact, by construction) | 0.0 | 0.0 | 0.0% |
+
+Despite exact priors AND albedo pinned to the exact truth value at every
+bin center, CO2 error here (~52-54 ppm, ~13%) is **~3x WORSE** than
+`sub_bin_anomaly_v1`'s `none` baseline in Sec.10.3/10.4 (~18 ppm, ~4.4%)
+-- which had IMPERFECT (`structural`) priors AND a free (not frozen)
+albedo row starting from that same imperfect prior. Root cause, not a
+bug (11.2 rules that out): **"frozen at truth values" only pins albedo at
+the true value at each coarse bin center -- it does not give the forward
+model the true CONTINUOUS field.** Between bin centers a frozen row is
+still just the plain piecewise-linear interpolant (no `sub_bin_anomaly`
+was set here), which at `g_ratio=3` cannot represent the sharp patch
+boundaries OR the pervasive 500m fine texture (`ALBEDO_COV=10%` exists
+everywhere, not just at boundaries -- consistent with far-field CO2 error
+here being nearly as large as near-boundary, unlike Sec.7.7/7.8's own
+boundary-concentrated leakage). A FROZEN row has no way to compensate --
+it is locked to the point-truth value whether or not that is what best
+explains the actual radiance. A FREE row, even starting from an imperfect
+prior, can adjust `bin_value_k` to whatever locally minimizes the real
+data residual, which (Sec.10's own footprint-mean-vs-point-value finding)
+is generally NOT the point-truth value once real sub-bin structure exists
+-- and that compensating freedom matters more here than starting from the
+exactly-correct value does.
+
+Practical implication: at production `g_ratio=3`, "if only we knew albedo
+exactly" is not the right mental model for an accuracy ceiling -- a
+coarse, non-adjustable representation of real sub-bin structure can hurt
+the jointly-fit rows MORE than an adjustable, imperfectly-informed one.
+This is also a natural next check, not yet run: freeze albedo at truth
+AND give it `sub_bin_anomaly(g=truth)` too, to see whether that closes
+most of this gap by letting even a frozen row represent the true
+continuous field between bin centers.
+
+Also note `anchor_density` barely moves these numbers (unlike Sec.10.3's
+free-albedo runs, where `g=truth` improved sharply with anchor density) --
+consistent with the error being dominated by the STATE's own coarse bin
+grid (unaffected by anchor sampling) rather than by how finely the
+forward model samples between anchors.
