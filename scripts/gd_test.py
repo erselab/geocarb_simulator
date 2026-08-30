@@ -140,7 +140,7 @@ _G = {}
 def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_samples: int,
                 n_workers, uniform: bool, barcode: bool, barcode_bars: int,
                 noise: bool, noise_seed: int, realistic_barcode: bool = False,
-                vary_albedo: bool = False):
+                vary_albedo: bool = False, fields=None, surface_fields=None):
     """Render one band's raw detector image plus everything needed for all
     three pipelines: `A` (native/rectified source), `wn_hires`/`radiance`
     (undistorted source, and the barcode/lookup truth), the nominal per-band
@@ -181,7 +181,7 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
         wn_hires, radiance_real = als.build_lookup_radiance(
             absco, wide_inst, geo, solar, np.array([albedo]),
             n_samples=n_lookup_samples, n_workers=n_workers, uniform=False,
-            vary_albedo=vary_albedo)
+            vary_albedo=vary_albedo, fields=fields, surface_fields=surface_fields)
         brightness = np.resize([1.0, 0.2], barcode_bars)
         gain_of_eta = barcode_scene(np.ones_like(wn_hires), brightness=brightness, widths=None, softness=0.0)
 
@@ -195,7 +195,7 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
         wn_hires, radiance = als.build_lookup_radiance(
             absco, wide_inst, geo, solar, np.array([albedo]),
             n_samples=n_lookup_samples, n_workers=n_workers, uniform=uniform,
-            vary_albedo=vary_albedo)
+            vary_albedo=vary_albedo, fields=fields, surface_fields=surface_fields)
 
     A = gd_render.image(fpa, wn_hires, radiance, wide_win.ils,
                         spatial_psf_fwhm_px=_GEOCARB_CFG.focal_plane.measured.spatial_psf_fwhm_px,
@@ -246,7 +246,8 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
 def _band_setup_cached(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_samples: int,
                        n_workers, uniform: bool, barcode: bool, barcode_bars: int,
                        noise: bool, noise_seed: int, realistic_barcode: bool = False,
-                       vary_albedo: bool = False, use_cache: bool = True):
+                       vary_albedo: bool = False, use_cache: bool = True,
+                       fields=None, surface_fields=None, resolution_tag: str | None = None):
     """Cache-aware wrapper around :func:`_band_setup` for the deterministic
     (``noise=False``) case -- "having an observation saved on disk" so a
     config-matrix sweep that only varies retrieval-side knobs (g_ratio,
@@ -259,22 +260,47 @@ def _band_setup_cached(fpa: int, atm_center, absco, geo, solar, snr: float, n_lo
 
     Bypasses the cache entirely when ``noise=True`` (a fresh random
     realization is the whole point there) or ``use_cache=False``.
+
+    ``fields``/``surface_fields`` (2026-08-29) forward straight to
+    :func:`_band_setup` -- e.g. :func:`geocarb_gert.along_slit_scene.
+    resolution_matched_fields`/``resolution_matched_albedo_fn`` for a
+    deliberately band-limited truth scene. ``resolution_tag`` is a short,
+    caller-supplied string uniquely identifying that config (e.g. an
+    anchor-grid hash) -- REQUIRED whenever ``fields``/``surface_fields``
+    are non-default, since the cache key otherwise has no way to tell two
+    different band-limited scenes apart (or from the plain, non-band-
+    limited one) and would silently serve a stale/wrong cached render.
+    Left ``None`` (default), the cache key is byte-identical to before
+    this parameter existed -- every existing cached truth stays reachable;
+    the new field is only ever ADDED to the hashed payload, never included
+    unconditionally (see ``geocarb_gert.truth_cache``'s own module
+    docstring on why an unconditional addition would orphan every
+    already-banked render).
     """
+    if fields is not None or surface_fields is not None:
+        if resolution_tag is None:
+            raise ValueError("resolution_tag is required whenever fields/surface_fields "
+                             "are given -- without it, two different band-limited scenes "
+                             "(or a band-limited one and the plain truth) could silently "
+                             "collide in the cache key.")
     if noise or not use_cache:
         return _band_setup(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples,
                            n_workers, uniform, barcode, barcode_bars, noise, noise_seed,
-                           realistic_barcode, vary_albedo)
+                           realistic_barcode, vary_albedo, fields, surface_fields)
 
     from geocarb_gert import truth_cache
     scene = ("barcode" if barcode else "realistic-barcode" if realistic_barcode
             else "uniform" if uniform else "realistic")
-    key = truth_cache.cache_key(
+    key_kwargs = dict(
         fpa=fpa, scene=scene,
         barcode_bars=barcode_bars if scene in ("barcode", "realistic-barcode") else None,
         n_lookup_samples=n_lookup_samples, vary_albedo=vary_albedo,
         spatial_psf_fwhm_px=_GEOCARB_CFG.focal_plane.measured.spatial_psf_fwhm_px,
         gd_csv_path=str(_GEOCARB_CFG.focal_plane.measured.gd_csv_path),
     )
+    if resolution_tag is not None:
+        key_kwargs["resolution_matched"] = resolution_tag
+    key = truth_cache.cache_key(**key_kwargs)
     cached = truth_cache.load(key)
     if cached is not None:
         print(f"  truth cache HIT ({key})", flush=True)
@@ -283,7 +309,7 @@ def _band_setup_cached(fpa: int, atm_center, absco, geo, solar, snr: float, n_lo
     print(f"  truth cache MISS ({key}) -- rendering", flush=True)
     band = _band_setup(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples,
                        n_workers, uniform, barcode, barcode_bars, noise, noise_seed,
-                       realistic_barcode, vary_albedo)
+                       realistic_barcode, vary_albedo, fields, surface_fields)
     cacheable = {k: v for k, v in band.items() if k not in ("radiance", "noise_arr")}
     truth_cache.save(key, cacheable)
     return cacheable

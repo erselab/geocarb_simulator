@@ -583,7 +583,7 @@ PRIOR_FIELD_SETS = {
 }
 
 
-def atmosphere_at(x_km: float, h2o_scale_height_km: float = 2.0) -> AtmosphericProfile:
+def atmosphere_at(x_km: float, h2o_scale_height_km: float = 2.0, fields=None) -> AtmosphericProfile:
     """The true ``AtmosphericProfile`` at one along-slit position [km] --
     i.e. this function *is* "the scene," in the physical sense
     (``geocarb_gert.focalplane``'s module docstring has the full
@@ -598,9 +598,14 @@ def atmosphere_at(x_km: float, h2o_scale_height_km: float = 2.0) -> AtmosphericP
 
     Generalizes ``geocarb_gert.scene.reference_atmosphere`` to also vary
     CH4, CO, and surface pressure (that function only overrides CO2/H2O).
+
+    ``fields`` (default ``None`` -> :data:`STATE_FIELDS`, today's exact
+    behaviour) forwards straight to :func:`state_at` -- lets a caller swap
+    in e.g. :func:`resolution_matched_fields` so the TRUTH scene itself is
+    band-limited, not just a retrieval's prior.
     """
     return atmosphere_from_params(
-        **{k: float(v) for k, v in state_at(x_km).items()},
+        **{k: float(v) for k, v in state_at(x_km, fields=fields).items()},
         h2o_scale_height_km=h2o_scale_height_km)
 
 
@@ -638,6 +643,46 @@ def interp_state(x_target, x_known, fields=None) -> dict:
     x_known = np.asarray(x_known, dtype=float)
     return {name: np.interp(x_target, x_known, fn(x_known))
             for name, fn in fields.items()}
+
+
+def resolution_matched_fields(x_anchor_km, fields=None) -> dict:
+    """``{name: fn(x_km)}`` -- each ``fn`` is the piecewise-linear
+    interpolant of the TRUE field, sampled once at ``x_anchor_km`` -- i.e.
+    a version of the truth with literally ZERO structure below that
+    anchor spacing, exposed as reusable callables in the same shape
+    :data:`STATE_FIELDS`/:data:`PRIOR_FIELD_SETS` entries already use (so
+    it drops into any ``fields=`` parameter, including :func:`atmosphere_at`
+    /:func:`build_lookup_radiance`, unchanged).
+
+    2026-08-29 (user): built so a truth IMAGE can be rendered from a scene
+    the anchor grid at a given ``anchor_density`` can, in principle,
+    perfectly represent -- removing the "genuinely-unresolvable sub-anchor
+    structure" confound from a retrieval-accuracy comparison entirely, so
+    any remaining error is real retrieval/model error, not truth the
+    anchor grid could never have captured.
+
+    Same underlying math as :func:`interp_state` (which returns a one-shot
+    dict of VALUES at ``x_target``); this returns reusable FUNCTIONS
+    instead, each closing over its own ``x_anchor_km``/sampled-values pair.
+    """
+    fields = STATE_FIELDS if fields is None else fields
+    x_anchor_km = np.asarray(x_anchor_km, dtype=float)
+    known = {name: np.asarray(fn(x_anchor_km), dtype=float) for name, fn in fields.items()}
+    return {name: (lambda x_km, xk=x_anchor_km, yk=known[name]: np.interp(x_km, xk, yk))
+           for name in fields}
+
+
+def resolution_matched_albedo_fn(x_anchor_km, label) -> Callable:
+    """The surface-side sibling of :func:`resolution_matched_fields`: a
+    single band's albedo, band-limited to ``x_anchor_km``. Reuses
+    :func:`albedo_for_label`'s own existing patch-blend + fine-texture
+    composition (`include_fine=True`) to get the anchor-point VALUES, then
+    only band-limits the RESULT via linear interpolation -- no need to
+    duplicate `_albedo_compose`'s own logic.
+    """
+    x_anchor_km = np.asarray(x_anchor_km, dtype=float)
+    y_anchor = albedo_for_label(x_anchor_km, label, include_fine=True)
+    return lambda x_km: np.interp(x_km, x_anchor_km, y_anchor)
 
 
 def atmosphere_from_params(co2_ppm: float, ch4_ppb: float, co_ppb: float,
@@ -682,14 +727,22 @@ _G_LOOKUP = {}
 def _lookup_sample(i: int):
     g = _G_LOOKUP
     x_km = g["x_samples_km"][i]
-    atm = atmosphere_at(x_km, g["h2o_scale_height_km"])
+    atm = atmosphere_at(x_km, g["h2o_scale_height_km"], fields=g.get("fields"))
     fm = g["fm_cls"](atm, g["absco"], g["inst"], g["geo"],
                      solver=g["solver_cls"](), solar_spectrum=g["solar"])
     # Albedo is applied INSIDE the forward run (not multiplied onto the
     # spectrum afterwards), so a per-sample albedo genuinely re-runs the RT
     # at that reflectance rather than rescaling one shared spectrum.
-    albedo = (list(albedo_at(x_km, g["band_labels"])) if g["vary_albedo"]
-              else g["albedo"])
+    surface_fields = g.get("surface_fields")
+    if surface_fields is not None:
+        # Resolution-matched (or otherwise custom) per-band albedo, same
+        # list shape [one value per band_labels entry] the raw albedo_at
+        # call below already produces -- see resolution_matched_albedo_fn.
+        albedo = [float(surface_fields[lab](x_km)) for lab in g["band_labels"]]
+    elif g["vary_albedo"]:
+        albedo = list(albedo_at(x_km, g["band_labels"]))
+    else:
+        albedo = g["albedo"]
     res = fm.run(albedo=albedo, albedo_slope=[0.0] * len(albedo))
     return i, res.I_hires[0]
 
@@ -701,6 +754,8 @@ def build_lookup_radiance(
     n_workers: int | None = None,
     uniform: bool = False,
     vary_albedo: bool = False,
+    fields=None,
+    surface_fields=None,
 ) -> tuple[np.ndarray, Callable]:
     """Precompute hi-res spectra at ``n_samples`` along-slit positions and
     return ``(wn_hires, radiance)`` where ``radiance(eta) -> spectrum`` does
@@ -725,6 +780,16 @@ def build_lookup_radiance(
     ``uniform=False`` run of the same band and against the older, uniform-
     composition dense-sweep design (``gd_dense_sweep.py``). Added
     2026-07-24 for the FPA2 with/without along-slit-variation comparison.
+
+    ``fields``/``surface_fields`` (2026-08-29, both default ``None`` ->
+    today's exact behaviour: raw :data:`STATE_FIELDS` and ``albedo_at``)
+    let a caller render the TRUTH itself from custom field functions --
+    e.g. :func:`resolution_matched_fields`/:func:`resolution_matched_
+    albedo_fn`, so the rendered image reflects a deliberately band-limited
+    scene rather than the full continuous truth. ``surface_fields`` is
+    ``{band_label: fn(x_km) -> albedo}``, one entry per ``inst.windows``
+    label; only consulted when ``vary_albedo=True`` (same as ``albedo_at``
+    itself).
     """
     from gert.forward_model import ForwardModel
     from gert.rt_solver import SingleScatterSolver
@@ -751,7 +816,8 @@ def build_lookup_radiance(
                           solar=solar, albedo=list(albedo), h2o_scale_height_km=h2o_scale_height_km,
                           fm_cls=ForwardModel, solver_cls=SingleScatterSolver,
                           vary_albedo=bool(vary_albedo),
-                          band_labels=[w.label for w in inst.windows]))
+                          band_labels=[w.label for w in inst.windows],
+                          fields=fields, surface_fields=surface_fields))
 
     # one throwaway call to get wn_hires (identical for every sample -- a
     # property of the Instrument/SpectralWindow, not the atmosphere)
