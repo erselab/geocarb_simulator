@@ -1405,3 +1405,181 @@ free-albedo runs, where `g=truth` improved sharply with anchor density) --
 consistent with the error being dominated by the STATE's own coarse bin
 grid (unaffected by anchor sampling) rather than by how finely the
 forward model samples between anchors.
+
+## 12. Why does g_ratio=1 give WORSE CO2 than g_ratio=3? A bug hunt that resolved to a representability-gap artifact (2026-08-30/31)
+
+The whole-slit sweep in Sec.11's own config family (co2/p_surface/albedo
+jointly free, structural prior, resolution-matched truth at
+`anchor_density=4`) produced a genuinely surprising result: `g_ratio=1`
+(3x more bins than `g_ratio=3`) gave a WORSE CO2 retrieval, not a better
+one -- 32.78 ppm vs. 17.49 ppm, even with the retrieval's own anchor
+sampling matched exactly to the truth's own resolution. The user's
+reaction -- "this feels like a potential code bug" -- launched a
+systematic elimination process, described here in the order it was
+actually run, because each ruled-out hypothesis is itself informative.
+
+### 12.1 Ruled out: DOF collapse
+
+`trace(AVK)`/`dof_frac` (already saved via `return_avk=True`) stayed high
+at `g_ratio=1` (0.960, vs. 0.999 at `g_ratio=3`) -- nowhere near the
+collapse-toward-zero Sec.7.3's own g6/g12 mechanism produces. The
+residual against the ACTUAL rendered data was also BETTER at `g_ratio=1`
+(mean `resid_hires_rms` 0.139 vs. 0.225) -- a finer-bin model fitting the
+real radiance more closely, exactly as expected from more free
+parameters, with no sign of degenerate/ill-conditioned fitting.
+
+### 12.2 Ruled out: prior tie-breaking a near-degenerate solution
+
+Rerunning `g_ratio=1` with `--prior-fields exact` (instead of
+`structural`) changed almost nothing: CO2 32.78 -> 32.52 ppm, albedo
+0.0103 -> 0.0104, `dof_frac`/`resid_rms` unchanged to 3 decimal places.
+If an imperfect prior were tie-breaking among several near-equally-data-
+consistent combinations badly, an exact prior should have fixed most of
+it. It didn't.
+
+### 12.3 Ruled out: an analytic Jacobian bug at high bin density
+
+`gd_jacobian_validate.py --h-scan` on the same window (rows 890-920) at
+both `g_ratio=1` and `g_ratio=3`: `co2_ppm`/`albedo` columns agree with
+finite differences to ~1e-9 to 1e-13 relative L2 (cosine 1.000000000) at
+every `h`, identically at both resolutions; `p_surface_hpa` shows the
+ordinary truncation-vs-roundoff tradeoff (best at `h=1e-3`, degrading
+toward `h=1e-6` as `~eps/h` roundoff dominates), again identically in
+magnitude at both `g_ratio`. No floor, no resolution-dependent
+degradation -- the Jacobian is correct at both bin densities.
+
+### 12.4 Ruled out: correctable cross-parameter leakage
+
+Posterior cross-covariance between `co2_ppm` and `albedo`/`p_surface_hpa`
+is real and substantial (mean \|corr\| 0.32-0.68) but not dramatically
+stronger at `g_ratio=1` than `g_ratio=3`. More decisively: using the
+retrieval's OWN reported cross-covariance as a proper Rodgers-style
+correction operator (`co2_corrected = co2 - (Cov(co2,albedo)/Var(albedo))
+* (albedo_retrieved - albedo_TRUE)`), with the TRUE albedo error as
+input -- an oracle-level upper bound no real correction could ever
+match -- moved CO2's MAE by ~0.0% at every config tested. `S_ret`'s cross-
+covariance describes NOISE-driven sensitivity (how the estimate would
+covary under a different noise realization); these runs are deterministic
+(`noise=False`), so the actual error is a BIAS, and there's no reason a
+noise-propagation covariance has to predict a systematic bias's
+direction. It didn't, here.
+
+### 12.5 A real, structural signal: CO2's own local truth curvature
+
+Splitting bins into curvature quartiles (Sec.7.5's own methodology,
+`|kappa| = |truth_{k-1} - 2*truth_k + truth_{k+1}|` via the standard
+unequal-spacing 3-point formula) against CO2's OWN resolution-matched
+truth field: high-curvature bins have 1.98x the error of low-curvature
+ones at `g_ratio=3`, and a STRONGER 2.64x at `g_ratio=1` -- CO2's error
+concentrates near its own plume/hot-spot features (real local structure),
+not near albedo's patch boundaries (the cross-curvature ratio was weaker,
+1.52x/1.30x). Raw Pearson correlations were all near zero for every
+predictor tested -- the signal only appears in the quartile split,
+matching Sec.7.5's own finding that the plain correlation coefficient
+misses it (heavy-tailed/threshold-like error distribution).
+
+### 12.6 Ruled out as the DOMINANT driver: per-bin sample/pixel starvation
+
+`pixel_density_bin_centers` places bin CENTERS at equal-population
+quantiles, but pixel ASSIGNMENT is nearest-center (Voronoi/midpoint)
+logic -- a different operation that does NOT reproduce exactly equal
+per-bin pixel counts. Measured directly (one real window, rows 418-438):
+`g_ratio=3` pixels/bin min=1025 max=4337 mean=3072; `g_ratio=1` min=317
+max=1255 mean=1024 -- a real ~3x reduction matching G's own increase, with
+real (~4x) spread at both resolutions. Checking whether this explains the
+`g_ratio=1` degradation: at `g_ratio=3`, sparse-data bins genuinely fit
+WORSE (low/high pixel-count quartile MAE ratio 2.28x, matching intuition).
+At `g_ratio=1` this REVERSES (ratio 0.62x -- sparse bins do BETTER) --
+the same "dominant mechanism swamps and inverts a real secondary
+correlation" signature Sec.7.5 already documented for a different
+comparison. Rules out sample starvation as `g_ratio=1`'s dominant driver,
+and is convergent evidence (a second, independent test) for 12.5's
+curvature-linked mechanism being the real one.
+
+### 12.7 The actual answer: a representability-gap artifact, not a bug or a persistent degeneracy
+
+Every resolution-matched truth through Sec.11 was built from
+`resolution_matched_fields`/`resolution_matched_albedo_fn` sampled at the
+ANCHOR grid (`whole_slit_anchor_etas`, `anchor_density`-driven) -- but the
+RETRIEVAL's own bin values are piecewise-linear at the (coarser)
+**BIN** grid (`g_ratio`-driven). At `g_ratio=1`/`anchor_density=4`, bins
+are ~2.7km apart, anchors ~0.67km apart -- a real ~4x gap. Even with the
+prior set EXACTLY to truth at every bin center (Sec.12.2), the forward
+model evaluated between bin centers does NOT reproduce the true
+(anchor-resolved) radiance, so `observation - model` and `prior - model`
+are both nonzero AT THE PRIOR, before any data-driven adjustment --
+that nonzero residual is exactly what drives Gauss-Newton away from the
+(exactly correct) starting point. This representability gap SHRINKS as
+`g_ratio` gets finer (closer to the anchor grid), so it does not, by
+itself, explain why `g_ratio=1` is WORSE than `g_ratio=3` -- but it does
+mean neither config's error should be read as a pure measure of the
+underlying joint-degeneracy mechanism, since both are also carrying this
+confound, unquantified until now.
+
+**Fix**: built a truth resolution-matched to the RETRIEVAL's own BIN grid
+instead of the anchor grid -- `whole_slit_bin_centers(fpa, g_ratio)`
+(`scripts/gd_build_resolution_matched_truth.py`, new, mirrors
+`whole_slit_anchor_etas`'s per-window-union construction exactly, using
+`_solve_window`'s own `G = max(2, round(width/g_ratio))`/
+`pixel_density_bin_centers` formula) -- combined with a FINE
+`anchor_density` (16) purely for forward-model sampling. This makes the
+retrieval's own bin-to-bin piecewise-linear reconstruction bit-for-bit
+the SAME function the truth was built from, everywhere -- not merely at
+the bin centers -- a genuine ceiling test, not "as fine as the forward
+model happens to sample." (Also required: `gd_joint_block_whole_slit_
+sweep.py --resolution-matched-g-ratio-bins` -- and a real fix caught by
+its own smoke test: `state_spec_from_scene`'s `surface_fields` convention
+is `{"albedo": fn(x_km, band_label)}`, two positional args, keyed by ROW
+NAME -- different from `build_lookup_radiance`'s own `surface_fields`
+convention, `{band_label: fn(x_km)}`, one arg, keyed by BAND LABEL --
+reusing the latter directly as the former raised `takes 1 positional
+argument but 2 were given`; fixed with a small wrapper. Also extended the
+"exact prior must mean the resolution-matched truth, not the raw
+continuous one" fix from Sec.11 to this new bin-grid-matched mode.)
+
+**Result** (`g_ratio=1`, `anchor_density=16`, `--prior-fields exact`,
+truth matched to `g_ratio=1`'s own bin grid):
+
+| config | CO2 overall | CO2 rel. | albedo overall | dof_frac | resid_rms |
+|---|---|---|---|---|---|
+| g3, ad4 (baseline, anchor-matched truth) | 17.49 ppm | 4.21% | 0.0171 | 0.999 | 0.225 |
+| g1, ad4, structural (anchor-matched truth) | 32.78 ppm | 7.89% | 0.0103 | 0.960 | 0.139 |
+| g1, ad4, exact (anchor-matched truth) | 32.52 ppm | 7.82% | 0.0104 | 0.960 | 0.139 |
+| **g1, ad16, exact, BIN-matched truth (zero gap)** | **4.05 ppm** | **0.97%** | **0.0029** | 0.957 | **0.034** |
+
+Removing the representability gap entirely drops CO2 error ~8x (32.78 ->
+4.05 ppm) and albedo ~3.5x (0.0103 -> 0.0029) -- coming in well BELOW the
+`g_ratio=3` baseline, reversing the original finding completely. The
+residual against the real data also improved sharply (0.139 -> 0.034),
+while `dof_frac` stayed essentially flat (~0.96) throughout -- so this
+was never a conditioning story either; it is specifically that the model
+can now genuinely represent what it is being asked to fit.
+
+**Conclusion**: the joint co2/p_surface/albedo cross-correlation found in
+12.4 is real (measured directly, 0.3-0.7), but it was never the DOMINANT
+driver of the `g_ratio=1` degradation -- it is a real, secondary effect
+that was almost entirely masked by the much larger representability-gap
+artifact. The original "g_ratio=1 looks worse than g_ratio=3" result was
+a genuine, reproducible finding FOR THAT SPECIFIC anchor-vs-bin-grid
+mismatch, not evidence of a bug or an intractable degeneracy in the
+retrieval mechanism itself -- once truth and bin grid are matched, finer
+bins behave the way intuition always expected: strictly better, matching
+Sec.7.3's own historical result (g_ratio=1 among the best configs there
+too, under conditions without this mismatch).
+
+**Confirmation: prior quality is irrelevant once the gap is closed.**
+Rerunning the bin-matched ceiling test with `--prior-fields structural`
+instead of `exact` gives an essentially identical result -- CO2 4.0592 vs.
+4.0468 ppm, albedo 0.0029 vs. 0.0029, `dof_frac`/`resid_rms` unchanged.
+This closes the loop with 12.2 (which already showed exact vs. structural
+barely differed WITH the representability gap present): with `dof_frac
+~0.96`, the fit is strongly data-constrained at every stage of this
+investigation, so the prior was never actually driving the answer -- the
+representability gap was the only thing standing between the retrieval
+and a genuinely good fit.
+
+One minor, unrelated artifact found and confirmed harmless along the way:
+`whole_slit_bin_centers`'s per-window union can place two DIFFERENT
+windows' own boundary bins extremely close together at a shared physical
+seam (minimum observed: 0.43m, not an exact duplicate -- `x_km` stays
+strictly increasing, `np.interp` is unaffected).

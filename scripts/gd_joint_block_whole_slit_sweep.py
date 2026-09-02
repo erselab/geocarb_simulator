@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import hashlib
 import multiprocessing as mp
 import pickle
 import sys
@@ -650,7 +651,52 @@ def main() -> int:
                          "statistics (ALBEDO_COV, ALBEDO_CORR_KM) but not the true phase -- "
                          "what a real, imperfect external product (MODIS-like) would supply. "
                          "Requires 'albedo' in --free (same reasoning as --vary-albedo).")
+    ap.add_argument("--resolution-matched-anchor-density", type=int, default=None,
+                    help="2026-08-29 (docs/PROJECT_STATUS.md, resolution-matched truth "
+                         "images): render the TRUTH scene from geocarb_gert.along_slit_"
+                         "scene.resolution_matched_fields/resolution_matched_albedo_fn "
+                         "instead of the raw continuous truth -- band-limited to EXACTLY "
+                         "the whole-slit anchor grid this anchor_density would use (built "
+                         "by scripts/gd_build_resolution_matched_truth.py, must already be "
+                         "cached -- this flag reconstructs the SAME anchor grid/resolution_"
+                         "tag to hit that cache, not re-render). Removes the 'genuinely-"
+                         "unresolvable sub-anchor truth structure' confound: any remaining "
+                         "retrieval error against THIS truth is real model/retrieval error. "
+                         "Implies --vary-albedo and n_lookup_samples=20000 (the value the "
+                         "images were built at -- overrides --n-lookup-samples if both are "
+                         "given). A mismatched --anchor-density (the RETRIEVAL's own anchor "
+                         "grid) is allowed but warned about -- matching it is the direct "
+                         "apples-to-apples test; a deliberate mismatch tests under/over-"
+                         "sampling a truth of known resolution.")
+    ap.add_argument("--resolution-matched-g-ratio-bins", type=float, default=None,
+                    help="2026-08-29 (user): like --resolution-matched-anchor-density, but "
+                         "the truth is band-limited to the retrieval's own STATE BIN grid "
+                         "(whole_slit_bin_centers(fpa, this g_ratio), gd_build_resolution_"
+                         "matched_truth.py) instead of the anchor grid -- removes the bin-"
+                         "grid-vs-anchor-grid representability gap entirely: the retrieval's "
+                         "bin-to-bin piecewise-linear reconstruction becomes bit-for-bit the "
+                         "SAME function the truth was built from, everywhere, not just at "
+                         "bin centers. A genuine ceiling test, not just 'as fine as the "
+                         "forward model can sample.' Must already be cached by gd_build_"
+                         "resolution_matched_truth.py --g-ratio-bins. Pass a fine --anchor-"
+                         "density (e.g. 16) so the forward model can still resolve this "
+                         "truth without an anchor-level stepping-bias confound -- this g_"
+                         "ratio should normally equal --g-ratio (the RETRIEVAL's own bin "
+                         "grid), or the truth and the retrieval are matched to two DIFFERENT "
+                         "bin grids, defeating the point. Mutually exclusive with "
+                         "--resolution-matched-anchor-density.")
     args = ap.parse_args()
+    if (args.resolution_matched_anchor_density is not None
+            and args.resolution_matched_g_ratio_bins is not None):
+        ap.error("--resolution-matched-anchor-density and --resolution-matched-g-ratio-bins "
+                 "are mutually exclusive -- pick one truth-matching mode.")
+    if (args.resolution_matched_g_ratio_bins is not None
+            and args.resolution_matched_g_ratio_bins != args.g_ratio):
+        print(f"WARNING: --resolution-matched-g-ratio-bins "
+             f"{args.resolution_matched_g_ratio_bins} != --g-ratio {args.g_ratio} -- the "
+             f"truth and the retrieval are matched to DIFFERENT bin grids, which defeats "
+             f"the point of this mode (a ceiling test needs them identical). Allowed, but "
+             f"almost certainly not what you want unless deliberate.", flush=True)
     if (args.task_id is None) != (args.n_tasks is None):
         ap.error("--task-id and --n-tasks must be given together")
     if args.barcode and args.realistic_barcode:
@@ -675,13 +721,23 @@ def main() -> int:
     if args.sub_bin_anomaly != "none" and "albedo" not in free_check:
         ap.error("--sub-bin-anomaly only has an effect on a free 'albedo' row -- add "
                  "'albedo' to --free, or drop --sub-bin-anomaly.")
+    if args.resolution_matched_anchor_density is not None and args.anchor_density != args.resolution_matched_anchor_density:
+        print(f"WARNING: --resolution-matched-anchor-density "
+             f"{args.resolution_matched_anchor_density} != --anchor-density "
+             f"{args.anchor_density} -- the retrieval's own anchor grid will NOT match "
+             f"the truth's own band-limiting grid. This is allowed (tests under/over-"
+             f"sampling a truth of known resolution) but is not the direct apples-to-"
+             f"apples config unless deliberate.", flush=True)
     fpa_list = tuple(int(x.strip()) for x in args.fpa.split(","))
     if len(fpa_list) != 1:
         ap.error(f"--fpa currently supports exactly one band (got {args.fpa!r}); multi-band "
                  "joint retrieval is a later phase of the config-consolidation plan, not yet "
                  "implemented in this script")
     fpa = fpa_list[0]
-    n_lookup_samples = (args.n_lookup_samples if args.n_lookup_samples is not None
+    resolution_matched_active = (args.resolution_matched_anchor_density is not None
+                                 or args.resolution_matched_g_ratio_bins is not None)
+    n_lookup_samples = (20000 if resolution_matched_active else
+                        args.n_lookup_samples if args.n_lookup_samples is not None
                         else 5600 if args.prior_fields != "exact" else 400)
     out_root = Path(args.out_root if args.out_root is not None
                     else "results/realistic_prior" if args.prior_fields != "exact" else "results")
@@ -702,18 +758,64 @@ def main() -> int:
     atm_center = als.atmosphere_at(0.0)
     gdt._G.update(dict(atm=atm_center, absco=absco, geo=geo, solar=solar))
     snr = gdt.DEFAULT_SNR_BY_FPA[fpa]
-    band = gdt._band_setup_cached(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples, None,
-                                  args.uniform, args.barcode, args.barcode_bars, False, 0,
-                                  args.realistic_barcode, vary_albedo=args.vary_albedo,
-                                  use_cache=not args.no_truth_cache)
-    wide_win, wide_inst, albedo = band_basics(fpa, atm_center, absco, geo, solar)
-    print("done.\n", flush=True)
-
+    # Computed here (moved ahead of the resolution-matched truth-building
+    # block below, 2026-09-01 bug fix) so whole_slit_anchor_etas/whole_
+    # slit_bin_centers can be handed the SAME tiling (window_scale/overlap/
+    # min_window) this run will actually solve against -- previously they
+    # silently used build_window_tiles's own defaults (window_scale=1.0,
+    # overlap=0) regardless of --n-windows/--overlap/--min-window, which
+    # shifts every window's own row_lo/row_hi under a non-default overlap
+    # and drifts the density-weighted anchor/bin placement away from what
+    # _solve_window computes, concentrated at window boundaries -- see
+    # docs/PROJECT_STATUS.md Sec.12.8.
     if args.n_windows is not None:
         window_scale = scale_for_window_count(fpa, args.n_windows, args.min_window)
         print(f"--n-windows {args.n_windows} -> window_scale {window_scale:.2f}", flush=True)
     else:
         window_scale = args.window_scale
+    if resolution_matched_active:
+        # Reconstruct the EXACT grid/resolution_tag gd_build_resolution_matched_
+        # truth.py used to build+cache this image -- must match bit-for-bit or
+        # this call is a cache MISS (a silent, expensive re-render) rather than
+        # hitting the already-built image. Two modes: anchor-grid-matched
+        # (whole_slit_anchor_etas) or bin-grid-matched (whole_slit_bin_centers,
+        # 2026-08-29 -- removes the representability gap entirely, see that
+        # flag's own help text).
+        from gd_build_resolution_matched_truth import whole_slit_anchor_etas, whole_slit_bin_centers
+        rm_band_label = GEOCARB_BANDS[fpa][0]
+        if args.resolution_matched_g_ratio_bins is not None:
+            rm_g = args.resolution_matched_g_ratio_bins
+            match_etas_rm = whole_slit_bin_centers(fpa, rm_g, min_window=args.min_window,
+                                                    window_scale=window_scale, overlap=args.overlap)
+            rm_tag_prefix = f"gr{rm_g:g}bins"
+            rm_desc = f"g_ratio_bins={rm_g}"
+        else:
+            rm_ad = args.resolution_matched_anchor_density
+            match_etas_rm = whole_slit_anchor_etas(fpa, rm_ad, min_window=args.min_window,
+                                                    window_scale=window_scale, overlap=args.overlap)
+            rm_tag_prefix = f"ad{rm_ad}"
+            rm_desc = f"anchor_density={rm_ad}"
+        match_x_km_rm = match_etas_rm * als.SLIT_HALF_KM
+        rm_fields = als.resolution_matched_fields(match_x_km_rm)
+        rm_surface_fields = {rm_band_label: als.resolution_matched_albedo_fn(match_x_km_rm, rm_band_label)}
+        rm_hash = hashlib.sha256(match_x_km_rm.tobytes()).hexdigest()[:16]
+        rm_tag = f"{rm_tag_prefix}-{rm_hash}"
+        print(f"resolution-matched truth: {rm_desc}, "
+             f"{len(match_x_km_rm)} points, resolution_tag={rm_tag}", flush=True)
+        band = gdt._band_setup_cached(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples, None,
+                                      args.uniform, args.barcode, args.barcode_bars, False, 0,
+                                      args.realistic_barcode, vary_albedo=True,
+                                      use_cache=not args.no_truth_cache,
+                                      fields=rm_fields, surface_fields=rm_surface_fields,
+                                      resolution_tag=rm_tag)
+    else:
+        band = gdt._band_setup_cached(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples, None,
+                                      args.uniform, args.barcode, args.barcode_bars, False, 0,
+                                      args.realistic_barcode, vary_albedo=args.vary_albedo,
+                                      use_cache=not args.no_truth_cache)
+    wide_win, wide_inst, albedo = band_basics(fpa, atm_center, absco, geo, solar)
+    print("done.\n", flush=True)
+
     all_tiles = build_window_tiles(fpa, min_window=args.min_window,
                                    window_scale=window_scale, overlap=args.overlap)
     widths = [hi - lo + 1 for lo, hi in all_tiles]
@@ -732,6 +834,32 @@ def main() -> int:
         oracle = SUB_BIN_ANOMALY_ORACLES[args.sub_bin_anomaly]
         row_sub_bin_anomaly = {"albedo": {"g_fn": functools.partial(oracle, fpa=fpa)}}
 
+    # Retrieval PRIOR field-set. Under --resolution-matched-anchor-density,
+    # "exact" (prior == truth) must mean exactly the RESOLUTION-MATCHED
+    # truth the image was actually rendered from -- not the raw continuous
+    # STATE_FIELDS/SURFACE_FIELDS -- otherwise a FROZEN row (whose value IS
+    # its prior, verbatim) would silently disagree with what generated
+    # y_true, a real, avoidable truth/prior mismatch for exactly the rows
+    # meant to be held fixed at the true value. 'structural' (or any other
+    # non-exact choice) is a DELIBERATE imperfect prior and is untouched by
+    # this -- resolution-matching the truth doesn't change what "imperfect"
+    # means for it.
+    if resolution_matched_active and args.prior_fields == "exact":
+        prior_fields_resolved = rm_fields
+        # state_spec_from_scene's own surface_fields convention differs from
+        # build_lookup_radiance's: keyed by ROW NAME ("albedo"), called as
+        # fn(x_km, band_label) -- two positional args (see state_spec_from_
+        # scene's _row/_eval closure) -- vs rm_surface_fields above, keyed
+        # by band LABEL, fn(x_km) only one arg. Wrap rather than reuse
+        # directly (found via a smoke test: reusing rm_surface_fields as-is
+        # raised "takes 1 positional argument but 2 were given").
+        _rm_albedo_fn = rm_surface_fields[rm_band_label]
+        surface_fields_resolved = {"albedo": lambda x_km, label, _fn=_rm_albedo_fn: _fn(x_km)}
+    else:
+        prior_fields_resolved = als.PRIOR_FIELD_SETS[args.prior_fields]
+        surface_fields_resolved = als.SURFACE_PRIOR_FIELD_SETS.get(
+            args.prior_fields, als.SURFACE_FIELDS)
+
     _SWEEP.update(dict(band=band, absco=absco, wide_inst=wide_inst, geo=geo, solar=solar,
                        albedo=albedo, wn_hires=band["wn_hires"], ils=band["ils"], fpa=fpa,
                        gamma=args.gamma, sigma_abs=args.sigma_abs, g_ratio=args.g_ratio,
@@ -741,9 +869,8 @@ def main() -> int:
                        free=tuple(x.strip() for x in args.free.split(',')),
                        corr_length=args.corr_length, prior_form=args.prior_form,
                        jacobian=args.jacobian,
-                       prior_fields=als.PRIOR_FIELD_SETS[args.prior_fields],
-                       surface_fields=als.SURFACE_PRIOR_FIELD_SETS.get(
-                           args.prior_fields, als.SURFACE_FIELDS),
+                       prior_fields=prior_fields_resolved,
+                       surface_fields=surface_fields_resolved,
                        prior_anchor_density=args.prior_anchor_density,
                        flat_sy_inv=args.flat_sy_inv, vary_albedo=args.vary_albedo,
                        row_sub_bin_anomaly=row_sub_bin_anomaly))
