@@ -249,6 +249,7 @@ def _solve_window(row_lo: int, row_hi: int):
     surface_fields = _SWEEP.get("surface_fields")        # an als.SURFACE_PRIOR_FIELD_SETS[...] dict, always explicit (never None)
     prior_anchor_density = _SWEEP.get("prior_anchor_density")  # None -> exact-per-bin (today's default)
     row_sub_bin_anomaly = _SWEEP.get("row_sub_bin_anomaly")  # None -> no sub_bin_anomaly at all (default)
+    anchor_workers = _SWEEP.get("anchor_workers", 1)      # ANCHOR-level parallelism within build_forward_state's own forward() (2026-09-02); see --anchor-workers' own help
 
     rows_win = np.arange(row_lo, row_hi + 1)
     width = len(rows_win)
@@ -341,7 +342,8 @@ def _solve_window(row_lo: int, row_hi: int):
             return None
         def lin(x):
             return jac.linearize(FPA, rows_win, scene_etas_, spec_, spectrum_jac,
-                                 wn_hires, ils, x, pad=PAD, state_interp=interp_kind)
+                                 wn_hires, ils, x, pad=PAD, state_interp=interp_kind,
+                                 n_workers=anchor_workers)
         return lin
 
     # COARSE: scene evaluated at the state's own bin centres, so
@@ -357,7 +359,8 @@ def _solve_window(row_lo: int, row_hi: int):
         # coarse: scene positions ARE the state positions, so interpolation is
         # the identity regardless of kind -- state_interp is genuinely a no-op here.
         fwd_c = build_forward_state(FPA, rows_win, bin_centers, spec_c, spectrum,
-                                    wn_hires, ils, pad=PAD, state_interp="linear")
+                                    wn_hires, ils, pad=PAD, state_interp="linear",
+                                    n_workers=anchor_workers)
         x_c, S_ret_c, avk_c = gauss_newton_state(fwd_c, y_true, spec_c, Sy_inv_diag,
                                                  label=f"[{row_lo}-{row_hi}] coarse", verbose=False,
                                                  jacobian_fn=_linearizer(spec_c, bin_centers, use_analytic, "linear"),
@@ -397,7 +400,8 @@ def _solve_window(row_lo: int, row_hi: int):
                                    prior_anchor_density=prior_anchor_density,
                                    row_sub_bin_anomaly=row_sub_bin_anomaly)
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
-                                wn_hires, ils, pad=PAD, state_interp=state_interp)
+                                wn_hires, ils, pad=PAD, state_interp=state_interp,
+                                n_workers=anchor_workers)
     x_h, S_ret_h, avk_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
                                              label=f"[{row_lo}-{row_hi}] hires", verbose=False,
                                              jacobian_fn=_linearizer(spec_h, anchor_etas, use_analytic_hires,
@@ -448,7 +452,23 @@ def main() -> int:
                          "default below (default: the checked-in input/retrieval_defaults.yml)")
     ap.add_argument("--gamma", type=float, default=cfg.gamma)
     ap.add_argument("--sigma-abs", type=float, default=cfg.sigma_abs)
-    ap.add_argument("--n-workers", type=int, default=None)
+    ap.add_argument("--n-workers", type=int, default=None,
+                    help="WINDOW-level parallelism: an in-process Pool distributing the "
+                         "58 (or --n-windows) independent windows across this many local "
+                         "cores. Default: every available CPU.")
+    ap.add_argument("--anchor-workers", type=int, default=1,
+                    help="ANCHOR-level parallelism WITHIN a single window's own forward-"
+                         "model calls (build_forward_state's own n_workers, 2026-09-02) -- "
+                         "a real, separate cost driver from window-level parallelism above: "
+                         "a wide window at a fine --anchor-density can have hundreds of "
+                         "anchors, each a fresh RT call, run single-process by default. "
+                         "Default 1 (unchanged): a window-level Pool worker (--n-workers>1, "
+                         "in-process) CANNOT itself spawn a nested pool, so this is silently "
+                         "forced back to 1 whenever this process is itself such a worker, "
+                         "regardless of what's passed here -- set this >1 only when windows "
+                         "are distributed as separate top-level processes instead "
+                         "(--task-id/--n-tasks, one SLURM job-array task per subset of "
+                         "windows), where the two levels genuinely compose rather than nest.")
     ap.add_argument("--no-truth-cache", action="store_true",
                     help="always re-render the truth detector image instead of reusing a "
                          "cached one from results/truth_cache/ (see geocarb_gert.truth_cache). "
@@ -873,9 +893,18 @@ def main() -> int:
                        surface_fields=surface_fields_resolved,
                        prior_anchor_density=args.prior_anchor_density,
                        flat_sy_inv=args.flat_sy_inv, vary_albedo=args.vary_albedo,
-                       row_sub_bin_anomaly=row_sub_bin_anomaly))
+                       row_sub_bin_anomaly=row_sub_bin_anomaly,
+                       anchor_workers=args.anchor_workers))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
+    if args.anchor_workers > 1 and n_workers > 1 and args.task_id is None:
+        print(f"  NOTE: --anchor-workers {args.anchor_workers} has no effect here -- "
+             f"windows are being distributed via an in-process Pool (--n-workers "
+             f"{n_workers}), whose daemon workers cannot themselves spawn a nested pool "
+             f"(build_forward_state's own daemon check forces anchor-level parallelism "
+             f"back to 1 there). Use --task-id/--n-tasks instead to distribute windows as "
+             f"separate top-level processes if you want both levels active at once.",
+             flush=True)
     print(f"solving with {n_workers} workers...", flush=True)
 
     t0 = time.time()
@@ -945,7 +974,8 @@ def main() -> int:
               "n_lookup_samples": n_lookup_samples,
               "prior_anchor_density": args.prior_anchor_density,
               "flat_sy_inv": args.flat_sy_inv, "overlap": args.overlap,
-              "vary_albedo": args.vary_albedo, "sub_bin_anomaly": args.sub_bin_anomaly}
+              "vary_albedo": args.vary_albedo, "sub_bin_anomaly": args.sub_bin_anomaly,
+              "anchor_workers": args.anchor_workers}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
         out_dir = REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{fpa}{suffix}_parts"

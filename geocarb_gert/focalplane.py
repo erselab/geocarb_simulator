@@ -316,6 +316,111 @@ def nearest_bin_scene(bin_centers: np.ndarray,
     return radiance
 
 
+def footprint_average_scene(bin_centers: np.ndarray, spectra: list,
+                            eta_range: tuple[float, float] | None = None) -> Callable:
+    """Generalizes :func:`nearest_bin_scene` from a POINT query to a
+    FOOTPRINT query -- a detector pixel does not sample the scene at one
+    η, it integrates over its own real along-slit extent, and every pixel
+    this function is meant for genuinely spans one or more anchor zones
+    (2026-09-02, user: real per-pixel sub-anchor integration, replacing
+    both `nearest_bin_scene`'s single-point evaluation and
+    `along_slit_scene.build_lookup_radiance`'s two-point spectral blend).
+
+    The underlying reconstruction of radiance(eta) is STILL the exact
+    same piecewise-CONSTANT step function `nearest_bin_scene` uses --
+    anchor ``i`` owns the zone halfway to each neighbor and holds ITS OWN
+    exact, never-interpolated spectrum there, full stop. What's new is
+    that a query is now a FOOTPRINT ``[eta_lo, eta_hi]``, not a point, and
+    the return value is the FOOTPRINT-AVERAGE of that step function --
+    i.e. the length-weighted mean of whichever zones the footprint
+    overlaps -- not an interpolated value. This is genuine numerical
+    quadrature of a function built entirely from real, exactly-computed
+    samples (never a fabricated value at an unsampled point), so it does
+    not reintroduce the "linear interpolation of spectra" pattern
+    `nearest_bin_scene`'s own docstring (and the user, 2026-09-02) rules
+    out -- a classic trapezoidal rule would, since it integrates a
+    piecewise-LINEAR reconstruction that DOES interpolate between anchor
+    values; this integrates a piecewise-CONSTANT one instead, so every
+    value contributing to any average is still exactly one anchor's own
+    RT output, unmodified.
+
+    Implementation: a step function's own integral is piecewise LINEAR
+    (constant slope = that zone's value on each zone), so the footprint
+    average ``(F(eta_hi) - F(eta_lo)) / (eta_hi - eta_lo)`` is computed
+    from one cumulative sum over zone widths (``F`` evaluated at any
+    interior point via one `searchsorted` + a partial-zone correction) --
+    O(n_query) with no per-pixel loop over anchors, not the O(n_query *
+    anchors_per_footprint) an explicit weighted sum would cost.
+
+    A footprint that starts or ends in the FIRST or LAST (semi-infinite)
+    zone is a genuine usage error -- it means the anchor grid does not
+    actually cover this query, silently falling back to whatever zone-0/
+    zone-(G-1) happens to hold would hide that. Pass `eta_range` (the
+    anchor grid's own true finite extent, e.g. the first/last anchor's
+    own position, or tighter) to get a clear `ValueError` instead of a
+    silent `inf`/`nan`.
+
+    Parameters
+    ----------
+    bin_centers : ndarray, shape (G,)
+        Sorted η anchor/bin centers (same convention as
+        `nearest_bin_scene` -- this is a drop-in generalization of it).
+    spectra : sequence of ndarray, length ``G``
+        Each entry the hi-res spectrum (shape ``(n_hires,)``) for that
+        anchor -- already an exact, independently-computed RT output.
+    eta_range : (float, float), optional
+        The finite η interval every real query footprint is expected to
+        fall inside (both edges). When given, `radiance` raises
+        `ValueError` on any query outside it rather than silently reading
+        semi-infinite edge-zone bookkeeping.
+    """
+    bin_centers = np.asarray(bin_centers, dtype=float)
+    spectra_arr = np.asarray(spectra, dtype=float)   # (G, n_hires)
+    G = len(bin_centers)
+    if G < 2:
+        raise ValueError("footprint_average_scene needs at least 2 anchors")
+    mid = 0.5 * (bin_centers[:-1] + bin_centers[1:])          # (G-1,) interior zone edges
+    z_lo = np.concatenate([[-np.inf], mid])                    # (G,) each zone's own left edge
+    widths = np.diff(np.concatenate([[bin_centers[0]], mid, [bin_centers[-1]]]))
+    # ^ NOT used for zones 0/G-1 (semi-infinite) -- only zones 1..G-2's
+    # own finite widths (mid[i]-mid[i-1]) feed the cumulative sum below;
+    # this array's own first/last entries are placeholders, never read.
+
+    # F0[i] = the cumulative integral from the grid's own first FINITE
+    # zone boundary (mid[0], i.e. zone 1's own left edge) up to zone i's
+    # own left edge -- so F0[0] and F0[1] are both 0 by construction
+    # (zone 0 has no finite left edge to integrate from; zone 1 IS the
+    # first finite zone, starting the running sum at 0).
+    F0 = np.zeros((G, spectra_arr.shape[1]))
+    if G > 2:
+        interior_widths = mid[1:] - mid[:-1]                    # zones 1..G-2's own finite widths
+        F0[2:] = np.cumsum(interior_widths[:, None] * spectra_arr[1:-1], axis=0)
+
+    lo_bound = float(eta_range[0]) if eta_range is not None else mid[0]
+    hi_bound = float(eta_range[1]) if eta_range is not None else mid[-1]
+
+    def _F(eta):
+        eta = np.asarray(eta, dtype=float)
+        if eta_range is not None and (np.any(eta < lo_bound - 1e-9) or np.any(eta > hi_bound + 1e-9)):
+            raise ValueError(f"footprint query outside the anchor grid's covered range "
+                             f"[{lo_bound}, {hi_bound}]: got eta in "
+                             f"[{eta.min()}, {eta.max()}]")
+        idx = np.clip(np.searchsorted(mid, eta), 1, G - 2 if G > 2 else 1)
+        return F0[idx] + spectra_arr[idx] * (eta - z_lo[idx])[..., None]
+
+    def radiance(eta_lo, eta_hi) -> np.ndarray:
+        """``(eta_lo, eta_hi) -> footprint-average spectrum``, any shape."""
+        eta_lo = np.asarray(eta_lo, dtype=float)
+        eta_hi = np.asarray(eta_hi, dtype=float)
+        width = (eta_hi - eta_lo)
+        if np.any(width <= 0):
+            raise ValueError("footprint_average_scene: eta_hi must be > eta_lo everywhere")
+        return (_F(eta_hi) - _F(eta_lo)) / width[..., None]
+
+    radiance.bin_centers = bin_centers
+    return radiance
+
+
 def gaussian_blur_rows(A: np.ndarray, fwhm_px: float) -> np.ndarray:
     """Blur ``A`` along axis 0 (rows) by a normalized Gaussian of FWHM ``fwhm_px``.
 

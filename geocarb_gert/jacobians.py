@@ -35,7 +35,7 @@ an ILS-weighted sum over its own anchor's spectrum
 direction through is not new machinery -- it is the same call with a closure
 returning `dS/dparam` instead of `S`:
 
-    dY/dx_k = predict_neighborhood(..., radiance=nearest_bin_scene(etas, dS_k))
+    dY/dx_k = predict_neighborhood(..., footprint=True, radiance=footprint_average_scene(etas, dS_k))
 
 with `dS_k[g] = (dS/dparam_r)[g] * W[g, k] * prior_r[k]`, where `W` is
 `StateSpec.interp_weights` (the state-space interpolation written as a
@@ -107,7 +107,7 @@ from __future__ import annotations
 import numpy as np
 
 from . import gd_render
-from .focalplane import nearest_bin_scene
+from .focalplane import footprint_average_scene
 from .joint_state import ParamSpec, StateSpec
 
 #: State row -> the `gert` molecule whose optical depth it scales. A row
@@ -326,21 +326,58 @@ def make_spectrum_jac(absco, wide_inst, geo, solar, albedo):
     return spectrum_jac
 
 
+_ANCHOR_SPECTRA_G: dict = {}
+
+
+def _anchor_spectra_one(g):
+    """Module-level (picklable, fork-inherited -- same pattern as
+    `joint_state._render_one_anchor`) so `anchor_spectra_and_derivs` can
+    run its per-anchor `spectrum_jac` calls in parallel. 2026-09-02
+    (user): "let's parallelize the linearize step as well" -- this is the
+    RT+derivative half of that; `linearize`'s own `L()` calls (the
+    detector-operator half, the other real cost driver at ~325ms/call
+    per this module's own docstring) are parallelized separately, below."""
+    G = _ANCHOR_SPECTRA_G
+    surf = G["surface_at_anchor"][g] if G["surface_at_anchor"] else None
+    s, d = G["spectrum_jac"](G["params_at_anchor"][g], G["rows_needed"], surf)
+    return g, np.asarray(s, dtype=float), d
+
+
 def anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
-                              surface_at_anchor=None):
+                              surface_at_anchor=None, n_workers: int = 1):
     """Run the forward model once per anchor, returning radiance and the
     hi-res derivative of each requested row.
 
     `spectrum_jac(params, rows, surface) -> (S, {row_name: dS/d(param)})` is
     supplied by the caller (see :func:`make_spectrum_jac`) so this module
     stays independent of how the band was configured.
+
+    `n_workers` (2026-09-02, user): anchors are independent RT calls --
+    ``1`` (default, unchanged) runs them sequentially; a daemon Pool
+    worker forces this back to 1 regardless (cannot nest pools), same
+    guard `joint_state.build_forward_state`/`render_at_anchors` use.
     """
-    S, dS = [], []
-    for g, p in enumerate(params_at_anchor):
-        surf = surface_at_anchor[g] if surface_at_anchor else None
-        s, d = spectrum_jac(p, rows_needed, surf)
-        S.append(np.asarray(s, dtype=float))
-        dS.append(d)
+    import multiprocessing as mp
+    n_anchor = len(params_at_anchor)
+    if mp.current_process().daemon:
+        n_workers = 1
+    if n_workers <= 1 or n_anchor < 8:
+        S, dS = [], []
+        for g, p in enumerate(params_at_anchor):
+            surf = surface_at_anchor[g] if surface_at_anchor else None
+            s, d = spectrum_jac(p, rows_needed, surf)
+            S.append(np.asarray(s, dtype=float))
+            dS.append(d)
+        return S, dS
+
+    _ANCHOR_SPECTRA_G.update(dict(spectrum_jac=spectrum_jac, params_at_anchor=params_at_anchor,
+                                  rows_needed=rows_needed, surface_at_anchor=surface_at_anchor))
+    S: list = [None] * n_anchor
+    dS: list = [None] * n_anchor
+    ctx = mp.get_context("fork")
+    with ctx.Pool(min(n_workers, n_anchor)) as pool:
+        for g, s, d in pool.imap_unordered(_anchor_spectra_one, range(n_anchor), chunksize=2):
+            S[g], dS[g] = s, d
     return S, dS
 
 
@@ -370,8 +407,30 @@ def _g_anomaly_sensitivity(p: ParamSpec, scene_etas, W, state_interp):
     return Wg_scene - W @ sba.Wg_at_centers
 
 
+_LINEARIZE_L_G: dict = {}
+
+
+def _L_worker(job):
+    """Module-level (picklable, fork-inherited) counterpart of
+    `linearize`'s own local `L(field)` closure -- the detector-operator
+    half of `linearize`'s cost, parallelized across every K/K_g column at
+    once (2026-09-02, user). `job` is `(dest, field)`; only `field`
+    varies per task (needs pickling to reach the worker -- real IPC cost,
+    but small next to `L`'s own ~325ms compute), the rest comes from
+    `_LINEARIZE_L_G` (set once, fork-inherited, unchanged per batch)."""
+    from . import gd_render
+    from .focalplane import footprint_average_scene
+    dest, field = job
+    G = _LINEARIZE_L_G
+    col = gd_render.predict_neighborhood(
+        G["fpa"], G["rows_win"], G["wn_hires"], footprint_average_scene(G["scene_etas"], field),
+        G["ils"], pad=G["pad"], footprint=True).ravel()
+    return dest, col
+
+
 def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
-              wn_hires, ils, x, pad: int = 4, state_interp: str = "linear"):
+              wn_hires, ils, x, pad: int = 4, state_interp: str = "linear",
+              n_workers: int = 1):
     """``(y, K, K_g)`` -- the predicted sub-image, its analytic Jacobian,
     and (only for rows with `sub_bin_anomaly.g_cov` set) the sensitivity
     of each anchor value to that row's `g` values.
@@ -419,28 +478,77 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
                       for g in range(scene_etas.size)]
     rows_needed = [p.name for p in free]
     S, dS = anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
-                                      surf_at_anchor)
+                                      surf_at_anchor, n_workers=n_workers)
 
     def L(field):
-        """The detector operator applied to a per-anchor hi-res field."""
+        """The detector operator applied to a per-anchor hi-res field.
+
+        2026-09-02 (user): matches `build_forward_state`'s own fix --
+        `footprint_average_scene` (per-pixel footprint integration, never
+        spectral interpolation) instead of `nearest_bin_scene` (a point
+        sample). This is still exactly the same LINEAR composition the
+        module docstring describes: `footprint_average_scene`'s own
+        zone-overlap weights are purely geometric (independent of the
+        `field` values), so pushing a derivative field `dS_k` through it
+        gives dY/dx_k correctly, the same way pushing S through it gives
+        y -- `nearest_bin_scene` was always the degenerate (single-anchor-
+        weight) special case of this, not a different operator. Before
+        this fix, `y`/`K` here diverged from `build_forward_state`'s own
+        `forward(x)` (used for the GN objective's acceptance checks),
+        confirmed directly: a window with a resid=0 prior (exactly
+        representable, see docs/PROJECT_STATUS.md) still showed
+        rms_resid=0.045 here -- a pure Jacobian-vs-forward-model
+        inconsistency, not a real residual.
+        """
         return gd_render.predict_neighborhood(
-            fpa, rows_win, wn_hires, nearest_bin_scene(scene_etas, field),
-            ils, pad=pad).ravel()
+            fpa, rows_win, wn_hires, footprint_average_scene(scene_etas, field),
+            ils, pad=pad, footprint=True).ravel()
 
     y = L(S)
     K = np.empty((y.size, spec.n_free))
     slices = spec.slices()
     K_g = {}   # row name -> (y.size, n_g_positions); empty unless a row declares
               # sub_bin_anomaly.g_cov (2026-08-28)
+
+    # Every K/K_g column is an independent L(field) call -- ~325ms each
+    # per this module's own docstring, the dominant per-iteration cost
+    # for a window with many free elements (2026-09-02, user: "let's
+    # parallelize the linearize step as well"). Collect every (dest,
+    # field) pair across ALL free rows first, so one pool spans the
+    # WHOLE batch (better load balancing than one pool per row), then
+    # scatter results back by destination.
+    import multiprocessing as mp
+    n_workers_eff = 1 if mp.current_process().daemon else n_workers
+    jobs: list = []          # (dest, field) -- dest is ("K", col_idx) or ("Kg", name, m)
+    dval_dg_by_name: dict = {}
     for p in free:
         W = spec.interp_weights(scene_etas, p.name, state_interp=state_interp)  # (n_scene, p.n)
         dS_row = np.asarray([d[p.name] for d in dS])     # (n_scene, n_hires)
         sl = slices[p.name]
         for k in range(p.n):
             # d(param at anchor g)/dx_k = W[g,k] * prior[k]   (kind="scale")
-            K[:, sl.start + k] = L(dS_row * (W[:, k] * p.prior[k])[:, None])
+            jobs.append((("K", sl.start + k), dS_row * (W[:, k] * p.prior[k])[:, None]))
         if p.sub_bin_anomaly is not None and p.sub_bin_anomaly.g_cov is not None:
             dval_dg = _g_anomaly_sensitivity(p, scene_etas, W, state_interp)
-            K_g[p.name] = np.stack([L(dS_row * dval_dg[:, m][:, None])
-                                    for m in range(dval_dg.shape[1])], axis=1)
+            dval_dg_by_name[p.name] = dval_dg
+            for m in range(dval_dg.shape[1]):
+                jobs.append((("Kg", p.name, m), dS_row * dval_dg[:, m][:, None]))
+
+    if n_workers_eff <= 1 or len(jobs) < 4:
+        results = [(dest, L(field)) for dest, field in jobs]
+    else:
+        _LINEARIZE_L_G.update(dict(fpa=fpa, rows_win=rows_win, wn_hires=wn_hires,
+                                   scene_etas=scene_etas, ils=ils, pad=pad))
+        ctx = mp.get_context("fork")
+        with ctx.Pool(min(n_workers_eff, len(jobs))) as pool:
+            results = pool.map(_L_worker, jobs, chunksize=1)
+
+    kg_stacks: dict = {name: [None] * dval_dg_by_name[name].shape[1] for name in dval_dg_by_name}
+    for dest, col in results:
+        if dest[0] == "K":
+            K[:, dest[1]] = col
+        else:
+            kg_stacks[dest[1]][dest[2]] = col
+    for name, cols in kg_stacks.items():
+        K_g[name] = np.stack(cols, axis=1)
     return y, K, K_g

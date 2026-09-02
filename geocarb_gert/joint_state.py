@@ -807,7 +807,9 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
                        step: float = 1e-3, max_iter: int = 15, tol: float = 1e-5,
                        label: str = "", verbose: bool = True, jacobian_fn=None,
                        return_cov: bool = False, return_avk: bool = False,
-                       g_cov: dict | None = None):
+                       g_cov: dict | None = None,
+                       lm_lambda0: float = 1e-3, lm_up: float = 10.0,
+                       lm_down: float = 10.0, lm_max_tries: int = 12):
     """Regularized Gauss-Newton over whatever :class:`StateSpec` says is free.
 
     The generic counterpart of `gd_joint_block_retrieve.gauss_newton_
@@ -892,6 +894,31 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     own columns (`g_positions` for that row); the two are only checked
     for shape agreement, not for what `g_positions` values they came from.
 
+    Levenberg-Marquardt damping (2026-09-02, investigate-g1-ad4-structural-
+    divergence branch, NOT yet on main): the plain undamped ``x = x + dx``
+    Newton step this used to take was verified (a live iteration trace on
+    a real near-degenerate co2_ppm/p_surface_hpa window) to NOT converge --
+    ``|dx|`` grew from 0.54 to 0.97 (scale units) over 15 iterations while
+    ``rms_resid`` stayed flat at ~0.224-0.226 after the first step, so the
+    reported "solution" was wherever `max_iter` happened to stop the walk,
+    not a real stationary point -- see docs/PROJECT_STATUS.md Sec.13. Each
+    outer iteration now solves the damped normal equations ``(A + lam *
+    diag(A)) dx = b`` and only ACCEPTS the step if it actually decreases
+    the full penalized objective ``J(x) = resid^T Sy_inv resid + (x-x_a)^T
+    Sa_inv (x-x_a)`` (evaluated via one cheap `forward(x_trial)` call, no
+    Jacobian needed for the trial) -- on acceptance `lam` shrinks by
+    `lm_down` (trusting the local quadratic model more); on rejection
+    `lam` grows by `lm_up` and the SAME `A`/`b` are retried with heavier
+    damping, up to `lm_max_tries`, without recomputing the Jacobian. If no
+    damping level improves `J` within `lm_max_tries`, the outer loop stops
+    (a genuine local stationary point, not a `max_iter` cutoff). `lam` is
+    NOT reset between outer iterations, so a well-behaved region lets it
+    keep shrinking toward 0 (recovering the original undamped behavior)
+    while a poorly-conditioned one keeps it large. `A`/`K` used for the
+    returned `S_ret`/`avk` are always the UNDAMPED values at the final
+    accepted point (`lam` only ever perturbs the trial step, never what's
+    returned as the posterior covariance).
+
     Return shape depends on which of `return_cov`/`return_avk`/`g_cov` are
     set: ``x`` (neither cov flag), ``(x, S_ret)`` (cov only, unchanged from
     before this parameter existed), ``(x, AVK)`` (avk only), ``(x, S_ret,
@@ -920,7 +947,15 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     Sa_inv = spec.Sa_inv()
     Sy_inv_diag = np.asarray(Sy_inv_diag, dtype=float)
 
+    def _objective(resid, x):
+        dxp = x - x_a
+        return float(np.sum(Sy_inv_diag * resid ** 2) + dxp @ Sa_inv @ dxp)
+
     K_g_dict: dict = {}
+    y0 = forward(x)
+    resid = y_true - y0
+    J_cur = _objective(resid, x)
+    lam = lm_lambda0
     for it in range(max_iter):
         if jacobian_fn is not None:
             y0, K, K_g_dict = jacobian_fn(x)
@@ -936,13 +971,76 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
         KtSyinv = K.T * Sy_inv_diag[None, :]
         A = KtSyinv @ K + Sa_inv
         b = KtSyinv @ resid - Sa_inv @ (x - x_a)
-        dx = np.linalg.solve(A, b)
-        x = x + dx
+        diagA = np.clip(np.diag(A), 1e-12, None)
+
+        # Cheap early exit (2026-09-02, user: "why was each window taking
+        # 1500-1700s"): the step at the SMALLEST (most trusting) damping
+        # is the one most likely to move meaningfully; if even that is
+        # already below `tol`, no larger lambda will find a bigger step
+        # (larger lambda only shrinks the step further), so the full
+        # lm_max_tries inner search -- each try costing one full
+        # `forward(x_trial)` re-render, the dominant per-iteration cost --
+        # is guaranteed wasted work chasing an already-converged point.
+        # This is exactly what happened when a jac.linearize/forward
+        # mismatch left a spurious, noise-level `b`: 12 full window
+        # re-renders were burned finding nothing, on every window, before
+        # this check existed. Checked via plain linalg.solve (cheap, no
+        # forward() call) at `lam` unchanged from the last iteration (not
+        # reset to `lm_lambda0`), so a genuinely well-behaved trajectory
+        # is unaffected -- this only short-circuits when the cheapest
+        # trial was ALREADY going to be tiny.
+        dx_cheap = np.linalg.solve(A + lam * np.diag(diagA), b)
+        if np.linalg.norm(dx_cheap) < tol:
+            if verbose:
+                print(f"  [{label}] iter {it}: |dx_cheap|={np.linalg.norm(dx_cheap):.3e} < tol "
+                     f"-- converged, skipping the {lm_max_tries}-try inner search "
+                     f"(no forward() calls spent)", flush=True)
+            break
+
+        accepted = False
+        dx = np.zeros(n)
+        for _try in range(lm_max_tries):
+            A_damped = A + lam * np.diag(diagA)
+            dx_trial = np.linalg.solve(A_damped, b)
+            x_trial = x + dx_trial
+            resid_trial = y_true - forward(x_trial)
+            J_trial = _objective(resid_trial, x_trial)
+            if J_trial < J_cur:
+                dx = dx_trial
+                x, resid, J_cur = x_trial, resid_trial, J_trial
+                lam = max(lam / lm_down, 1e-12)
+                accepted = True
+                break
+            lam *= lm_up
         if verbose:
             rms = float(np.sqrt(np.mean(resid ** 2)))
             print(f"  [{label}] iter {it}: |dx|={np.linalg.norm(dx):.3e} "
-                  f"rms_resid={rms:.4g}", flush=True)
+                  f"rms_resid={rms:.4g} J={J_cur:.6g} lam={lam:.3g} "
+                  f"accepted={accepted}", flush=True)
+        if not accepted:
+            # No damping level (up to lm_max_tries) improved the objective
+            # -- a genuine stationary point (or numerical floor), not a
+            # max_iter cutoff. K/A above are already the UNDAMPED values at
+            # this (unchanged) x, exactly what the post-loop return block
+            # below needs.
+            break
         if np.linalg.norm(dx) < tol:
+            # Recompute K/A undamped at the newly-accepted x for the
+            # returned covariance/AVK, mirroring what the pre-LM code did
+            # every iteration regardless of convergence.
+            if jacobian_fn is not None:
+                y0, K, K_g_dict = jacobian_fn(x)
+                resid = y_true - y0
+            else:
+                y0 = forward(x)
+                resid = y_true - y0
+                K = np.empty((y0.size, n))
+                for k in range(n):
+                    xp = x.copy()
+                    xp[k] += step
+                    K[:, k] = (forward(xp) - y0) / step
+            KtSyinv = K.T * Sy_inv_diag[None, :]
+            A = KtSyinv @ K + Sa_inv
             break
     if not (return_cov or return_avk):
         return x
@@ -973,8 +1071,159 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     return (x, avk) if s_g_total is None else (x, avk, s_g_total)
 
 
+_RENDER_AT_ANCHORS_G: dict = {}
+
+
+def _render_one_anchor(g):
+    """Module-level (picklable, and populated via `fork` copy-on-write --
+    same pattern `along_slit_scene._lookup_sample`/`_G_LOOKUP` already
+    uses) so `render_at_anchors`' per-anchor RT calls can run in a real
+    worker pool instead of a single-process Python loop. 2026-09-02
+    (user): fixed after `render_at_anchors` shipped single-threaded while
+    a 16-core interactive session sat mostly idle running it."""
+    G = _RENDER_AT_ANCHORS_G
+    names, surf_names = G["names"], G["surf_names"]
+    atm_p = {n: float(G["atm_params"][n][g]) for n in names}
+    if surf_names:
+        return g, G["spectrum"](atm_p, {n: float(G["surf_params"][n][g]) for n in surf_names})
+    return g, G["spectrum"](atm_p)
+
+
+def render_at_anchors(fpa, rows_win, anchor_etas, atm_params, surf_params,
+                      spectrum, wn_hires, ils, pad: int = 4, n_workers: int | None = None) -> np.ndarray:
+    """THE one shared forward model (2026-09-02, user: "the forward model
+    should be the same for generating any detector measured radiances") --
+    every caller that turns along-slit state into a detector sub-image,
+    truth generation included, goes through exactly this function. Given
+    the PHYSICAL STATE already evaluated at each anchor (the only thing
+    that ever differs between callers -- the retrieval's own state,
+    interpolated from its free/frozen positions via `StateSpec.interp_to`
+    for `build_forward_state` below; the raw continuous truth on a dense
+    uniform grid for a "highest-resolution truth" render; the SAME
+    resolution-matched fields the retrieval's own prior uses, on the
+    retrieval's own anchor grid, for a "representative truth" render that
+    the retrieval can reproduce exactly), it: (1) runs RT FRESH at every
+    anchor (no interpolation of spectra, ever), (2) integrates each
+    pixel's own real along-slit FOOTPRINT via
+    :func:`geocarb_gert.focalplane.footprint_average_scene` (no nearest-
+    point sampling, no spectral blend -- see that function's own
+    docstring for why this is genuine quadrature over real samples, not
+    interpolation).
+
+    Parameters
+    ----------
+    anchor_etas : ndarray, shape (n_anchor,)
+        η positions to run RT at. Need not be sorted (sorted internally,
+        along with `atm_params`/`surf_params`).
+    atm_params : dict[str, ndarray], each shape (n_anchor,)
+        Physical atmosphere-row values AT each anchor already -- e.g.
+        ``{"co2_ppm": array([...]), "p_surface_hpa": array([...]), ...}``,
+        keyed exactly as :data:`along_slit_scene.STATE_FIELDS`. No
+        interpolation happens in here; whatever the caller put in these
+        arrays is what reaches RT, unmodified.
+    surf_params : dict[str, ndarray], each shape (n_anchor,)
+        Surface-row values (typically just ``{"albedo": array([...])}``),
+        keyed as :data:`along_slit_scene.SURFACE_FIELDS`. Empty dict (not
+        None) when there is no surface row -- `spectrum` is then called
+        with one argument, matching `build_forward_state`'s own
+        convention.
+    spectrum : callable
+        ``spectrum(atm_p: dict, surf_p: dict) -> hi-res radiance`` for one
+        anchor's own physical state (typically
+        :func:`gd_joint_block_whole_slit_sweep._make_state_spectrum`'s
+        return value) -- called with one argument when `surf_params` is
+        empty, matching `build_forward_state`.
+    n_workers : int, optional
+        Anchors are embarrassingly parallel (each is an independent RT
+        run) -- ``None`` (default) uses every available CPU
+        (`gd_render.available_cpus()`, same convention `build_lookup_
+        radiance` used); ``1`` forces the old single-process loop
+        (useful inside an already-parallel caller, e.g. one worker per
+        WINDOW, to avoid nested pools). A daemon multiprocessing worker
+        can never itself spawn a pool (Python forbids it), so this is
+        silently forced to 1 there regardless of what's passed --
+        matching `build_lookup_radiance`'s own guard.
+
+    Returns
+    -------
+    ndarray, shape (len(rows_win), 1024)
+    """
+    import multiprocessing as mp
+    from . import gd_render
+    from .focalplane import footprint_average_scene
+
+    anchor_etas = np.asarray(anchor_etas, dtype=float)
+    order = np.argsort(anchor_etas)
+    anchor_etas = anchor_etas[order]
+    names = list(atm_params.keys())
+    surf_names = list(surf_params.keys())
+    n_anchor = anchor_etas.size
+
+    if n_workers is None:
+        n_workers = gd_render.available_cpus()
+    if mp.current_process().daemon:
+        n_workers = 1
+
+    cache_S = [None] * n_anchor
+    if n_workers <= 1:
+        for g in range(n_anchor):
+            atm_p = {n: float(np.asarray(atm_params[n])[order][g]) for n in names}
+            cache_S[g] = (spectrum(atm_p, {n: float(np.asarray(surf_params[n])[order][g]) for n in surf_names})
+                         if surf_names else spectrum(atm_p))
+    else:
+        _RENDER_AT_ANCHORS_G.update(dict(
+            names=names, surf_names=surf_names, spectrum=spectrum,
+            atm_params={n: np.asarray(atm_params[n])[order] for n in names},
+            surf_params={n: np.asarray(surf_params[n])[order] for n in surf_names}))
+        ctx = mp.get_context("fork")
+        with ctx.Pool(min(n_workers, n_anchor)) as pool:
+            for g, S in pool.imap_unordered(_render_one_anchor, range(n_anchor), chunksize=4):
+                cache_S[g] = S
+
+    # No eta_range check here (the strict-bounds version raises) -- this
+    # window's own padded render rows (predict_neighborhood's own `pad`
+    # rows beyond `rows_win`, for correct PSF-blur bleed) can fall up to
+    # half a row outside `anchor_etas`' own finite coverage when the
+    # caller's anchor-grid extension equals the render pad exactly. Those
+    # padded rows are discarded from predict_neighborhood's own return
+    # value, so a graceful clamp to the outermost anchor's own zone there
+    # (instead of raising) costs nothing real -- every RETURNED row's own
+    # footprint must be safely inside anchor_etas' coverage by construction
+    # (the caller's own PAD/extension margin >= this `pad`).
+    radiance = footprint_average_scene(anchor_etas, cache_S)
+    return gd_render.predict_neighborhood(fpa, rows_win, wn_hires, radiance,
+                                          ils, pad=pad, footprint=True)
+
+
+_BUILD_FORWARD_STATE_G: dict = {}
+
+
+def _render_one_missing_anchor(g):
+    """Module-level (picklable, fork-inherited -- same pattern as
+    `_render_one_anchor`/`along_slit_scene._lookup_sample`) so
+    `build_forward_state`'s own `forward()` can parallelize its
+    CACHE-MISS anchors across a pool instead of a single-process loop.
+    2026-09-02 (user): added after finding a single window's own
+    single-threaded forward() calls (each potentially hundreds of
+    anchors) were the actual cost driver behind 1500-1700s/window --
+    designed to activate cleanly when windows themselves are distributed
+    via SLURM job array (--task-id/--n-tasks, separate top-level
+    processes) rather than an in-process window-level Pool (whose daemon
+    workers cannot themselves spawn a nested pool -- this function's own
+    caller already checks `mp.current_process().daemon` before ever
+    creating a pool, so it safely no-ops back to the sequential loop
+    there instead of erroring)."""
+    G = _BUILD_FORWARD_STATE_G
+    names, surf_names, vals = G["names"], G["surf_names"], G["vals"]
+    atm_p = {n: float(vals[n][g]) for n in names}
+    if surf_names:
+        return g, G["spectrum"](atm_p, {n: float(vals[n][g]) for n in surf_names})
+    return g, G["spectrum"](atm_p)
+
+
 def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
-                        wn_hires, ils, pad: int = 4, state_interp: str = "linear"):
+                        wn_hires, ils, pad: int = 4, state_interp: str = "linear",
+                        n_workers: int | None = 1, min_parallel_anchors: int = 8):
     """``forward(x) -> raveled sub-image`` for a :class:`StateSpec`, on an
     arbitrary set of scene positions.
 
@@ -993,11 +1242,20 @@ def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
                ``nearest_bin_scene``'s docstring prescribes; no spectrum is
                ever blended with another.
 
-    Pixels are then assigned to scene positions by nearest
-    (``nearest_bin_scene``), unchanged. That hard assignment is the source of
-    the first-order ``~(1/4)|f'|h`` stepping error the residual is dominated
-    by, and it is a property of the SAMPLING, not of the state -- which is
-    why adding free parameters barely dents it while halving ``h`` does.
+    Each pixel's own real along-slit FOOTPRINT (η at row-0.5 and row+0.5, at
+    that pixel's own column -- keystone-correct, computed per (row, col) by
+    `gd_render.predict_neighborhood`'s own `footprint=True` path) is then
+    integrated via `focalplane.footprint_average_scene` (2026-09-02, user):
+    the length-weighted average of whichever anchor zones the footprint
+    overlaps, each zone still holding its OWN exact, never-interpolated RT
+    output -- genuine sub-pixel integration of real samples, not a point
+    evaluation (the previous `nearest_bin_scene`, which produced the
+    first-order ``~(1/4)|f'|h`` stepping error the residual used to be
+    dominated by -- a property of the SAMPLING, not the state) and not an
+    interpolated stand-in (a classic trapezoidal rule would integrate a
+    piecewise-LINEAR reconstruction, which DOES interpolate between anchor
+    spectra -- ruled out). See `footprint_average_scene`'s own docstring
+    for why this is real quadrature, not interpolation.
 
     Each scene position's spectrum is cached on that position's full
     parameter vector, so an iteration re-runs RT only where the state
@@ -1029,9 +1287,28 @@ def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
         second argument appears only when there is something to put in it, so
         every pre-2026-08-18 one-argument `spectrum` keeps working untouched
         rather than needing a signature change it has no use for.
+    n_workers : int, optional
+        Anchor-level parallelism for `forward()`'s own cache-miss RT calls
+        (2026-09-02, user). Default ``1`` (sequential, unchanged from
+        before this parameter existed) -- NOT `None`/all-CPUs like
+        `render_at_anchors`, because the common caller (`_solve_window`)
+        usually already runs inside a window-level Pool worker; pass an
+        explicit value > 1 only when windows are distributed some OTHER
+        way (e.g. one SLURM job-array task per window via --task-id/
+        --n-tasks) so this can safely use real anchor-level parallelism
+        without nesting. Forced to 1 regardless when the calling process
+        is itself a Pool worker (`mp.current_process().daemon`), since a
+        daemon process cannot spawn its own child pool.
+    min_parallel_anchors : int
+        Skip the pool entirely (however many workers are configured) when
+        fewer than this many anchors are actually cache-misses this call
+        -- Pool creation/teardown overhead isn't worth paying for a
+        handful of anchors.
     """
+    import multiprocessing as mp
     from . import gd_render
-    from .focalplane import nearest_bin_scene
+    from .focalplane import footprint_average_scene
+    from .gd_render import available_cpus
 
     scene_etas = np.asarray(scene_etas, dtype=float)
     order = np.argsort(scene_etas)
@@ -1047,17 +1324,47 @@ def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
     cache_key = np.full((n_scene, len(names) + len(surf_names)), np.nan)
     cache_S = [None] * n_scene
 
+    n_workers_eff = available_cpus() if n_workers is None else n_workers
+    if mp.current_process().daemon:
+        # A window-level Pool worker (--n-workers>1, in-process) cannot
+        # itself spawn a nested pool -- silently fall back to the
+        # sequential loop rather than erroring. Real two-level
+        # parallelism needs windows distributed as separate top-level
+        # processes instead (--task-id/--n-tasks), where this guard never
+        # fires.
+        n_workers_eff = 1
+
     def forward(x):
         vals = spec.interp_to(scene_etas, x, state_interp=state_interp)
         key = np.column_stack([vals[n] for n in names + surf_names])
-        for g in range(n_scene):
-            if cache_S[g] is None or not np.array_equal(key[g], cache_key[g]):
+        missing = [g for g in range(n_scene)
+                  if cache_S[g] is None or not np.array_equal(key[g], cache_key[g])]
+        if n_workers_eff <= 1 or len(missing) < min_parallel_anchors:
+            for g in missing:
                 atm_p = {n: float(vals[n][g]) for n in names}
                 cache_S[g] = (spectrum(atm_p, {n: float(vals[n][g]) for n in surf_names})
                               if surf_names else spectrum(atm_p))
                 cache_key[g] = key[g]
-        radiance = nearest_bin_scene(scene_etas, cache_S)
+        else:
+            _BUILD_FORWARD_STATE_G.update(dict(names=names, surf_names=surf_names,
+                                               vals=vals, spectrum=spectrum))
+            ctx = mp.get_context("fork")
+            with ctx.Pool(min(n_workers_eff, len(missing))) as pool:
+                for g, S in pool.imap_unordered(_render_one_missing_anchor, missing, chunksize=2):
+                    cache_S[g] = S
+                    cache_key[g] = key[g]
+        # No eta_range check here (the strict-bounds version raises) --
+        # this window's own padded render rows (predict_neighborhood's
+        # own `pad` rows beyond `rows_win`, for correct PSF-blur bleed)
+        # can fall up to half a row outside `scene_etas`' own finite
+        # coverage when the anchor-grid PAD equals the render pad exactly
+        # (today's default: both 4). Those padded rows are discarded from
+        # predict_neighborhood's own return value, so a graceful clamp to
+        # the outermost anchor's own zone there (instead of raising) costs
+        # nothing real -- every RETURNED row's own footprint is safely
+        # inside scene_etas' coverage by construction (PAD >= pad).
+        radiance = footprint_average_scene(scene_etas, cache_S)
         return gd_render.predict_neighborhood(fpa, rows_win, wn_hires, radiance,
-                                              ils, pad=pad).ravel()
+                                              ils, pad=pad, footprint=True).ravel()
 
     return forward
