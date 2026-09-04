@@ -1090,7 +1090,8 @@ def _render_one_anchor(g):
 
 
 def render_at_anchors(fpa, rows_win, anchor_etas, atm_params, surf_params,
-                      spectrum, wn_hires, ils, pad: int = 4, n_workers: int | None = None) -> np.ndarray:
+                      spectrum, wn_hires, ils, pad: int = 4, n_workers: int | None = None,
+                      return_spectra: bool = False):
     """THE one shared forward model (2026-09-02, user: "the forward model
     should be the same for generating any detector measured radiances") --
     every caller that turns along-slit state into a detector sub-image,
@@ -1146,7 +1147,11 @@ def render_at_anchors(fpa, rows_win, anchor_etas, atm_params, surf_params,
 
     Returns
     -------
-    ndarray, shape (len(rows_win), 1024)
+    ndarray, shape (len(rows_win), 1024) -- or, if ``return_spectra=True``,
+    ``(image, anchor_etas_sorted, spectra)`` so a caller can build its own
+    additional view onto the SAME anchor spectra (e.g. a point-query
+    radiance shim via `focalplane.footprint_average_scene` at a
+    near-zero-width footprint) without a second, redundant RT pass.
     """
     import multiprocessing as mp
     from . import gd_render
@@ -1191,8 +1196,16 @@ def render_at_anchors(fpa, rows_win, anchor_etas, atm_params, surf_params,
     # footprint must be safely inside anchor_etas' coverage by construction
     # (the caller's own PAD/extension margin >= this `pad`).
     radiance = footprint_average_scene(anchor_etas, cache_S)
-    return gd_render.predict_neighborhood(fpa, rows_win, wn_hires, radiance,
-                                          ils, pad=pad, footprint=True)
+    image = gd_render.predict_neighborhood(fpa, rows_win, wn_hires, radiance,
+                                           ils, pad=pad, footprint=True)
+    if return_spectra:
+        # `anchor_etas`/`cache_S` are already sorted (the `order` applied
+        # above) -- a caller reusing these (e.g. a point-query radiance
+        # shim built from the SAME anchor spectra, avoiding a second RT
+        # pass) gets them in that same sorted order, matching what
+        # `footprint_average_scene`/`nearest_bin_scene` themselves expect.
+        return image, anchor_etas, cache_S
+    return image
 
 
 _BUILD_FORWARD_STATE_G: dict = {}

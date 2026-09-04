@@ -140,13 +140,33 @@ _G = {}
 def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_samples: int,
                 n_workers, uniform: bool, barcode: bool, barcode_bars: int,
                 noise: bool, noise_seed: int, realistic_barcode: bool = False,
-                vary_albedo: bool = False, fields=None, surface_fields=None):
+                vary_albedo: bool = False, fields=None, surface_fields=None,
+                dx_km: float = 0.5):
     """Render one band's raw detector image plus everything needed for all
     three pipelines: `A` (native/rectified source), `wn_hires`/`radiance`
     (undistorted source, and the barcode/lookup truth), the nominal per-band
     `wn_grid` (rectified's wavelength axis), and per-row real `s`/`x_km`
     (pairing and truth-scoring). Same mechanism as gd_band_stress_test.py's
-    main(), just factored to run once per band here."""
+    main(), just factored to run once per band here.
+
+    2026-09-04 (user): every scene "mode" is now just a choice of
+    ``fields``/``surface_fields`` (`als.build_scene_fields` -- barcode
+    included, no longer a separate rendering code path), rendered through
+    ONE mechanism: anchors every `dx_km` across the whole slit, a fresh
+    RT run per anchor (`geocarb_gert.joint_state.render_at_anchors`), and
+    real per-pixel footprint integration
+    (`geocarb_gert.focalplane.footprint_average_scene`/
+    `gd_render.predict_neighborhood`'s own ``footprint=True``) -- never
+    the old two-sample spectral BLEND `als.build_lookup_radiance` used,
+    found this session to be the actual dominant source of the
+    representability-gap artifacts an entire investigation chased before
+    tracing it there. `--barcode`'s own numerical output changes as a
+    result (a real per-bar RT rerun instead of a linear-in-albedo gain on
+    one center spectrum) -- see `build_scene_fields`'s own docstring.
+    """
+    from geocarb_gert.joint_state import render_at_anchors
+    from geocarb_gert.focalplane import footprint_average_scene
+
     label, wn_min_nom, wn_max_nom, mols, R = GEOCARB_BANDS[fpa]
     mols = list(mols)
     wn_min, wn_max = real_wavenumber_range(fpa, margin_cm1=10.0)
@@ -157,49 +177,56 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
     wide_inst = Instrument(windows=[wide_win], snr=snr)
     albedo = float(albedo_for(wide_inst, "desert")[0])
 
-    if barcode:
-        from geocarb_gert.focalplane import barcode_scene
-        fm_center = ForwardModel(atm_center, absco, wide_inst, geo, solver=SingleScatterSolver(),
-                                 solar_spectrum=solar)
-        res_center = fm_center.run(albedo=np.array([albedo]), albedo_slope=[0.0])
-        S_center = np.asarray(res_center.I_hires[0], dtype=float)
-        brightness = np.resize([1.0, 0.2], barcode_bars)
-        radiance = barcode_scene(S_center, brightness=brightness, widths=None, softness=0.0)
-        wn_hires = wide_win.wn_hires
-    elif realistic_barcode:
-        # Realistic along-slit truth (genuine per-eta gas/pressure variation,
-        # same as the plain realistic scene) with a barcode brightness gain
-        # multiplied on top -- combines continuous state-vector variation
-        # with a sharp, high-spatial-frequency reflectance pattern, unlike
-        # plain --barcode above (which fixes the atmosphere at its center
-        # value and only varies brightness). Reuses barcode_scene's own
-        # eta->gain bar/boundary math by applying it to a unit "spectrum" (an
-        # all-ones array), which broadcasts one shared scalar gain across
-        # every hi-res bin; multiplying that gain elementwise onto the real
-        # per-eta radiance gives the desired "realistic scene x barcode" scene.
-        from geocarb_gert.focalplane import barcode_scene
-        wn_hires, radiance_real = als.build_lookup_radiance(
-            absco, wide_inst, geo, solar, np.array([albedo]),
-            n_samples=n_lookup_samples, n_workers=n_workers, uniform=False,
-            vary_albedo=vary_albedo, fields=fields, surface_fields=surface_fields)
-        brightness = np.resize([1.0, 0.2], barcode_bars)
-        gain_of_eta = barcode_scene(np.ones_like(wn_hires), brightness=brightness, widths=None, softness=0.0)
+    fields_resolved, surface_fields_resolved = als.build_scene_fields(
+        uniform=uniform, barcode=barcode, realistic_barcode=realistic_barcode,
+        vary_albedo=vary_albedo, barcode_bars=barcode_bars, band_labels=[label],
+        constant_albedo=albedo, fields=fields, surface_fields=surface_fields)
 
-        def radiance(eta, _gain=gain_of_eta, _real=radiance_real):
-            return _gain(eta) * _real(eta)
+    def spectrum(atm_p, surf_p=None):
+        atm = als.atmosphere_from_params(**atm_p)
+        fm = ForwardModel(atm, absco, wide_inst, geo, solver=SingleScatterSolver(),
+                          solar_spectrum=solar)
+        px_albedo = surf_p["albedo"] if surf_p else albedo
+        res = fm.run(albedo=np.array([px_albedo]), albedo_slope=np.zeros(1))
+        return np.asarray(res.I_hires[0], dtype=float)
+
+    # Whole-slit anchor grid, uniform `dx_km` spacing -- `uniform`/`barcode`
+    # collapse the ATMOSPHERE to one constant value via build_scene_fields
+    # already, so a fine anchor grid there just re-evaluates the same
+    # constant repeatedly (correct, just not the cost driver `barcode`'s own
+    # bar edges are -- see below).
+    n_anchor = max(2, int(round(2 * als.SLIT_HALF_KM / dx_km)) + 1)
+    anchor_x_km = np.linspace(-als.SLIT_HALF_KM, als.SLIT_HALF_KM, n_anchor)
+    anchor_etas = anchor_x_km / als.SLIT_HALF_KM
+
+    atm_names = list(fields_resolved.keys())
+    atm_params = {n: np.asarray(fields_resolved[n](anchor_x_km), dtype=float) for n in atm_names}
+    if surface_fields_resolved is not None:
+        surf_params = {"albedo": np.asarray(surface_fields_resolved[label](anchor_x_km), dtype=float)}
     else:
-        # vary_albedo=True makes surface albedo vary along the slit too
-        # (als.albedo_at: land-cover patches + fine-scale variability),
-        # instead of the single fixed `albedo` scalar above. Off by default,
-        # so pre-2026-08-17 runs reproduce exactly.
-        wn_hires, radiance = als.build_lookup_radiance(
-            absco, wide_inst, geo, solar, np.array([albedo]),
-            n_samples=n_lookup_samples, n_workers=n_workers, uniform=uniform,
-            vary_albedo=vary_albedo, fields=fields, surface_fields=surface_fields)
+        surf_params = {}
 
-    A = gd_render.image(fpa, wn_hires, radiance, wide_win.ils,
-                        spatial_psf_fwhm_px=_GEOCARB_CFG.focal_plane.measured.spatial_psf_fwhm_px,
-                        n_workers=n_workers)
+    rows_win = np.arange(1024)
+    A, anchor_etas_sorted, cache_S = render_at_anchors(
+        fpa, rows_win, anchor_etas, atm_params, surf_params, spectrum,
+        wide_win.wn_hires, wide_win.ils, n_workers=n_workers, return_spectra=True)
+    wn_hires = wide_win.wn_hires
+
+    # Point-query compatibility shim for `_undistorted_row` (this module's
+    # own "undistorted" pipeline, which needs radiance AT one eta -- not a
+    # footprint) and any other direct caller of `band["radiance"]`. Reuses
+    # the SAME anchor spectra `A` was built from (no second RT pass) --
+    # same step-function reconstruction `footprint_average_scene` uses,
+    # queried over a footprint too narrow to matter (never an interpolated
+    # stand-in -- see that function's own docstring) rather than a
+    # genuinely different, second radiance-construction path.
+    _fps = footprint_average_scene(anchor_etas_sorted, cache_S)
+    _eps = 1e-9
+
+    def radiance(eta):
+        eta = np.atleast_1d(np.asarray(eta, dtype=float))
+        return _fps(eta - _eps, eta + _eps)
+
     # LinearShotNoise, calibrated from real instrument-test data
     # (geocarb_gert.radiometry.RADIOMETRIC_SPEC_BY_FPA) rather than the
     # legacy flat FlatSNR(snr) floor: sigma now scales with each pixel's own
