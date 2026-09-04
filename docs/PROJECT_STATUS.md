@@ -1583,3 +1583,455 @@ One minor, unrelated artifact found and confirmed harmless along the way:
 windows' own boundary bins extremely close together at a shared physical
 seam (minimum observed: 0.43m, not an exact duplicate -- `x_km` stays
 strictly increasing, `np.interp` is unaffected).
+
+## 13. Footprint-integrated forward model, parallelism, and retiring spectral-blend truth (2026-09-01/04)
+
+Work in this section predates Sec.14 chronologically and set up the tools
+Sec.14 relies on (Mode-2 truth, the averaging kernel, LM convergence).
+Partially committed: `investigate-g1-ad4-structural-divergence` branch,
+commit `7daecec` (`footprint_average_scene`, `predict_neighborhood`'s
+`footprint=` param, `gd_build_resolution_matched_truth.py`, the
+`--anchor-workers` CLI flag, and the first pass of anchor-level
+parallelism). The Jacobian-consistency fix (13.2), further LM refinement,
+`build_scene_fields` (13.7), the `_band_setup` migration (13.8), and the
+plot-script rewrite (13.6) were done afterward and are still uncommitted
+as of this writing.
+
+### 13.1 Motivation: spectral blending, not a genuine effect, was the dominant source of representability-gap artifacts
+
+Every truth image before this point (`als.build_lookup_radiance`, used by
+`gd_test._band_setup`/`_band_setup_cached` and hence every prior sweep in
+Sec.7-12) rendered a detector pixel by taking exactly TWO nearby
+precomputed spectra (`nearest_bin_scene`) and linearly blending them --
+never a real sub-pixel footprint integral over genuinely-sampled RT
+output. Confirmed this session to be the actual dominant source of the
+representability-gap artifacts Sec.12's whole investigation chased before
+tracing it here (Sec.12.7 found and fixed the anchor-vs-bin-grid mismatch,
+a real, separate, and smaller effect layered on top of this one). Fix:
+replace the two-sample blend with real per-pixel footprint integration of
+exact, never-interpolated RT samples end to end.
+
+### 13.2 The new mechanism: `footprint_average_scene` + `render_at_anchors`
+
+`geocarb_gert.focalplane.footprint_average_scene(bin_centers, spectra,
+eta_range=None)`: generalizes `nearest_bin_scene` from a point query to a
+footprint query (`radiance(eta_lo, eta_hi)`), via a zone-overlap-weighted
+average using a cumulative-integral trick -- `O(n_query)`, no per-pixel
+anchor loop. Verified against brute force to `1e-14`. Genuine quadrature
+over real samples, never spectral interpolation.
+
+`gd_render.predict_neighborhood(..., footprint: bool = False)`: when
+`True`, computes per-`(row,col)` footprint edges (eta at row +/- 0.5,
+keystone-correct) instead of a single point eta.
+
+`geocarb_gert.joint_state.render_at_anchors(fpa, rows_win, anchor_etas,
+atm_params, surf_params, spectrum, wn_hires, ils, pad=4, n_workers=None,
+return_spectra=False)`: the shared no-caching forward-model core now used
+by both truth rendering and (via `build_forward_state`) the retrieval
+itself -- fresh RT per anchor (parallelizable, 13.4), footprint-integrated
+into pixels. `return_spectra=True` (added 13.8, to fix a real duplicate-
+RT-computation bug there) returns `(image, anchor_etas_sorted, spectra)`
+instead of just `image`, so a caller can reuse the same anchor spectra
+elsewhere without a second RT pass.
+
+**A real forward-model inconsistency found and fixed along the way**:
+`jacobians.py::linearize`/`anchor_spectra_and_derivs` were still using
+`nearest_bin_scene` while `build_forward_state` had already switched to
+`footprint_average_scene` -- a genuine ~0.045 rms disagreement between the
+Jacobian used to take a GN step and the forward model used to score it.
+Both now use `footprint_average_scene` identically.
+
+### 13.3 Levenberg-Marquardt damping and an early-exit fix in `gauss_newton_state`
+
+Found a real GN non-convergence bug via live iteration traces: undamped
+Gauss-Newton steps could increase the penalized objective and the solver
+had no mechanism to reject them. Fixed with LM damping (a damped step is
+accepted only if it decreases the full penalized objective) plus an
+early-exit check (`dx_cheap` evaluated at the current `lam`, before
+entering the expensive inner-try loop) so an already-converged point
+doesn't waste `lm_max_tries` forward() calls chasing itself.
+
+### 13.4 Anchor-level and two-level (SLURM array x anchor-workers) parallelism
+
+`render_at_anchors` was single-threaded even though each anchor's RT run
+is embarrassingly parallel. Added real anchor-level parallelism (module-
+level global-dict + fork-based `multiprocessing.Pool`, guarded by
+`mp.current_process().daemon` checks to avoid nested-pool errors) to:
+`render_at_anchors` itself, `build_forward_state` (new `n_workers`/
+`min_parallel_anchors` params, default `n_workers=1` since callers
+usually already run inside a window-level pool), and
+`jacobians.py::linearize`/`anchor_spectra_and_derivs`/the `L()` detector-
+operator loop. Verified bit-identical to the serial path, with real
+speedups: `linearize()` 5.28x on a 513-anchor window, `build_forward_state`
+3.2x on the same.
+
+New `--anchor-workers` CLI flag on `gd_joint_block_whole_slit_sweep.py`,
+threaded to `build_forward_state`/`jac.linearize`'s own `n_workers`. Two
+DIFFERENT parallelism axes interact: an in-process window-level Pool
+(`--n-workers`, workers ARE daemons, so nested pools are forced back to
+`n_workers=1` there -- an explicit console NOTE fires when both are set)
+vs. SLURM array tasks (`--task-id`/`--n-tasks`, top-level processes, NOT
+daemons, so `--anchor-workers` genuinely stacks on top) -- confirmed the
+cluster wasn't node-limited (269 idle CPUs) before relaunching production
+sweeps as 58-task-per-window job arrays with real two-level parallelism.
+
+### 13.5 Mode 1 (dense) and Mode 2 (representative) whole-slit truth
+
+`scripts/gd_build_resolution_matched_truth.py`:
+- **Mode 1, "dense"** (`render_dense_truth_window`): anchors every `dx_km`
+  (default 500m) uniformly across a window's own PAD-extended range,
+  sampling the full continuous `STATE_FIELDS`/`SURFACE_FIELDS` -- the best
+  affordable approximation to ground truth, not exactly representable by
+  any retrieval's own bin grid.
+- **Mode 2, "representative"** (`render_representative_truth_window`):
+  literally reuses `state_spec_from_scene` + `build_forward_state` (the
+  retrieval's OWN machinery) with the state fixed at `resolution_matched_
+  fields(bin_centers)`'s own prior (exact at every bin center) and
+  evaluates `forward(x0())` -- the SAME code path the retrieval calls
+  every GN iteration, at the prior. Representability is therefore zero BY
+  CONSTRUCTION (same function, same inputs), not by two independently-
+  written pipelines happening to agree closely. This is what Sec.14 scores
+  every imperfect-prior result against, so any residual error there is
+  retrieval/prior error, never truth the model couldn't have represented.
+
+`build_whole_slit_truth(fpa, mode, ..., overlap=0, stitch=True,
+n_workers=None)`: stitches windows into one `(1024,1024)` array
+(`stitch=True`, `overlap=0` only -- disjoint tiling required for
+unambiguous stitching) or returns a per-window `{(row_lo,row_hi):
+sub_image}` dict (`stitch=False`, any overlap, for debugging without
+resolving the cross-window stitching-conflict question at `overlap>0`).
+
+### 13.6 The plot script's own truth-reference bug: keystone-induced eta-interleaving, and its fix
+
+Found while investigating a frozen-row/plot-vs-truth mismatch that turned
+out NOT to be a retrieval bug: even at `overlap=0` (row-DISJOINT window
+tiling), windows are NOT eta-disjoint, because eta depends on column too
+-- a neighboring window's bin center can fall inside another window's own
+eta span (the same keystone effect Sec.14.4 later uses to explain the
+water-region smearing). `gd_joint_block_whole_slit_plot.py`'s old whole-
+slit-union truth reference did along-slit interpolation across that union
+grid, which made it subtly wrong at non-bin-center rows near window edges
+-- a SCORING bug, not a retrieval one.
+
+Fixed by eliminating along-slit interpolation entirely (per user
+direction) rather than patching the union-grid construction: truth is now
+evaluated exactly at each state's own bin-center positions (`_truth_fn_
+for` -- `raw` and `bin` modes are now identical there, by definition of
+bin-mode truth's exactness; `anchor` mode still needs `resolution_matched_
+fields`/`whole_slit_anchor_etas`, since that truth is one coherent whole-
+slit function with no per-window locality issue). Each window is plotted
+as its own disconnected `-o` segment, with grey dashed vertical lines at
+window boundaries. Eta -> row conversion is used for x-axis PLACEMENT
+only (nearest-neighbor lookup), never for value reconstruction.
+
+### 13.7 Scene-parameter unification: `build_scene_fields`
+
+User direction: "Barcode and realistic barcode are just different sets of
+scene parameters" -- shift every scene-mode definition to one place before
+touching how they're rendered. `along_slit_scene.build_scene_fields
+(uniform, barcode, realistic_barcode, vary_albedo, barcode_bars,
+band_labels, constant_albedo, fields=None, surface_fields=None)` unifies
+all 4 scene "modes" into one `{name: fn(x_km)}`/`{band_label: fn(x_km)}`
+factory (matching `build_lookup_radiance`'s own convention, not `state_
+spec_from_scene`'s `{"albedo": fn(x_km, label)}`).
+
+**A real, deliberate physics change**: barcode's own bar pattern is now
+expressed as a real `surface_fields["albedo"]` step function (sharp edges
+via `eta > boundary`, matching `barcode_scene`'s own softness=0 default)
+rather than a post-hoc linear gain multiplied onto one center spectrum --
+a genuine per-bar RT rerun instead of a linear-in-albedo approximation.
+Confirmed intentional with the user before implementing. Verified via
+smoke test across all 6 modes (plain realistic, uniform, barcode,
+realistic_barcode with/without vary_albedo, vary_albedo-only, explicit-
+override passthrough), including a direct `real_albedo x bar_gain` math
+check.
+
+### 13.8 `_band_setup` migrated off `build_lookup_radiance`
+
+`scripts/gd_test.py::_band_setup` rewritten to use `build_scene_fields` +
+`render_at_anchors` + `footprint_average_scene` instead of `als.build_
+lookup_radiance`/`gd_render.image` -- the same footprint-integrated
+mechanism now used everywhere else, closing the loop on 13.1. New `dx_km`
+parameter (default 0.5, whole-slit anchor spacing); `n_lookup_samples` is
+now an unused-but-harmless parameter kept for `_band_setup_cached`'s
+existing positional call signature/cache-key back-compat.
+
+Caught and fixed a real bug in the migration itself: an early draft
+called `render_at_anchors` for the image, then separately recomputed the
+same anchor spectra a second time for the point-query `radiance` shim
+(`_undistorted_row`'s own compatibility need) -- a real 2x RT cost
+regression. Fixed by adding `render_at_anchors`'s `return_spectra=True`
+(13.2) and reusing `(A, anchor_etas_sorted, cache_S)` for both.
+
+Verified end-to-end (not just `py_compile`): `_band_setup(fpa=2,
+barcode=True, barcode_bars=4, dx_km=20.0, n_workers=8)` returns a sane
+`(1024,1024)` image (range 0.03-12.1) and a working point-query
+`radiance()` shim, in ~208s. `_band_setup_cached`'s existing positional
+call to `_band_setup` is unaffected (the new `dx_km` param simply keeps
+its default, appended after every existing positional argument).
+
+`build_lookup_radiance`/`gd_render.image` are no longer called anywhere
+in `gd_test.py` (confirmed via grep) -- left in place in `along_slit_
+scene.py`/`gd_render.py` themselves in case another caller still needs
+them; not removed, since that wasn't requested.
+
+### 13.9 Truth-cache and repository cleanup
+
+`geocarb_gert.truth_cache` (hash-keyed, `cache_key(**fields)` -> SHA-256
+-> `f"{key}.pkl"`) had 13 entries, ALL of them rendered via `build_lookup_
+radiance`'s spectral blending (confirmed: `build_lookup_radiance` is the
+ONLY thing that ever wrote to this cache) -- deleted entirely per 13.1;
+every result that ever consumed one of these cached renders is unusable
+as of this cleanup. `results/truth_cache/MANIFEST.md` records the
+historical hash -> config mapping for anything that needs to be
+reproduced/audited later. Renaming cache files to something descriptive
+was considered and rejected -- it would silently break the hash-based
+lookup (a cache miss, not an error) -- the manifest exists instead.
+
+Directory reorganization (`plots/joint_block/`, `results/`): superseded
+plot files (18) deleted, 128 diagnostic-run files moved to `diagnostics_
+archive/`; 22 legacy top-level result pkls + a stale `multi_block_fd_
+rerun_candidates/` dir deleted; 106 other top-level pkls moved to
+`results/archive/`; `_parts/` directories with a merged equivalent
+elsewhere deleted (3 large ones, 4 single-file smoke-test ones, and a
+59-file legacy-schema `gratio1_parts/` with only partial recoverable
+assumptions); `resolution_matched_v1/results/` organized into `mode2_
+representative_truth/`, `mode1_dense_truth/`, and `superseded_pre_
+footprint_fix/` (14 files predating 13.1's fix, kept but clearly
+separated rather than deleted, since they were real production results
+under the old, since-superseded mechanism).
+
+## 14. Isolating the source of large bin-center errors under an imperfect prior (2026-09-04)
+
+Sec.12 closed the representability-gap confound with an EXACT prior. The
+open question this section answers: with the prior deliberately imperfect
+again (`--prior-fields structural`, free = `co2_ppm,p_surface_hpa,albedo`),
+against a Mode-2 representative truth (Sec.11-era `render_representative_
+truth_window`/`build_whole_slit_truth`, representability = 0 by
+construction at the retrieval's own bin/anchor grid) -- why are the
+resulting bin-center errors still large, and how much of that is
+reducible?
+
+Config for everything in this section unless noted: `g_ratio=1`,
+`anchor_density=4` (switched down from the earlier `ad16` mid-session for
+speed -- required a FRESH Mode-2 truth build, `scratch_work/
+whole_slit_truth_ad4.pkl`, since representability is defined relative to a
+specific anchor_density; an `ad16` truth is not exactly representable at
+`ad4` bin/anchor spacing). Two whole-slit (58-window) runs:
+- `results/realistic_prior/config_matrix/resolution_matched_v1/results/
+  mode2_representative_truth/co2p_albedo-58-g1-ad4-pf-structural-
+  MODE2TRUTH_analytic.pkl` -- baseline, structural prior on every row
+  (free and frozen alike).
+- `..._frozenexact-MODE2TRUTH_analytic.pkl` -- ablation (14.1 below): same
+  in every other respect, but the three FROZEN atmosphere rows
+  (`ch4_ppb`, `co_ppb`, `h2o_surface_vmr`) fixed at exact truth instead of
+  the structural prior. Driver scripts: `scratch_work/retrieval_vs_
+  mode2_truth_{structural,frozen_exact}_array_ad4.py` (job arrays
+  1852938/1852939, 8 of 58 wide windows re-run at `--time=02:00:00` after
+  timing out at the original 45min budget: 1854008/1854009). Merged with
+  `scripts/gd_joint_block_whole_slit_merge.py` (its 7-key metadata
+  whitelist drops `prior_fields` -- patched back into both merged pickles
+  directly afterward so the plot script's prior-overlay line renders
+  correctly; the merge script itself untouched). Plots: `plots/joint_block/
+  co2p_albedo-58-g1-ad4-pf-{structural,frozenexact}-MODE2TRUTH_
+  analytic.png`.
+
+### 14.1 Ablation: frozen-row contamination — ruled out completely
+
+Hypothesis (from the session's own earlier concern: "the frozen variables
+were taken from the structural prior -- this will make it impossible to
+converge properly"): maybe the large errors trace to the FROZEN rows'
+imperfect prior contaminating the fit, not a genuine problem with the
+free rows themselves.
+
+Result: the three free rows' retrieved values (`co2_ppm`, `p_surface_hpa`,
+`albedo`) are **bit-identical** between the two runs, everywhere, across
+all 58 windows (`max|diff| = 0.0` exactly, to float precision). Verified
+this wasn't a wiring no-op: the frozen row itself (`ch4_ppb`) really does
+differ substantially between the two configs (rms diff ~12 ppb, max ~45
+ppb -- matching the CH4 hotspot amplitude), so the ablation's prior swap
+took effect; it just has zero downstream effect on the free-row solution.
+
+Both configs converge to a near-zero residual (`resid_hires_rms` ~1e-5,
+essentially at optimizer tolerance) while still landing far from truth
+(`co2_ppm` rms error 0.191 ppm, max 2.263 ppm) and far from ITS OWN prior
+(moved rms 1.29 ppm to get there) -- a real, converged fit, not a
+no-op. **Interpretation**: at `g_ratio=1`/`ad4` with 3 free rows, the
+system is close to exactly-determined -- GN finds a genuine near-zero-
+residual solution regardless of what the frozen rows assume, because the
+free parameters have enough capacity to fully absorb whatever the
+frozen-row mismatch does to the radiance. Where in that near-null-space
+the solve lands (and hence its bias against truth) is decided entirely by
+the free rows' own prior/spatial-regularization pull, not by frozen-row
+error. This rules out frozen-row contamination and points at a genuine
+free-parameter degeneracy resolved by the correlation-length prior rather
+than by data content -- confirming the mechanism the user's own message
+originally floated, rather than merely suspecting it.
+
+### 14.2 Averaging-kernel diagnostic: prior-pull explains most of it, unevenly by row
+
+`gauss_newton_state`'s `avk` (Rodgers averaging kernel, already saved per
+window, Sec.7.10's "not yet wired into production" tooling) was pulled
+directly from the structural-baseline pkl -- no new run needed.
+
+| row | mean diag(A) | frac bins diag(A)<0.9 | corr(1-diag(A), \|error\|) | RMS\|err\|, worst vs. best diag(A) tercile |
+|---|---|---|---|---|
+| co2_ppm | 0.992 | 0.9% | 0.34 | 0.328 vs 0.013 ppm (25x) |
+| p_surface_hpa | 0.843 | **70%** | 0.41 | 0.022 vs 0.008 hPa (2.7x) |
+| albedo | 0.998 | 0.1% | **0.997** | 0.00023 vs 0.0000064 (37x) |
+
+Overall DOF-for-signal is high (mean 50/53 ~= 0.94 of free capacity is
+genuinely data-constrained), but that average hides real structure:
+- **Albedo's error is almost entirely explained by prior-domination**
+  (corr 0.997, essentially deterministic) -- wherever the averaging
+  kernel collapses (a handful of bins per window, scattered through the
+  interior, NOT concentrated at window edges -- checked directly, only
+  1.7% of per-window worst-diag(A) bins fall in the outer 10% of a
+  window), the fit leans on its own imperfect (structural) prior and
+  that's exactly where the error is large.
+- **CO2 shows the same mechanism only partially** (corr 0.34) -- real,
+  but with enough scatter that something else also contributes (14.3/14.4
+  below).
+- **p_surface_hpa is prior-dominated most of the time** (70% of bins
+  below diag(A)=0.9) but stays low-error in absolute terms, because its
+  structural prior keeps the topographic "mountain" term exactly and only
+  drops the synoptic sinusoid -- prior-domination there is frequent but
+  mostly harmless.
+
+### 14.3 A near-zero-albedo (water) region drives most of the worst CO2 error -- and it is NOT a prior-pull effect there
+
+Visual inspection of the plots (13's plot files, `--truth-image
+scratch_work/whole_slit_truth_ad4.pkl` panel added per 14.5's own tooling
+note) showed the worst CO2/p_surface performance concentrated in one
+region with near-zero albedo (water). Quantified via the new continuum-
+SNR-vs-row panel (`gd_joint_block_whole_slit_plot.py --truth-image`,
+14.5): continuum = each row's own brightest/least-absorbed column,
+`sigma` from the real per-band `geocarb_noise_model` (`LinearShotNoise`).
+Splitting all 1024 bins at continuum SNR > 100:
+
+| row | SNR>100 (992 bins) | SNR<=100 (32 bins, water) | ALL (1024) |
+|---|---|---|---|
+| co2_ppm rms / max\|err\| | 0.108 / 1.74 ppm | 0.899 / 2.26 ppm | 0.191 / 2.26 ppm |
+| p_surface_hpa rms / max\|err\| | 0.0152 / 0.159 hPa | 0.0461 / 0.0948 hPa | 0.0171 / 0.159 hPa |
+| albedo rms / max\|err\| | 0.000138 / 0.00431 | 0.0000176 / 0.0000430 | 0.000135 / 0.00431 |
+
+The SNR<=100 set is a single **contiguous 32-row block (rows 686-717,
+3.1% of the slit)**, mean true albedo ~0.015 (water). Identical between
+the structural baseline and the frozen-exact ablation (14.1).
+
+Adding the PRIOR error (not just posterior) to the same split is what
+actually explains the mechanism, and it differs by row:
+
+| row | subset | post rms | prior rms | prior mean |
+|---|---|---|---|---|
+| co2_ppm | SNR<=100 (water) | 0.899 | **0.0 (exact)** | 0 |
+| co2_ppm | SNR>100 | 0.108 | 1.299 | -0.418 |
+| p_surface_hpa | SNR<=100 (water) | 0.0461 | 2.995 | **-2.995** (worst-case) |
+| p_surface_hpa | SNR>100 | 0.0152 | 2.099 | +0.074 |
+| albedo | SNR<=100 (water) | 0.0000176 | 0.00134 | -0.000023 |
+| albedo | SNR>100 | 0.000138 | 0.0265 | -0.000497 |
+
+**CO2 and p_surface are degraded in the water region for two DIFFERENT
+reasons, not one "low SNR" story**:
+- CO2's structural prior is *exactly correct* in the water region (rms
+  error = 0.0 -- that stretch is far from the CO2 hotspot/plume, so
+  there is nothing localized for the structural prior to be missing).
+  Yet the POSTERIOR is worse there (0.899 vs 0.108 rms) than anywhere
+  else on the slit -- a good prior getting pulled AWAY from truth. Most
+  likely mechanism: low albedo starves the CO2 Jacobian of sensitivity,
+  so the near-null-space fit (14.1) resolves in a direction that trades
+  away CO2 accuracy specifically where the retrieval has the least
+  independent leverage to pin it down -- an information-starvation /
+  ill-conditioning effect, not prior-pull.
+- p_surface's structural prior is at its WORST in the water region (rms
+  2.995 hPa, mean essentially exactly -3.0 hPa -- the full dropped-
+  sinusoid amplitude, i.e. this stretch sits near the sinusoid's trough).
+  The posterior still corrects most of it (down to 0.046 hPa, a 65x
+  reduction) -- a good correction despite low SNR, just not as tight as
+  the 0.015 hPa achieved elsewhere. This IS closer to ordinary prior-pull
+  behavior, just starting from a much larger prior error.
+- Albedo's own error is smaller in absolute terms in the water region for
+  both prior and posterior, simply because a near-zero true value has
+  little room to be wrong about.
+
+### 14.4 Keystone smearing extends the water region's damage into neighboring high-SNR rows
+
+Among the SNR>100 bins, the worst CO2 errors are NOT randomly
+distributed -- the three exceeding 1.0 ppm (rows 718, 719, 721; the next-
+worst rows 720, 722-728 decay smoothly from there) sit immediately
+adjacent to the water region's edge (row 717), not scattered elsewhere on
+the slit. Window tiling was checked and ruled out as a competing
+explanation: this stretch (rows 701-733) is one continuous window, and
+the bad rows sit well inside it, not at its boundary.
+
+The mechanism is keystone, confirmed by direct calculation: `_eta_of`
+evaluated across all 1024 spectral columns at a FIXED detector row shows
+each row's own spectral samples span ~20 km along the slit (not a single
+point) -- e.g. at row 719, columns 0 and 1023 correspond to along-slit
+positions 20.1 km apart. Comparing each row's keystone-shifted footprint
+against the water region's boundary (x_km <= 530.5, i.e. row 717):
+
+| row | center x_km | nearest-edge x_km (keystone-shifted) | overlaps water? | CO2 error |
+|---|---|---|---|---|
+| 718 | 533.2 | 522.4 | yes | -1.20 |
+| 719 | 535.9 | 525.1 | yes | **+1.74 (worst)** |
+| 721 | 541.3 | 530.4 | yes, barely | -1.42 |
+| 722 | 544.0 | 533.1 | **no** | +0.90 |
+| 723-728 | -- | -- | no | decaying smoothly to ~0.2 |
+
+Rows 718-721 are exactly the rows whose keystone-shifted spectral
+footprint STILL physically overlaps the water region; row 722 is the
+first row whose full column range clears the water boundary, and that is
+precisely where the error drops sharply and then decays smoothly outward
+as the overlapping fraction of columns shrinks toward zero (out to ~10
+rows total, consistent with the ~20km keystone spread against the local
+~2.7km/row bin spacing there). So this is not a "high-SNR bad CO2"
+anomaly independent of the water region -- it IS the water region's
+effect, reaching a few rows further than its own nominal boundary via
+keystone. The row-based SNR>100/<=100 split in 14.3 therefore understates
+the water region's true footprint of damage.
+
+### 14.5 New tooling: continuum-SNR-vs-row panel
+
+`scripts/gd_joint_block_whole_slit_plot.py` gained an optional
+`--truth-image PATH` flag (off by default -- the sweep's own output
+pickle never carries the rendered detector image, only derived state/
+residual quantities, so this needs the actual truth image the run's
+`y_true` came from, e.g. `scratch_work/whole_slit_truth_ad4.pkl`). When
+given, adds a bottom panel: continuum SNR vs. detector row (== eta,
+monotonically -- the same x-axis every other panel already uses),
+log-scale, with the same window-boundary lines as the rest of the
+figure. Continuum per row = that row's own brightest (least line-
+absorbed) column -- an honest, deterministic proxy given these are
+noise-free synthetic truth images; a real per-pixel-noise image would
+need a true continuum-region mask instead of a raw max. `sigma` from the
+real per-band `geocarb_noise_model`/`LinearShotNoise` calibration, the
+same one the retrievals themselves weight by.
+
+### 14.6 Net conclusion
+
+Combining 14.1-14.4: the large bin-center errors under an imperfect
+prior are **not** explained by frozen-row contamination (ruled out
+completely, bit-identical either way) or by a classical representability
+gap (the Mode-2 truth is exactly representable by construction). They
+are explained by a combination of (a) genuine prior-pull in poorly-
+constrained directions of the free-row fit itself -- dominant for
+albedo, partial for CO2, mostly harmless for p_surface because its
+structural prior stays close to truth even at its worst -- and (b) a
+near-zero-albedo (water) region that degrades CO2 for a DIFFERENT reason
+(information starvation pulling an already-exact prior away from truth,
+not prior-pull), degrades p_surface by starting from an unusually bad
+prior there, and whose damage reaches several rows beyond its own
+boundary via keystone smearing. Both mechanisms are in principle
+reducible: prior-pull via a looser/shorter spatial-correlation prior or
+an averaging-kernel-weighted post-hoc bias correction (as the user
+originally proposed); the water-region CO2 effect via either explicitly
+modeling the keystone-smeared footprint's albedo heterogeneity in the
+forward model, or accepting it as a real, bounded, and now-understood
+floor near strong along-slit albedo contrast.
+
+Not yet run: diagnostic #4 from the original menu (single-parameter
+perturbation sweep, to separate CO2's own remaining unexplained scatter
+into "co2/p_surface/albedo degeneracy" vs. other causes) and a looser-
+spatial-prior test targeting albedo specifically, both proposed as
+natural next steps but not yet requested.
