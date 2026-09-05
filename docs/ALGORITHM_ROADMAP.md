@@ -206,17 +206,22 @@ diagnostic run") FPA2 retrieval should look like, and why:
 
 ## 4. Prioritized next steps
 
-1. **Finish diagnosing the frozen-row representability gap's
-   remaining ~25x -- evidence now points at albedo specifically, not
-   ch4/co/h2o** (Sec.2 item 6, `PROJECT_STATUS.md` Sec.1-2). Giving
+1. **Frozen-row representability gap: albedo's own resolution is
+   RULED OUT as the driver of the remaining ~25x, reopening the
+   question** (Sec.2 item 6, `PROJECT_STATUS.md` Sec.1-3). Giving
    albedo its true value at every anchor closed ~90% of the original
-   100-250x gap. A follow-up (freeing albedo instead of pinning it,
-   Sec.2) found free albedo beats anchor-frozen pinning ONLY at the one
-   window where anchor-frozen itself struggled most -- consistent with
-   albedo having real texture below even the anchor grid there, not
-   with the other frozen rows (ch4/co/h2o) being the culprit. Next
-   concrete test: rerun anchor-frozen albedo at a FINER anchor_density
-   (e.g. ad16) on the same fast 3-window subset to confirm.
+   100-250x gap, but a residual remained concentrated at one window
+   (rows 1013-1023, 110 ppm co2 max). Sec.2 speculated this was albedo
+   texture finer than even the anchor grid -- Sec.3 tested that directly
+   (4x finer anchors, ad16) and found NO improvement (117 ppm, unchanged
+   within noise). That specific hypothesis is dead. Current leading
+   candidates: `ch4_ppb`/`co_ppb`/`h2o_surface_vmr` (never tested at
+   anchor resolution, still frozen on the coarse `bin_centers` grid
+   throughout this whole investigation), or something specific to that
+   one window unrelated to representability at all. Next concrete test:
+   freeze the atmosphere rows on the anchor grid too (needs a small
+   extension -- `--surface-positions` only covers the surface/albedo
+   row today) on the same 3-window fast subset.
 2. Correlation-length sensitivity study (Sec.2 item 1) -- cheapest next
    diagnostic, and gates whether item 3 (a bias-correction strategy) is
    even the right lever to pull.

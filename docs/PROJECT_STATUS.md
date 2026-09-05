@@ -155,3 +155,50 @@ albedo, not at ch4/co/h2o, as the row still driving the residual gap.
 Not yet tested: anchor-frozen albedo at a FINER anchor_density (e.g.
 ad16 instead of ad4) on this same fast subset, which would directly
 confirm or refute that candidate.
+
+
+## 3. Ruled out: albedo's own sub-anchor texture is NOT what drives the residual gap at rows 1013-1023 (2026-09-05)
+
+Direct test of Sec.2's sharpened hypothesis: rerun the anchor-frozen-
+albedo variant (Sec.1) at `anchor_density=16` instead of 4 -- a 4x
+finer anchor grid for both atmosphere rendering and albedo's own
+frozen-anchor positions -- on the same 3-window fast subset.
+
+| window | ad4 co2/p_surface max | **ad16** co2/p_surface max |
+|---|---|---|
+| 189-197 | 1.86 / 3.08 | 2.04 / 3.17 (unchanged, within noise) |
+| 238-248 | 2.30 / 1.32 | 2.70 / 1.84 (unchanged, within noise) |
+| **1013-1023** | **110.5 / 22.5** | **117.5 / 22.5 (unchanged -- slightly WORSE)** |
+
+**Going 4x finer did nothing.** The residual gap at rows 1013-1023 --
+the window driving most of Sec.1's whole-slit ~25x residual -- is
+completely unmoved by anchor resolution, ruling out "albedo has real
+texture below even the ad4 anchor grid" as the explanation. Sec.2's
+own reasoning (freeing albedo helped specifically at this window,
+suggesting a resolution problem) pointed at the wrong knob: freeing
+albedo lets GN compensate via an entirely different mechanism (fitting
+against the DATA) than making the frozen value more spatially precise
+does, so that result doesn't actually imply an anchor-resolution
+explanation after all -- a real lesson in not over-interpreting one
+ablation's direction as confirming a specific mechanism.
+
+**This reopens the question**: with albedo's own resolution ruled out
+at two different scales (bin_centers -> anchor -> even finer anchor,
+no improvement past the first jump), the remaining candidates from
+Sec.1 move to the front: (b) `ch4_ppb`/`co_ppb`/`h2o_surface_vmr` --
+still frozen on the coarse `bin_centers` grid this whole time, never
+tested at anchor resolution -- or (c) something else about this
+specific window (rows 1013-1023) entirely, e.g. a local feature (a
+gas hotspot, a keystone effect, proximity to the slit edge) rather than
+a representability mechanism at all. Worth checking directly: are
+ch4/co/h2o representable at `bin_centers` resolution for THIS window
+specifically, the same way Sec.12's own methodology scored the
+free-row representability gap originally.
+
+**Next concrete test**: rerun with `ch4_ppb`/`co_ppb`/`h2o_surface_vmr`
+ALSO frozen on the anchor grid (`--surface-positions` only covers the
+surface/albedo row today -- the atmosphere rows have no equivalent
+flag yet; would need a small extension, or a temporary monkeypatch of
+`state_spec_from_scene`'s `bin_centers` argument itself for a one-off
+test) on the same 3-window fast subset, to see whether THAT closes the
+gap at rows 1013-1023 instead.
