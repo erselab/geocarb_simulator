@@ -627,7 +627,8 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                           prior_anchor_density: float | None = None,
                           surface_fields=None,
                           row_state_interp: dict | None = None,
-                          row_sub_bin_anomaly: dict | None = None) -> StateSpec:
+                          row_sub_bin_anomaly: dict | None = None,
+                          row_positions: dict | None = None) -> StateSpec:
     """Build a :class:`StateSpec` whose priors are the truth scene's own
     values at `bin_centers` -- the joint block's existing "local-truth
     nuisance idealization", but now with every quantity present as a real,
@@ -687,6 +688,20 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
     uncertainty into the posterior via `gauss_newton_state`'s `g_cov`
     parameter, and are `None` by default (no uncertainty machinery at
     all, not "zero uncertainty").
+
+    `row_positions` (default None, 2026-09-05) generalizes what
+    `surface_positions` has always done for the single surface/albedo
+    row to ANY row, atmosphere included: a per-row dict `{name:
+    positions_array}` overriding that row's own `bin_centers` (or, for
+    a surface row, whatever `surface_positions` would otherwise give
+    it). Every OTHER row not named in the dict is unaffected. This is
+    what lets a caller freeze e.g. `ch4_ppb` on a finer ANCHOR grid than
+    `co2_ppm`'s own `bin_centers`, the atmosphere-row analogue of
+    `--surface-positions anchor` (2026-09-05, testing whether frozen-row
+    representability gaps for the OTHER atmosphere rows, not just
+    albedo, explain a residual error `--surface-positions anchor` alone
+    didn't close -- see docs/PROJECT_STATUS.md's own record of that
+    investigation).
 
     `uniform=True` evaluates every field at a single fixed position
     (`x_km=0.0`, matching `along_slit_scene.atmosphere_at(0.0)`'s own
@@ -790,14 +805,24 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                          prior_form=prior_form, gamma=float(gamma), target=target,
                          state_interp=row_kind, sub_bin_anomaly=anomaly)
 
-    rows = [_row(name, fn, bin_centers, "atmosphere") for name, fn in fields.items()]
+    _row_positions = row_positions or {}
+    rows = [_row(name, fn,
+                (bin_centers if name not in _row_positions
+                 else np.atleast_1d(np.asarray(_row_positions[name], dtype=float))),
+                "atmosphere")
+           for name, fn in fields.items()]
     if band_label is not None:
         # Shared grid by default (2026-08-25) -- surface rows use the SAME
-        # bin_centers atmosphere rows use, unless surface_positions is
-        # explicitly given. See this function's own docstring for why this
-        # is a deliberate behaviour change, not an oversight.
-        pos = (bin_centers if surface_positions is None
-               else np.atleast_1d(np.asarray(surface_positions, dtype=float)))
+        # bin_centers atmosphere rows use, unless surface_positions (or,
+        # more generally, row_positions["albedo"]) is explicitly given.
+        # See this function's own docstring for why this is a deliberate
+        # behaviour change, not an oversight.
+        if "albedo" in _row_positions:
+            pos = np.atleast_1d(np.asarray(_row_positions["albedo"], dtype=float))
+        elif surface_positions is not None:
+            pos = np.atleast_1d(np.asarray(surface_positions, dtype=float))
+        else:
+            pos = bin_centers
         rows += [_row(name, fn, pos, "surface")
                  for name, fn in surface_fields.items()]
     return StateSpec(rows)

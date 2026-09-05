@@ -251,6 +251,7 @@ def _solve_window(row_lo: int, row_hi: int):
     row_sub_bin_anomaly = _SWEEP.get("row_sub_bin_anomaly")  # None -> no sub_bin_anomaly at all (default)
     anchor_workers = _SWEEP.get("anchor_workers", 1)      # ANCHOR-level parallelism within build_forward_state's own forward() (2026-09-02); see --anchor-workers' own help
     surface_positions_mode = _SWEEP.get("surface_positions_mode", "shared")  # "shared" (default) or "anchor" -- see --surface-positions' own help
+    frozen_atmosphere_positions_mode = _SWEEP.get("frozen_atmosphere_positions_mode", "shared")  # "shared" (default) or "anchor" -- see --frozen-atmosphere-positions' own help
 
     rows_win = np.arange(row_lo, row_hi + 1)
     width = len(rows_win)
@@ -395,11 +396,15 @@ def _solve_window(row_lo: int, row_hi: int):
     t0 = time.time()
     # HI-RES: scene on the finer anchor grid, every row interpolated there.
     surface_positions = anchor_etas if surface_positions_mode == "anchor" else None
+    row_positions = None
+    if frozen_atmosphere_positions_mode == "anchor":
+        row_positions = {name: anchor_etas for name in prior_fields if name not in free}
     spec_h = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length,
                                    prior_form=prior_form, uniform=uniform_priors,
                                    fields=prior_fields, band_label=band_label,
                                    surface_fields=surface_fields,
                                    surface_positions=surface_positions,
+                                   row_positions=row_positions,
                                    prior_anchor_density=prior_anchor_density,
                                    row_sub_bin_anomaly=row_sub_bin_anomaly)
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
@@ -667,6 +672,17 @@ def main() -> int:
                          "affects the hires solve (state_spec_from_scene's surface_positions "
                          "parameter) -- coarse mode is unaffected. Meaningless without "
                          "--vary-albedo (no surface row exists at all otherwise).")
+    ap.add_argument("--frozen-atmosphere-positions", type=str, default="shared",
+                    choices=["shared", "anchor"],
+                    help="positions FROZEN atmosphere rows (any row named in --free is "
+                         "unaffected and stays on bin_centers) live at. 'shared' (default): "
+                         "every atmosphere row shares the same bin_centers grid (today's "
+                         "mechanism). 'anchor': frozen atmosphere rows instead get one value "
+                         "per ANCHOR, the atmosphere-row analogue of --surface-positions "
+                         "anchor (2026-09-05) -- lets a frozen row's exact-truth value be "
+                         "reconstructed at the same fine resolution the forward model already "
+                         "renders from, instead of piecewise-linear between (coarser) bin "
+                         "centers. Only affects the hires solve; coarse mode is unaffected.")
     ap.add_argument("--prior-anchor-density", type=float, default=None,
                     help="resolution knob for the prior, independent of --prior-fields: "
                          "None (default) samples the prior fields exactly at each bin's own "
@@ -914,6 +930,7 @@ def main() -> int:
                        flat_sy_inv=args.flat_sy_inv, vary_albedo=args.vary_albedo,
                        row_sub_bin_anomaly=row_sub_bin_anomaly,
                        surface_positions_mode=args.surface_positions,
+                       frozen_atmosphere_positions_mode=args.frozen_atmosphere_positions,
                        anchor_workers=args.anchor_workers))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
