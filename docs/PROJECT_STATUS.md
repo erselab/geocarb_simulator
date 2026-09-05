@@ -2179,3 +2179,45 @@ simultaneously, or the union of each band's own high-keystone regions)
 rather than optimizing per-band and reconciling after the fact. Not
 designed or implemented -- flagged here as an open problem for whenever
 multi-band retrieval work begins.
+
+## 16. Future work queue
+
+**Correlation-length sensitivity study** (2026-09-04, user: "let's make
+that correlation exploration study an item we want to do in the
+future"). Surfaced investigating Experiment A (all 4 rows free --
+co2_ppm, p_surface_hpa, h2o_surface_vmr, albedo -- structural prior,
+Mode-2 truth; full results below once Experiment B also completes):
+CO2's error is >2x WORSE in window INTERIORS than at window edges, and
+worse in FLAT-truth regions than steep-gradient ones -- both the
+OPPOSITE of p_surface/h2o/albedo, which are all worse at edges (albedo
+dramatically so, 14x) and show no strong gradient dependence. Checked
+directly that this isn't the water-region effect (Sec.14.3) leaking in
+-- excluding those 41 bins entirely leaves the pattern essentially
+unchanged (0.42x vs 0.43x).
+
+Working hypothesis, NOT yet confirmed: the spatial-correlation prior has
+more same-window neighbors to smooth against in window interiors (and
+in flat-truth stretches, where the prior and data don't disagree much on
+local shape) than at edges/steep-gradient bins, where the data has more
+leverage to resist the prior's pull. CO2 carries real localized
+structure (hotspots) that this extra interior smoothing would blur more
+than it blurs the smoother p_surface/albedo fields, whose own failure
+mode (Sec.14.2) is already prior-pull-dominated rather than structure-
+blurring.
+
+**The study**: directly test this by varying `corr_length`/`sigma`
+(`state_spec_from_scene`'s own parameters, currently `DEFAULT_CORR_
+LENGTH_ETA`'s per-row physical defaults) and re-running Experiment A (or
+a cheaper single-window version) to see whether (a) shortening CO2's
+correlation length specifically closes the edge-vs-interior and flat-
+vs-steep gaps, confirming the smoothing-prior mechanism, and (b) how
+much of the cross-talk correlation matrix (co2/h2o corr=0.60, co2/
+p_surface corr=0.49) is itself sensitive to corr_length choice, since a
+looser prior gives cross-talk more room to manifest while a tighter one
+suppresses it (at the cost of blurring real local structure more, per
+the hypothesis above). Also worth directly inspecting `avk`'s spatial
+pattern WITHIN a window (not just the whole-window `dof` scalar already
+used in Sec.14.2) to see if diag(A) itself is measurably lower in window
+interiors, which would be the most direct possible confirmation.
+
+Not yet run -- recorded here so it isn't lost, not yet scheduled.
