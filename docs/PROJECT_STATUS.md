@@ -202,3 +202,43 @@ flag yet; would need a small extension, or a temporary monkeypatch of
 `state_spec_from_scene`'s `bin_centers` argument itself for a one-off
 test) on the same 3-window fast subset, to see whether THAT closes the
 gap at rows 1013-1023 instead.
+
+
+## 4. Ruled out entirely: frozen-row representability is NOT the driver at rows 1013-1023 -- this looks like a slit-edge artifact instead (2026-09-05)
+
+Second direct test, closing the representability-gap line of inquiry.
+Extended `state_spec_from_scene` with a new general `row_positions`
+parameter (any row, atmosphere included, can now live on a custom
+position grid, not just the surface/albedo row) and a matching
+`--frozen-atmosphere-positions {shared,anchor}` CLI flag. Froze
+`ch4_ppb`/`co_ppb`/`h2o_surface_vmr` on the anchor grid TOO (in addition
+to albedo, already anchor-frozen since Sec.1), same 3-window fast
+subset, same ad4.
+
+| window | ad4, albedo-only anchor | ad16, albedo-only anchor | **ad4, ALL rows anchor** |
+|---|---|---|---|
+| 189-197 | 1.86 / 3.08 | 2.04 / 3.17 | 1.86 / 3.10 (unchanged) |
+| 238-248 | 2.30 / 1.32 | 2.70 / 1.84 | 2.30 / 1.30 (unchanged) |
+| **1013-1023** | **110.5 / 22.5** | 117.5 / 22.5 | **110.5 / 22.5 (unchanged)** |
+
+Freezing `ch4_ppb`/`co_ppb`/`h2o_surface_vmr` at anchor resolution too
+made zero difference (110.47 vs. 110.50, identical within noise).
+Combined with Sec.3's albedo-resolution result, this rules out frozen-
+row representability -- at ANY tested resolution, for ANY tested row --
+as the mechanism behind the gap at rows 1013-1023.
+
+**New leading hypothesis: a slit-edge artifact, not a representability
+gap at all.** Rows 1013-1023 are the LAST window on the whole 1024-row
+detector (`ROW_MAX_IDX`), where `PAD` extension runs out of real rows
+to extend into and keystone geometry is at its most extreme. This is a
+qualitatively different kind of explanation than everything else in
+Sec.1-3 -- not about how finely a frozen row's value is known, but about
+this window's own position at the physical boundary of the data.
+
+**Next concrete test**: check whether the SAME pathology appears at the
+OTHER slit edge (the first window, rows 0-8) under the plain (bin-
+center-frozen) Experiment B config -- if the first and last windows are
+both anomalously bad relative to interior windows of similar width,
+that's a strong, cheap confirmation of the edge-artifact hypothesis
+before investing in tracking down the specific mechanism (PAD
+truncation, extreme keystone, or something else at the boundary).
