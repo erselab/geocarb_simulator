@@ -55,7 +55,7 @@ at what the caller intended).
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_block_whole_slit_plot.py \\
         [results/gd_joint_block_whole_slit_fpa2_gratio1.pkl] [--truth raw|anchor|bin]
         [--truth-anchor-density 4] [--rows co2_ppm,albedo]
-Output: plots/joint_block/<input stem>.png
+Output: figures/joint_block/<input stem>.png
 """
 from __future__ import annotations
 
@@ -354,7 +354,7 @@ def main() -> int:
                      "continuum = each row's own brightest column)", fontsize=10.5)
 
     fig.tight_layout()
-    plots_dir = REPO_ROOT / "plots" / "joint_block"
+    plots_dir = REPO_ROOT / "figures" / "joint_block"
     plots_dir.mkdir(parents=True, exist_ok=True)
     truth_suffix = "" if args.truth != "anchor" else f"_truth-ad{args.truth_anchor_density}"
     rows_suffix = "" if args.rows is None else "_" + "-".join(n.split("_")[0] for n in row_names)
