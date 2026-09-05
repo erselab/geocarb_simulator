@@ -106,3 +106,52 @@ line of work instead of always running all 58 windows. (`build_window_
 tiles`'s own tile order is deterministic given the same `--min-window`/
 `--window-scale`/`--overlap`, so these task_ids stay correct for any
 future run at this same tiling config.)
+
+
+## 2. Freeing albedo instead of pinning it: helps over the original blowup, but usually loses to anchor-resolution pinning (2026-09-05)
+
+Direct follow-up to Sec.1, on the same 3-window fast-test subset
+(rows 189-197, 238-248, 1013-1023 -- task_ids 21/26/57). Instead of
+freezing albedo (at bin-center or anchor resolution), let it be FREE
+(structural prior, default shared `bin_centers` grid -- the same
+convention every other free-albedo experiment this project has used),
+keeping `ch4_ppb`/`co_ppb`/`h2o_surface_vmr` frozen exact on
+`bin_centers` and `co2_ppm`/`p_surface_hpa` free, unchanged, against the
+same Mode-1 dense truth.
+
+| window | bin-frozen (orig.) co2 max | anchor-frozen co2/p_surface max | **FREE albedo** co2/p_surface max |
+|---|---|---|---|
+| 189-197 | 129 ppm | **1.86 / 3.08** | 52.0 / 12.5 |
+| 238-248 | 216 ppm | **2.30 / 1.32** | 34.6 / 5.2 |
+| 1013-1023 | 168 ppm | 110.5 / 22.5 | **21.4 / 11.0** |
+
+**Freeing albedo beats the original bin-center-frozen case in all 3
+windows** (2-8x lower max error) -- GN partially compensating via
+fitting instead of being locked to a coarse, wrong-between-nodes exact
+value.
+
+**But it underperforms anchor-resolution frozen pinning in 2 of the 3
+windows**, sometimes by a lot (52 vs. 1.86 ppm at rows 189-197). The
+exception is telling: rows 1013-1023 was exactly the window where
+anchor-frozen itself struggled most (110 ppm co2, the single worst
+anchor-frozen window in Sec.1's whole-slit run, and a major contributor
+to that section's residual ~25x gap) -- and there, FREE albedo actually
+beats anchor-frozen.
+
+**Interpretation**: pinning albedo exactly, at fine enough resolution,
+beats letting GN fit it -- correct information beats an imperfect fit,
+whenever the resolution is actually fine enough to BE correct. Freeing
+albedo is not a fix for the underlying resolution problem; it is a
+different, generally weaker compensation mechanism that only wins in
+the specific case where even anchor-resolution pinning has already run
+out of room (real albedo structure below even that grid). This sharpens
+Sec.1's own open question: the residual ~25x gap after anchor-frozen
+pinning is most likely explained by albedo texture finer than
+`anchor_density=4` itself (candidate (a) from Sec.1) rather than the
+other frozen rows (candidate (b)) -- freeing albedo helping specifically
+at the one window where anchor-frozen already struggled most points at
+albedo, not at ch4/co/h2o, as the row still driving the residual gap.
+
+Not yet tested: anchor-frozen albedo at a FINER anchor_density (e.g.
+ad16 instead of ad4) on this same fast subset, which would directly
+confirm or refute that candidate.

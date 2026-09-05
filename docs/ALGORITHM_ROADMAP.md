@@ -207,15 +207,16 @@ diagnostic run") FPA2 retrieval should look like, and why:
 ## 4. Prioritized next steps
 
 1. **Finish diagnosing the frozen-row representability gap's
-   remaining ~25x** (Sec.2 item 6, `PROJECT_STATUS.md` Sec.1). Giving
+   remaining ~25x -- evidence now points at albedo specifically, not
+   ch4/co/h2o** (Sec.2 item 6, `PROJECT_STATUS.md` Sec.1-2). Giving
    albedo its true value at every anchor closed ~90% of the original
-   100-250x gap, confirming albedo's own sub-bin texture as a major
-   driver -- but a real residual remains. Test the two named candidates:
-   (a) does an even finer albedo anchor grid close the rest, or (b) do
-   ch4/co/h2o's own (still bin_centers-frozen) representability gaps
-   matter after all despite their smoother true fields. Still highest
-   priority, but the scope is now much narrower than "100-250x,
-   unexplained."
+   100-250x gap. A follow-up (freeing albedo instead of pinning it,
+   Sec.2) found free albedo beats anchor-frozen pinning ONLY at the one
+   window where anchor-frozen itself struggled most -- consistent with
+   albedo having real texture below even the anchor grid there, not
+   with the other frozen rows (ch4/co/h2o) being the culprit. Next
+   concrete test: rerun anchor-frozen albedo at a FINER anchor_density
+   (e.g. ad16) on the same fast 3-window subset to confirm.
 2. Correlation-length sensitivity study (Sec.2 item 1) -- cheapest next
    diagnostic, and gates whether item 3 (a bias-correction strategy) is
    even the right lever to pull.
