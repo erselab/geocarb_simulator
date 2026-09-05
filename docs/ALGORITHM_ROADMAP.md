@@ -138,26 +138,29 @@ Roughly in the order they'd need resolving:
    script's argument parsing), not left to whoever configures a run to
    get right by hand -- the FPA0/FPA3-with-`--free co2_ppm` mistake
    this session made once already.
-6. **Experiment B found a large, not-yet-diagnosed frozen-row
-   representability gap under genuine (non-representable) truth**
-   (`PROJECT_STATUS.md` Sec.16.2). Freezing ch4/co/h2o/albedo at their
-   exact value AT EACH BIN'S OWN POSITION, then scoring against Mode-1
-   dense (500m) truth instead of Sec.14's bin-matched Mode-2 truth,
-   produced co2/p_surface errors 100-250x worse than the equivalent
-   Mode-2 case (rms 47 ppm / 26 hPa vs. 0.19 ppm / 0.017 hPa) -- GN
-   converged to a bounded but badly wrong local minimum rather than
-   diverging outright. Working explanation: a frozen row's own
-   piecewise-linear bin-to-bin reconstruction doesn't capture real
-   structure below bin spacing (most likely albedo's own fine texture)
-   even when each bin's own node value is exact -- the same
-   representability-gap concept Sec.12 established for FREE rows, now
-   shown to bite FROZEN rows too. NOT yet independently confirmed
-   (Sec.16.2's own follow-up queue: score frozen-row representability
-   directly, and check whether freeing albedo specifically closes the
-   gap). This should inform whether the current `anchor_density`/
+6. **Partially resolved: the frozen-row representability gap under
+   genuine (non-representable) truth is real, and albedo's own sub-bin
+   texture is A major driver -- but not the only one**
+   (archived `PROJECT_STATUS.md` Sec.16.2, follow-up in the current
+   `PROJECT_STATUS.md` Sec.1). Freezing ch4/co/h2o/albedo at their exact
+   value AT EACH BIN'S OWN POSITION against genuine Mode-1 dense (500m)
+   truth produced co2/p_surface errors 100-250x worse than the
+   equivalent representable Mode-2 case. Confirmed this wasn't a
+   constant-vs-varying bug (both truth and the frozen assumption used
+   the real spatially-varying albedo field). A new `--surface-positions
+   {shared,anchor}` flag let albedo be frozen on its own fine ANCHOR
+   grid instead of sharing the atmosphere rows' coarser `bin_centers`
+   grid -- this cut rms error ~9-11x (co2 47.3->4.92 ppm, p_surface
+   26.1->2.34 hPa), confirming albedo's texture as a major driver, but
+   a substantial gap remains (~25x worse than the Mode-2 ceiling in rms,
+   ~40-160x at the max). Remaining candidates, not yet tested: albedo
+   texture finer than even this retrieval's own `anchor_density`; the
+   still-bin_centers-frozen ch4/co/h2o rows; or another mechanism
+   entirely. This should inform whether the current `anchor_density`/
    `g_ratio` production defaults are adequate once truth is allowed to
    be genuinely non-representable, not just for free rows but for
-   frozen ones too.
+   frozen ones too -- still open, now with a much narrower remaining
+   gap to explain.
 
 ---
 
@@ -203,13 +206,16 @@ diagnostic run") FPA2 retrieval should look like, and why:
 
 ## 4. Prioritized next steps
 
-1. **Diagnose Experiment B's frozen-row representability gap**
-   (Sec.2 item 6, `PROJECT_STATUS.md` Sec.16.2) -- newly surfaced,
-   large (100-250x), and not yet independently confirmed. Highest
-   priority: it calls into question whether "frozen at the exact
-   bin-center value" is actually a safe assumption anywhere a frozen
-   row's true field has real sub-bin structure, which is a much bigger
-   deal than any other open item if confirmed.
+1. **Finish diagnosing the frozen-row representability gap's
+   remaining ~25x** (Sec.2 item 6, `PROJECT_STATUS.md` Sec.1). Giving
+   albedo its true value at every anchor closed ~90% of the original
+   100-250x gap, confirming albedo's own sub-bin texture as a major
+   driver -- but a real residual remains. Test the two named candidates:
+   (a) does an even finer albedo anchor grid close the rest, or (b) do
+   ch4/co/h2o's own (still bin_centers-frozen) representability gaps
+   matter after all despite their smoother true fields. Still highest
+   priority, but the scope is now much narrower than "100-250x,
+   unexplained."
 2. Correlation-length sensitivity study (Sec.2 item 1) -- cheapest next
    diagnostic, and gates whether item 3 (a bias-correction strategy) is
    even the right lever to pull.
