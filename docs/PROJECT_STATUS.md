@@ -1771,9 +1771,18 @@ call to `_band_setup` is unaffected (the new `dx_km` param simply keeps
 its default, appended after every existing positional argument).
 
 `build_lookup_radiance`/`gd_render.image` are no longer called anywhere
-in `gd_test.py` (confirmed via grep) -- left in place in `along_slit_
-scene.py`/`gd_render.py` themselves in case another caller still needs
-them; not removed, since that wasn't requested.
+in `gd_test.py` (confirmed via grep). Checked before removing them
+outright (2026-09-04): both are still load-bearing for ~12 OTHER scripts
+never touched by this migration (`gd_toy_native_row_demo.py`,
+`gd_joint_block_retrieve.py` itself, `gd_joint_block_hires_test.py`,
+`gd_plume_anchor_density_sweep*.py`, `gd_joint_block_freeze_test.py`,
+and others) -- deleting them would break all of those. Resolved by
+adding a `DeprecationWarning` to each instead (13.12 below), pointing new
+code at `render_at_anchors`/`footprint_average_scene`, while every
+existing caller keeps working unchanged. `nearest_bin_scene` is used
+even more broadly (including by `gd_joint_block_retrieve.py`'s own
+production path) and was left alone entirely -- deprecating it was judged
+too large a change for this branch's scope.
 
 ### 13.9 Truth-cache and repository cleanup
 
@@ -1860,6 +1869,38 @@ This is a spot check at ONE structure-free location, not a re-derivation
 of 13.1's own finding (which was about behavior AT sharp features) --
 but it does confirm the two mechanisms are not wildly divergent in
 general, which is what this checklist item needed. **Closed.**
+
+### 13.12 Deprecating the superseded rendering path, without breaking its other callers
+
+Last merge-checklist item: decide the fate of `build_lookup_radiance`/
+`gd_render.image` now that 13.8 stopped calling them from `gd_test.py`.
+Checked before removing anything (user direction: "let's get rid of the
+unused code items before merging"): grepping the whole repo, neither
+function -- nor `nearest_bin_scene`, the point-query scene function they
+pair with -- is actually unused. `gd_toy_native_row_demo.py`,
+`gd_joint_block_retrieve.py` (the original production entry point
+itself), `gd_joint_block_hires_test.py`, `gd_joint_block_freeze_test.py`,
+`gd_plume_anchor_density_sweep{,_v2}.py`, `gd_joint_block_keystone_
+free_sweep.py`, `gd_realistic_prior_forward_check.py`, and several
+others all still call one or more of these directly -- none of them were
+part of this branch's migration or verification work, so deleting the
+functions would have broken roughly a dozen scripts outright.
+
+Resolved with a `DeprecationWarning` on `build_lookup_radiance` and
+`gd_render.image` (each pointing at `render_at_anchors`/`footprint_
+average_scene` instead, with a reference to this doc), leaving every
+existing caller working unchanged -- confirmed directly: the warning
+fires exactly once per call, and both functions' actual output
+(`radiance`/`image` shape and values) is bit-for-bit unaffected by the
+added warning. `predict_neighborhood` itself was NOT touched -- it's
+shared by both mechanisms via its own `footprint` parameter
+(`False`=old point-query, `True`=new footprint-integrated), not
+superseded. `nearest_bin_scene` was also left alone entirely, since it
+underpins `gd_joint_block_retrieve.py`'s own production path and
+deprecating it was judged too large a change for this branch's scope --
+migrating the dozen dependent scripts to the new mechanism (so the old
+functions could eventually be removed outright) is flagged as a
+separate, larger future task, not attempted here.
 
 ## 14. Isolating the source of large bin-center errors under an imperfect prior (2026-09-04)
 
