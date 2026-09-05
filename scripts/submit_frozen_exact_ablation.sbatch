@@ -19,7 +19,7 @@
 #SBATCH --array=0-57
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=slurm_out/frozen_exact_ablation_%A_%a.out
 
 set -euo pipefail
