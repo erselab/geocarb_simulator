@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import warnings
 from functools import lru_cache
 from typing import Callable
 
@@ -255,7 +256,25 @@ def image(
         ``A[i, j]`` -- detector row ``i``, column ``j``, in radiance units.
         Row ``i`` is the single-physical-row truth: never averaged with
         neighbouring rows (the only cross-row mixing is the final PSF blur).
+
+    .. deprecated:: 2026-09-04
+        Every pixel is a POINT query at its own true eta -- no sub-pixel
+        footprint integration, so it's typically paired with a ``radiance``
+        built by the now-deprecated ``along_slit_scene.build_lookup_
+        radiance`` (see docs/PROJECT_STATUS.md Sec.13.1/13.2). New code
+        should use :func:`predict_neighborhood` with ``footprint=True``
+        (real per-pixel footprint edges) fed by
+        :func:`geocarb_gert.joint_state.render_at_anchors`. Kept for the
+        several older scripts that still call it directly -- not removed,
+        since migrating those is a separate, larger task.
     """
+    warnings.warn(
+        "gd_render.image renders every pixel as a POINT query (no "
+        "sub-pixel footprint integration). New code should use "
+        "predict_neighborhood(..., footprint=True) fed by "
+        "geocarb_gert.joint_state.render_at_anchors instead (see "
+        "docs/PROJECT_STATUS.md Sec.13.1/13.2).",
+        DeprecationWarning, stacklevel=2)
     cols = np.arange(N_PX, dtype=float)
     sm = s_max(fpa)
 

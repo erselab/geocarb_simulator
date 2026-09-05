@@ -38,6 +38,7 @@ rather than the two merely being close).
 from __future__ import annotations
 
 import multiprocessing as mp
+import warnings
 from functools import lru_cache
 from typing import Callable
 
@@ -907,7 +908,28 @@ def build_lookup_radiance(
     ``{band_label: fn(x_km) -> albedo}``, one entry per ``inst.windows``
     label; only consulted when ``vary_albedo=True`` (same as ``albedo_at``
     itself).
+
+    .. deprecated:: 2026-09-04
+        This two-sample linear spectral blend was confirmed (2026-09-02)
+        to be the dominant source of the representability-gap artifacts
+        an entire investigation chased before tracing it here -- see
+        docs/PROJECT_STATUS.md Sec.13.1. New code should use
+        :func:`geocarb_gert.joint_state.render_at_anchors` +
+        :func:`geocarb_gert.focalplane.footprint_average_scene` instead
+        (real per-anchor RT, exact sub-pixel footprint integration, never
+        an interpolated stand-in). Kept for the several older scripts
+        that still call it directly (``gd_toy_native_row_demo.py``,
+        ``gd_reversed_scene_check.py``, and others) -- not removed, since
+        migrating those is a separate, larger task.
     """
+    warnings.warn(
+        "build_lookup_radiance uses a two-sample linear spectral blend, "
+        "confirmed to be the dominant source of representability-gap "
+        "artifacts in prior investigations (docs/PROJECT_STATUS.md "
+        "Sec.13.1). New code should use "
+        "geocarb_gert.joint_state.render_at_anchors + "
+        "geocarb_gert.focalplane.footprint_average_scene instead.",
+        DeprecationWarning, stacklevel=2)
     from gert.forward_model import ForwardModel
     from gert.rt_solver import SingleScatterSolver
 
