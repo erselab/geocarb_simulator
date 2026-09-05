@@ -1837,10 +1837,29 @@ curve): 58/66/63/78 natural windows for FPA2/1/0/3 respectively at the
 same default settings -- see Sec.15 for why this matters for eventual
 multi-band retrieval.
 
-Not yet done: a direct numerical old-vs-new regression comparison
-(spectral-blend `build_lookup_radiance` vs. the footprint-integrated
-path, same scene) -- the remaining item before calling 13's migration
-fully merge-ready.
+### 13.11 Old-vs-new forward-model regression comparison -- closed
+
+Last open item on the merge checklist: how much do actual pixel
+radiances change between the OLD mechanism (`build_lookup_radiance`'s
+two-sample linear spectral blend, `n_samples=400` -- what every
+production sweep used before this branch) and the NEW mechanism
+(`render_at_anchors`/`footprint_average_scene`), for the identical
+physical truth scene and ForwardModel setup?
+`scratch_work/old_vs_new_forward_model.py` (SLURM job 1859496) renders
+both for the same 51-row window (rows 400-450, FPA2, a generic mid-slit
+location with no plume/hotspot/albedo-boundary structure nearby) --
+79 anchors (`dx_km=2.0`) for the new path vs. 400 whole-slit samples for
+the old one.
+
+**Result**: rel. diff rms = 5.9e-5 (0.006%), max = 3.5e-4 (0.035%) --
+the two mechanisms agree closely at a location without sharp local
+structure, as expected: a widely-spaced linear blend only accumulates
+real error near features narrower than its sample spacing (plume/hotspot
+edges, the water/albedo boundary), exactly what 13.1/14.3-14.4 found.
+This is a spot check at ONE structure-free location, not a re-derivation
+of 13.1's own finding (which was about behavior AT sharp features) --
+but it does confirm the two mechanisms are not wildly divergent in
+general, which is what this checklist item needed. **Closed.**
 
 ## 14. Isolating the source of large bin-center errors under an imperfect prior (2026-09-04)
 
