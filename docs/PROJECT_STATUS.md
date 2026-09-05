@@ -1801,6 +1801,47 @@ footprint_fix/` (14 files predating 13.1's fix, kept but clearly
 separated rather than deleted, since they were real production results
 under the old, since-superseded mechanism).
 
+### 13.10 Multi-FPA verification (2026-09-04)
+
+Everything through 13.9 was exercised exclusively on FPA2 (`CO2_strong`).
+Before treating this branch as merge-ready, verified the migrated
+pipeline on all 4 GeoCarb bands (`GEOCARB_BANDS`: 0=`O2_A` (o2,h2o),
+1=`CO2_weak` (co2,h2o), 2=`CO2_strong` (co2,h2o), 3=`CH4_CO`
+(ch4,co,h2o,n2o)):
+
+**Forward-render smoke tests** (`_band_setup` directly, realistic scene):
+all 4 bands render a sane `(1024,1024)` image with a working `radiance()`
+shim; FPA2 additionally checked with `noise=True` (the actual default
+production path, not yet directly exercised by any prior test this
+session). FPA0 was notably slower (490s vs. ~230-250s for the others at
+matched coarse `dx_km`) -- a throughput note, not a correctness issue.
+
+**Full retrieval smoke tests** (`gd_joint_block_whole_slit_sweep.py`,
+forward render -> analytic Jacobian -> GN solve): a single-window test
+per band with the DEFAULT `--free co2_ppm` solved without error on all
+4 bands, but gave `dof=0/n_free` (fully prior-dominated, zero data
+constraint) on FPA0 and FPA3 -- initially concerning, but correctly
+diagnosed (by the user) as not a bug: FPA0 and FPA3 have no CO2 in their
+molecule list at all, so retrieving `co2_ppm` from either is physically
+meaningless regardless of how correct the forward model is. Re-run with
+each band's own physically appropriate target gas instead (`--free
+p_surface_hpa` for FPA0, `--free ch4_ppb,co_ppb` for FPA3, covering
+roughly half of each band's own windows -- 31/63 and 39/78
+respectively): both now converge fully data-constrained everywhere
+(`dof_frac` 0.999-1.000 for FPA0, 0.988-0.999 for FPA3, tiny residuals
+throughout, 0 errored windows). Confirms the migrated pipeline has real,
+correctly-conditioned sensitivity to each band's own target gas, not
+just "doesn't crash." `--fpa`-based window tiling itself also differs
+per band (`build_window_tiles` depends on that band's own keystone
+curve): 58/66/63/78 natural windows for FPA2/1/0/3 respectively at the
+same default settings -- see Sec.15 for why this matters for eventual
+multi-band retrieval.
+
+Not yet done: a direct numerical old-vs-new regression comparison
+(spectral-blend `build_lookup_radiance` vs. the footprint-integrated
+path, same scene) -- the remaining item before calling 13's migration
+fully merge-ready.
+
 ## 14. Isolating the source of large bin-center errors under an imperfect prior (2026-09-04)
 
 Sec.12 closed the representability-gap confound with an EXACT prior. The
@@ -2035,3 +2076,46 @@ perturbation sweep, to separate CO2's own remaining unexplained scatter
 into "co2/p_surface/albedo degeneracy" vs. other causes) and a looser-
 spatial-prior test targeting albedo specifically, both proposed as
 natural next steps but not yet requested.
+
+## 15. Open design question: consistent bin placement across bands for multi-band retrieval (2026-09-04)
+
+Surfaced while verifying Sec.13's forward-model migration on the other
+three bands: a single-window retrieval smoke test requested via `--fpa 0
+--n-windows 58` (the count that tiles cleanly for FPA2) failed outright --
+`ValueError: no window_scale in [0.5, 6] gives 58 windows at
+min_window=4; reachable counts near it: [52, 53, 54, 55, 57, 59, 60, 61,
+63]`. Re-run with default tiling instead: FPA3 alone naturally lands on
+**78** windows for the same 1024-row detector where FPA2 lands on 58.
+
+**Why**: `build_window_tiles`/`scale_for_window_count` picks each band's
+own tiling independently, driven entirely by THAT band's own `rows_
+crossed` keystone curve -- there is no shared spatial grid across bands
+at all. This has never had to be reconciled because multi-band retrieval
+isn't implemented yet -- `gd_joint_block_whole_slit_sweep.py --fpa`
+explicitly refuses more than one band (`"--fpa currently supports
+exactly one band"`).
+
+**The real problem, for whenever multi-band retrieval is built** (user,
+2026-09-04): a sounding is one physical along-slit location with one
+true atmospheric/surface state, viewed simultaneously by multiple bands
+-- so state-vector bins must live on a SINGLE shared spatial (x_km/eta)
+grid across bands, not each band's own separately-tiled one. Two
+objectives in tension:
+1. Maximize the number of spectral points captured per bin, across
+   every band jointly -- not letting one band's coarser natural tiling
+   waste another band's finer one.
+2. Concentrate bins near each band's own high-keystone rows (where eta
+   changes fastest with row -- the same mechanism Sec.14.4 found
+   smearing the water region's error into neighboring rows; finer bins
+   there are what keep the footprint-integration/representability error
+   controlled, per Sec.12's whole investigation).
+
+Today's per-band `scale_for_window_count` optimizes (2) locally per
+band, which is exactly why FPA2 and FPA3 disagree on natural window
+count for nominally the same request -- a multi-band scheme needs one
+JOINT criterion instead (e.g. bin edges chosen so every band's own
+worst-case footprint-integration error stays below a threshold
+simultaneously, or the union of each band's own high-keystone regions)
+rather than optimizing per-band and reconciling after the fact. Not
+designed or implemented -- flagged here as an open problem for whenever
+multi-band retrieval work begins.
