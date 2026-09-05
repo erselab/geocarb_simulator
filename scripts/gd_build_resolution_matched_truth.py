@@ -59,12 +59,104 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import gd_test as gdt  # noqa: E402
 from gd_joint_block_retrieve import FPA, GERT_ROOT, _eta_of  # noqa: E402
-from gd_joint_block_whole_slit_sweep import build_window_tiles, PAD, ROW_MAX_IDX  # noqa: E402
+from gd_joint_block_whole_slit_sweep import (build_window_tiles, PAD, ROW_MAX_IDX,  # noqa: E402
+                                             _make_state_spectrum)
 from gd_joint_block_diagnostics import pixel_density_bin_centers  # noqa: E402
 import geosat_geometry as gg  # noqa: E402
 import gert  # noqa: E402
 from geocarb_gert import along_slit_scene as als, sample_geometries  # noqa: E402
 from geocarb_gert.instrument import GEOCARB_BANDS  # noqa: E402
+from geocarb_gert.joint_state import render_at_anchors  # noqa: E402
+
+
+def render_dense_truth_window(fpa: int, row_lo: int, row_hi: int, dx_km: float,
+                              spectrum, wn_hires, ils, band_label: str, pad: int = 4,
+                              fields=None, surface_fields=None) -> np.ndarray:
+    """Mode 1 -- "highest-resolution truth": anchors spaced ``dx_km`` apart
+    (default 500m, user), UNIFORMLY across this window's own PAD-extended
+    η range, sampling the FULL CONTINUOUS truth (`fields`/`surface_fields`
+    default to the raw, un-band-limited `als.STATE_FIELDS`/`SURFACE_
+    FIELDS`) -- as-true-as-affordable, not tied to any retrieval grid.
+    Goes through :func:`geocarb_gert.joint_state.render_at_anchors`, the
+    SAME forward model every other caller (Mode 2 below, the retrieval's
+    own `build_forward_state`) uses -- fresh RT per anchor, footprint-
+    integrated into pixels, never spectral interpolation (2026-09-02,
+    user). Returns this window's own ``(row_hi-row_lo+1, 1024)`` sub-image.
+    """
+    fields = als.STATE_FIELDS if fields is None else fields
+    surface_fields = als.SURFACE_FIELDS if surface_fields is None else surface_fields
+    rows_win = np.arange(row_lo, row_hi + 1)
+    a_lo, a_hi = max(0, row_lo - PAD), min(ROW_MAX_IDX, row_hi + PAD)
+    # dx_km in ROW units at this window's own local eta/row scale --
+    # dispersed uniformly in ROW index (matching every other anchor grid
+    # in this codebase, which is built uniform-in-row not uniform-in-km;
+    # keystone's own row->eta nonlinearity then makes the actual km
+    # spacing vary slightly across the window, same as anchor_density's
+    # own convention elsewhere).
+    row_span_km = (a_hi - a_lo) * als.SLIT_HALF_KM * 2 / (2 * ROW_MAX_IDX)  # rough row->km scale
+    dx_rows = max(dx_km / max(row_span_km / max(a_hi - a_lo, 1e-9), 1e-9), 1e-6)
+    anchor_rows = np.arange(a_lo, a_hi + 1e-9, dx_rows)
+    anchor_etas = _eta_of(fpa, np.full(len(anchor_rows), 512.0), anchor_rows.astype(float))
+    anchor_x_km = anchor_etas * als.SLIT_HALF_KM
+
+    atm_params = {name: np.asarray(fn(anchor_x_km), dtype=float) for name, fn in fields.items()}
+    surf_params = ({"albedo": np.asarray(surface_fields["albedo"](anchor_x_km, band_label), dtype=float)}
+                   if band_label is not None else {})
+    return render_at_anchors(fpa, rows_win, anchor_etas, atm_params, surf_params,
+                             spectrum, wn_hires, ils, pad=pad)
+
+
+def render_representative_truth_window(fpa: int, row_lo: int, row_hi: int, bin_centers_eta,
+                                       anchor_density: int, spectrum, wn_hires, ils,
+                                       band_label: str, pad: int = 4,
+                                       state_interp: str = "linear") -> np.ndarray:
+    """Mode 2 -- "representative truth": the truth the retrieval's OWN
+    forward code, with THESE bin centers and THIS anchor density, can
+    reproduce EXACTLY (2026-09-02, user). Not a separate approximation of
+    that claim -- it literally reuses `state_spec_from_scene` +
+    `build_forward_state` (the retrieval's own machinery) with the state
+    fixed at `resolution_matched_fields(bin_centers)`'s own prior (exact
+    at every bin center, `prior_anchor_density=None`) and evaluates
+    ``forward(x0())`` -- the SAME code path the retrieval calls every GN
+    iteration, at the prior. Representability is therefore zero BY
+    CONSTRUCTION (same function, same inputs), not by two independently-
+    written pipelines happening to agree closely.
+
+    Returns this window's own ``(row_hi-row_lo+1, 1024)`` sub-image.
+    """
+    from gd_joint_block_whole_slit_sweep import state_spec_from_scene
+    from geocarb_gert.joint_state import build_forward_state
+
+    bin_centers_eta = np.asarray(bin_centers_eta, dtype=float)
+    bin_centers_x_km = bin_centers_eta * als.SLIT_HALF_KM
+    fields = als.resolution_matched_fields(bin_centers_x_km)
+    # state_spec_from_scene's own surface_fields convention is
+    # {"albedo": fn(x_km, band_label)} -- keyed by ROW NAME (2 positional
+    # args), NOT {band_label: fn(x_km)} (a mismatch already found and
+    # fixed once before for gd_joint_block_whole_slit_sweep.py's own
+    # wiring -- resolution_matched_albedo_fn itself returns a 1-arg
+    # fn(x_km), so it needs the same wrap here).
+    surface_fields = ({"albedo": lambda x_km, label, _fn=als.resolution_matched_albedo_fn(
+                          bin_centers_x_km, band_label): _fn(x_km)}
+                      if band_label is not None else None)
+    all_names = list(fields.keys()) + (["albedo"] if band_label is not None else [])
+    spec_true = state_spec_from_scene(bin_centers_eta, free=all_names, uniform=False,
+                                      fields=fields, band_label=band_label,
+                                      surface_fields=surface_fields, prior_anchor_density=None)
+
+    rows_win = np.arange(row_lo, row_hi + 1)
+    a_lo, a_hi = max(0, row_lo - PAD), min(ROW_MAX_IDX, row_hi + PAD)
+    anchor_rows = np.arange(a_lo, a_hi + 1e-9, 1.0 / anchor_density)
+    anchor_etas = _eta_of(fpa, np.full(len(anchor_rows), 512.0), anchor_rows.astype(float))
+
+    fwd = build_forward_state(fpa, rows_win, anchor_etas, spec_true, spectrum,
+                              wn_hires, ils, pad=pad, state_interp=state_interp)
+    # build_forward_state's own forward() ravels its output (matching the
+    # retrieval's own y_true/y0 convention) -- reshaped back to
+    # (n_rows, 1024) here so this returns the SAME shape
+    # render_dense_truth_window/render_at_anchors do, for consistent
+    # whole-slit stitching regardless of which mode built a given window.
+    return fwd(spec_true.x0()).reshape(len(rows_win), -1)
 
 
 def whole_slit_anchor_etas(fpa: int, anchor_density: int, *, min_window: int = None,
@@ -139,6 +231,133 @@ def whole_slit_bin_centers(fpa: int, g_ratio: float, *, min_window: int = None,
         eta_all = np.stack([_eta_of(fpa, cols, np.full(1024, float(i))) for i in rows_win])
         parts.append(pixel_density_bin_centers(eta_all.ravel(), G))
     return np.unique(np.concatenate(parts))
+
+
+_WHOLE_SLIT_TRUTH_G: dict = {}
+
+
+def _render_one_window(tile):
+    """Module-level (picklable, fork-inherited -- same pattern as
+    `along_slit_scene._lookup_sample`/`geocarb_gert.joint_state._render_
+    one_anchor`) so `build_whole_slit_truth` parallelizes across WINDOWS,
+    the same granularity `gd_joint_block_whole_slit_sweep.py`'s own sweep
+    already parallelizes at -- each window-level worker then falls back
+    to a single-process anchor loop internally (render_at_anchors/
+    build_forward_state detect the daemon worker process and refuse to
+    nest a second pool), avoiding nested-pool errors entirely rather than
+    needing to divide `n_workers` between two parallelism levels.
+    2026-09-02 (user): fixed after this ran fully single-threaded on a
+    16-core interactive session.
+    """
+    G = _WHOLE_SLIT_TRUTH_G
+    row_lo, row_hi = tile
+    if G["mode"] == "dense":
+        sub = render_dense_truth_window(G["fpa"], row_lo, row_hi, G["dx_km"], G["spectrum"],
+                                        G["wn_hires"], G["ils"], G["band_label"], pad=G["pad"])
+    else:
+        cols = np.arange(1024.0)
+        rows_win = np.arange(row_lo, row_hi + 1)
+        width = len(rows_win)
+        Gn = max(2, int(round(width / G["g_ratio"])))
+        eta_all = np.stack([_eta_of(G["fpa"], cols, np.full(1024, float(i))) for i in rows_win])
+        bin_centers_eta = pixel_density_bin_centers(eta_all.ravel(), Gn)
+        sub = render_representative_truth_window(
+            G["fpa"], row_lo, row_hi, bin_centers_eta, G["anchor_density"], G["spectrum"],
+            G["wn_hires"], G["ils"], G["band_label"], pad=G["pad"], state_interp=G["state_interp"])
+    return row_lo, row_hi, sub
+
+
+def build_whole_slit_truth(fpa: int, mode: str, spectrum, wn_hires, ils, band_label: str,
+                           *, dx_km: float = 0.5, g_ratio: float = 1.0, anchor_density: int = 16,
+                           min_window: int = None, window_scale: float = 1.0, overlap: int = 0,
+                           pad: int = 4, state_interp: str = "linear",
+                           n_workers: int | None = None, stitch: bool = True):
+    """Every window's own truth sub-image, either STITCHED into one full
+    ``(1024, 1024)`` detector array (``stitch=True``, the default) or kept
+    as a per-window COLLECTION (``stitch=False``) -- ``{(row_lo, row_hi):
+    sub_image}``, one entry per window, never merged.
+
+    ``stitch=True`` requires ``overlap=0`` (raises otherwise): disjoint
+    tiling means every row belongs to EXACTLY one window, so a single
+    array is unambiguous and every row is exactly representable by
+    construction (mode="representative") or as-true-as-affordable
+    (mode="dense"). At ``overlap>0`` two adjacent windows' own
+    independently-computed local anchor grids generally disagree in their
+    shared rows, so there is no single array that is simultaneously
+    exactly representable by BOTH windows there -- unresolved, deferred
+    (2026-09-02, user).
+
+    ``stitch=False`` sidesteps that entirely (2026-09-02, user: "generate
+    individual window-specific truth images ... for debugging and sanity
+    checks") -- works at ANY `overlap`, since nothing gets merged; each
+    window's own entry is exactly what THAT window's own retrieval
+    forward code can reproduce (mode="representative") or the best
+    available reference (mode="dense"), looked up by that window's own
+    ``(row_lo, row_hi)`` key rather than by detector row. This is the
+    right tool for testing one specific window at `--overlap 2` (this
+    session's own production convention) without first having to resolve
+    the whole-slit stitching-conflict question above.
+
+    Parameters
+    ----------
+    mode : "dense" or "representative"
+        "dense" -- Mode 1 (`render_dense_truth_window`): anchors every
+        `dx_km`, sampling the full continuous truth.
+        "representative" -- Mode 2 (`render_representative_truth_window`):
+        the retrieval's own bin-grid-band-limited truth, exactly
+        reproducible by the retrieval's own forward code at `g_ratio`/
+        `anchor_density`.
+    n_workers : int, optional
+        Windows are independent -- ``None`` (default) uses every
+        available CPU; ``1`` forces the old single-process loop.
+
+    Returns
+    -------
+    ndarray, shape (1024, 1024) if ``stitch=True``;
+    dict[(int, int), ndarray] (one entry per window) if ``stitch=False``.
+    """
+    import multiprocessing as mp
+    from geocarb_gert.gd_render import available_cpus
+
+    if mode not in ("dense", "representative"):
+        raise ValueError(f"mode must be 'dense' or 'representative', got {mode!r}")
+    if stitch and overlap != 0:
+        raise ValueError("stitch=True requires overlap=0 (a single array cannot be "
+                         "simultaneously exact for two overlapping windows' own "
+                         "independent local anchor grids -- pass stitch=False for "
+                         "a per-window collection at overlap>0 instead)")
+    tiles = build_window_tiles(fpa, overlap=overlap,
+                               **({"min_window": min_window} if min_window is not None else {}),
+                               window_scale=window_scale)
+
+    if n_workers is None:
+        n_workers = available_cpus()
+    if mp.current_process().daemon:
+        n_workers = 1
+
+    _WHOLE_SLIT_TRUTH_G.update(dict(
+        fpa=fpa, mode=mode, spectrum=spectrum, wn_hires=wn_hires, ils=ils,
+        band_label=band_label, dx_km=dx_km, g_ratio=g_ratio, anchor_density=anchor_density,
+        pad=pad, state_interp=state_interp))
+    if n_workers <= 1:
+        results = [_render_one_window(tile) for tile in tiles]
+    else:
+        ctx = mp.get_context("fork")
+        with ctx.Pool(min(n_workers, len(tiles))) as pool:
+            results = pool.map(_render_one_window, tiles)
+
+    if not stitch:
+        return {(row_lo, row_hi): sub for row_lo, row_hi, sub in results}
+
+    A = np.full((1024, 1024), np.nan)
+    for row_lo, row_hi, sub in results:
+        A[row_lo:row_hi + 1, :] = sub
+    if np.any(np.isnan(A)):
+        missing = np.where(np.isnan(A).any(axis=1))[0]
+        raise RuntimeError(f"whole-slit truth has {len(missing)} unfilled rows "
+                           f"(tiling gap, e.g. rows {missing[:5]}...) -- overlap=0 tiling "
+                           f"should cover every row exactly once")
+    return A
 
 
 def main() -> int:

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import warnings
 from functools import lru_cache
 from typing import Callable
 
@@ -255,7 +256,25 @@ def image(
         ``A[i, j]`` -- detector row ``i``, column ``j``, in radiance units.
         Row ``i`` is the single-physical-row truth: never averaged with
         neighbouring rows (the only cross-row mixing is the final PSF blur).
+
+    .. deprecated:: 2026-09-04
+        Every pixel is a POINT query at its own true eta -- no sub-pixel
+        footprint integration, so it's typically paired with a ``radiance``
+        built by the now-deprecated ``along_slit_scene.build_lookup_
+        radiance`` (see docs/PROJECT_STATUS.md Sec.13.1/13.2). New code
+        should use :func:`predict_neighborhood` with ``footprint=True``
+        (real per-pixel footprint edges) fed by
+        :func:`geocarb_gert.joint_state.render_at_anchors`. Kept for the
+        several older scripts that still call it directly -- not removed,
+        since migrating those is a separate, larger task.
     """
+    warnings.warn(
+        "gd_render.image renders every pixel as a POINT query (no "
+        "sub-pixel footprint integration). New code should use "
+        "predict_neighborhood(..., footprint=True) fed by "
+        "geocarb_gert.joint_state.render_at_anchors instead (see "
+        "docs/PROJECT_STATUS.md Sec.13.1/13.2).",
+        DeprecationWarning, stacklevel=2)
     cols = np.arange(N_PX, dtype=float)
     sm = s_max(fpa)
 
@@ -294,6 +313,7 @@ def predict_neighborhood(
     ils: ILS,
     spatial_psf_fwhm_px: float = 1.5,
     pad: int = 4,
+    footprint: bool = False,
 ) -> np.ndarray:
     """:func:`image`'s own per-row loop, restricted to a small row window --
     the forward operator for the joint multi-atmosphere block
@@ -317,6 +337,20 @@ def predict_neighborhood(
         be a few multiples of ``spatial_psf_fwhm_px``; the default (4)
         matches ``gaussian_blur_rows``'s own edge-extension half-width for
         FWHM~1.5px.
+    footprint : bool
+        ``False`` (default, unchanged behaviour): every existing caller's
+        ``radiance(eta) -> spectrum`` is a POINT query at that pixel's own
+        true (row, col) η -- unchanged for every scene function that never
+        opted into this. ``True`` (2026-09-02, user: real per-pixel
+        sub-pixel integration instead of a point sample or an interpolated
+        stand-in): ``radiance`` is instead called as ``radiance(eta_lo,
+        eta_hi) -> spectrum`` with this PIXEL's own real along-slit
+        footprint edges -- η at row-0.5 and row+0.5, at that SAME column
+        (keystone-correct: computed per (row, col), not just per row) --
+        e.g. :func:`geocarb_gert.focalplane.footprint_average_scene`'s own
+        ``radiance``. ``eta_lo``/``eta_hi`` are sorted per-pixel (min/max
+        of the two edges), not assumed increasing with row, since a
+        distortion convention could in principle reverse that locally.
 
     Returns
     -------
@@ -330,10 +364,22 @@ def predict_neighborhood(
 
     A_pad = np.empty((len(rows_padded), N_PX), dtype=float)
     for k, i in enumerate(rows_padded):
-        lam_row, s_row = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i)))
-        nu_row = 1.0e4 / lam_row
-        eta_row_true = s_row / sm
-        S_row = np.asarray(radiance(eta_row_true), dtype=float)
+        if footprint:
+            _, s_a = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i) - 0.5))
+            _, s_b = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i) + 0.5))
+            eta_a, eta_b = s_a / sm, s_b / sm
+            eta_row_lo, eta_row_hi = np.minimum(eta_a, eta_b), np.maximum(eta_a, eta_b)
+            # nu at this pixel's own CENTER row (unaffected by the
+            # footprint-averaging change -- the spectral/ILS axis is
+            # separate from the along-slit footprint being integrated)
+            lam_row, _ = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i)))
+            nu_row = 1.0e4 / lam_row
+            S_row = np.asarray(radiance(eta_row_lo, eta_row_hi), dtype=float)
+        else:
+            lam_row, s_row = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i)))
+            nu_row = 1.0e4 / lam_row
+            eta_row_true = s_row / sm
+            S_row = np.asarray(radiance(eta_row_true), dtype=float)
         A_pad[k] = _diagonal_ils_convolve(wn_hires, S_row, nu_row, ils)
 
     A_pad = gaussian_blur_rows(A_pad, spatial_psf_fwhm_px)

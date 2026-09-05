@@ -38,6 +38,7 @@ rather than the two merely being close).
 from __future__ import annotations
 
 import multiprocessing as mp
+import warnings
 from functools import lru_cache
 from typing import Callable
 
@@ -685,6 +686,123 @@ def resolution_matched_albedo_fn(x_anchor_km, label) -> Callable:
     return lambda x_km: np.interp(x_km, x_anchor_km, y_anchor)
 
 
+def build_scene_fields(uniform: bool = False, barcode: bool = False,
+                       realistic_barcode: bool = False, vary_albedo: bool = False,
+                       barcode_bars: int = 10, band_labels=None,
+                       constant_albedo: float = 0.0,
+                       fields=None, surface_fields=None):
+    """THE one place every truth-scene "mode" gets defined (2026-09-04,
+    user: "barcode and realistic barcode are just different sets of scene
+    parameters") -- `--uniform`/`--barcode`/`--realistic-barcode`/
+    `--vary-albedo` all collapse to a particular choice of ``fields``
+    (``{atmosphere_row: fn(x_km)}``, the same shape :data:`STATE_FIELDS`/
+    :func:`resolution_matched_fields` already use) and ``surface_fields``
+    (``{band_label: fn(x_km)}``, matching :data:`SURFACE_FIELDS`/
+    :func:`resolution_matched_albedo_fn`'s own convention -- NOT
+    `state_spec_from_scene`'s `{"albedo": fn(x_km, label)}`, since this
+    feeds straight into `build_lookup_radiance`/the anchor-rendering
+    path, not a `StateSpec`), fed into ONE rendering mechanism -- barcode
+    stops being a separate code path.
+
+    Real behavioural fix, not just a refactor: today's ``--barcode``
+    computes ONE spectrum at the center atmosphere/albedo and multiplies
+    a bar-pattern GAIN onto it post-hoc (linear-in-albedo approximation).
+    Expressed as a real ``surface_fields`` albedo pattern instead, each
+    bar gets a genuine fresh RT run at its own true albedo -- the same
+    "never approximate what a real RT call can compute exactly" principle
+    :func:`geocarb_gert.focalplane.footprint_average_scene` already
+    applies to spectral interpolation. This changes ``--barcode``'s own
+    numerical output (confirmed intentional, not a regression).
+
+    ``fields``/``surface_fields`` (both default ``None``): an explicit
+    caller override -- e.g. :func:`resolution_matched_fields`/
+    :func:`resolution_matched_albedo_fn` for a deliberately band-limited
+    truth. Given non-``None``, this function's own uniform/barcode/
+    vary_albedo logic is skipped entirely and the override is returned
+    as-is -- matches how ``fields=``/``surface_fields=`` already worked
+    on every caller before this refactor.
+
+    Parameters
+    ----------
+    band_labels : list of str
+        Every band label a caller might ever query the returned
+        ``surface_fields`` for (usually ``[[label]]`` for a single-FPA
+        caller) -- REQUIRED whenever albedo needs to vary at all
+        (``barcode``, ``realistic_barcode``, or ``vary_albedo``); a
+        constant-albedo scene (``uniform``, or none of those three) never
+        needs it, so it stays optional for that case.
+    constant_albedo : float
+        The scalar albedo used wherever nothing else makes it vary --
+        `uniform`, `barcode`'s own base reflectance, or the non-`vary_
+        albedo` fallback. Caller-supplied (e.g. `_band_setup`'s own
+        ``albedo_for(wide_inst, "desert")``) rather than computed here,
+        so this function never silently substitutes a different albedo
+        SOURCE than whatever the caller was already using.
+    """
+    if fields is not None or surface_fields is not None:
+        return fields, surface_fields
+
+    def _const_field(v):
+        return lambda x_km: np.full(np.atleast_1d(x_km).shape, float(v))
+
+    if uniform:
+        fields_out = {name: _const_field(fn(0.0)) for name, fn in STATE_FIELDS.items()}
+    else:
+        fields_out = dict(STATE_FIELDS)
+
+    needs_albedo_pattern = barcode or realistic_barcode or vary_albedo
+    if needs_albedo_pattern and not band_labels:
+        raise ValueError("band_labels is required whenever albedo needs to vary "
+                         "(barcode, realistic_barcode, or vary_albedo)")
+
+    if barcode or realistic_barcode:
+        n_bars = barcode_bars
+        brightness = np.resize([1.0, 0.2], n_bars)
+        # sharp bar edges (softness=0), same convention as focalplane.
+        # barcode_scene's own default -- boundaries in ETA, converted to
+        # x_km once per call below.
+        boundaries_eta = -1.0 + np.cumsum(np.full(n_bars, 2.0 / n_bars))[:-1]
+
+        def _bar_gain(x_km):
+            eta = np.atleast_1d(x_km) / SLIT_HALF_KM
+            g = np.full(eta.shape, brightness[0])
+            for k, b in enumerate(boundaries_eta):
+                g = np.where(eta > b, brightness[k + 1], g)
+            return g
+
+        if barcode:
+            # Atmosphere ALSO fixed at center (matches --barcode's own
+            # existing semantics: "same column of sky everywhere, only
+            # reflectance varies" -- a ground-test diffuser illumination
+            # pattern, not a genuine along-slit atmosphere).
+            fields_out = {name: _const_field(fn(0.0)) for name, fn in STATE_FIELDS.items()}
+            def _base_albedo(x_km):
+                return np.full(np.atleast_1d(x_km).shape, constant_albedo)
+        else:
+            # realistic_barcode: real continuous atmosphere (fields_out
+            # already set above); the bar gain multiplies WHATEVER the
+            # base albedo would otherwise have been -- the real vary_
+            # albedo pattern if that's also on, else the fixed constant.
+            if vary_albedo:
+                def _base_albedo(x_km, _lab=band_labels[0]):
+                    return albedo_for_label(x_km, _lab)
+            else:
+                def _base_albedo(x_km):
+                    return np.full(np.atleast_1d(x_km).shape, constant_albedo)
+
+        def _albedo_fn(x_km, _base=_base_albedo):
+            return _bar_gain(x_km) * np.asarray(_base(x_km), dtype=float)
+
+        surface_fields_out = {lab: _albedo_fn for lab in band_labels}
+    elif vary_albedo:
+        surface_fields_out = {lab: (lambda x_km, _l=lab: albedo_for_label(x_km, _l))
+                              for lab in band_labels}
+    else:
+        surface_fields_out = None  # every existing caller's own default (a single fixed scalar)
+
+    return fields_out, surface_fields_out
+
+
 def atmosphere_from_params(co2_ppm: float, ch4_ppb: float, co_ppb: float,
                            h2o_surface_vmr: float, p_surface_hpa: float,
                            h2o_scale_height_km: float = 2.0) -> AtmosphericProfile:
@@ -790,7 +908,28 @@ def build_lookup_radiance(
     ``{band_label: fn(x_km) -> albedo}``, one entry per ``inst.windows``
     label; only consulted when ``vary_albedo=True`` (same as ``albedo_at``
     itself).
+
+    .. deprecated:: 2026-09-04
+        This two-sample linear spectral blend was confirmed (2026-09-02)
+        to be the dominant source of the representability-gap artifacts
+        an entire investigation chased before tracing it here -- see
+        docs/PROJECT_STATUS.md Sec.13.1. New code should use
+        :func:`geocarb_gert.joint_state.render_at_anchors` +
+        :func:`geocarb_gert.focalplane.footprint_average_scene` instead
+        (real per-anchor RT, exact sub-pixel footprint integration, never
+        an interpolated stand-in). Kept for the several older scripts
+        that still call it directly (``gd_toy_native_row_demo.py``,
+        ``gd_reversed_scene_check.py``, and others) -- not removed, since
+        migrating those is a separate, larger task.
     """
+    warnings.warn(
+        "build_lookup_radiance uses a two-sample linear spectral blend, "
+        "confirmed to be the dominant source of representability-gap "
+        "artifacts in prior investigations (docs/PROJECT_STATUS.md "
+        "Sec.13.1). New code should use "
+        "geocarb_gert.joint_state.render_at_anchors + "
+        "geocarb_gert.focalplane.footprint_average_scene instead.",
+        DeprecationWarning, stacklevel=2)
     from gert.forward_model import ForwardModel
     from gert.rt_solver import SingleScatterSolver
 
