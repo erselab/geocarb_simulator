@@ -2180,44 +2180,171 @@ rather than optimizing per-band and reconciling after the fact. Not
 designed or implemented -- flagged here as an open problem for whenever
 multi-band retrieval work begins.
 
-## 16. Future work queue
+
+## 16. All-4-rows-free cross-talk, and a frozen-row representability gap under genuine (Mode-1 dense) truth (2026-09-04)
+
+Two experiments, both `g_ratio=1`/`anchor_density=4`/FPA2, run in parallel
+following Sec.14's own diagnostic methodology, one step closer to a real
+retrieval each: (A) every currently-modeled state row free at once
+(the first genuinely "we don't know anything" configuration this
+project has run), and (B) a deliberately NON-representable truth
+(Mode-1 dense, 500m) instead of Sec.14's representable Mode-2 truth,
+isolating whether the frozen-row-contamination-ruled-out result (14.1)
+still holds once a genuine representability gap is present.
+
+### 16.1 Experiment A: all 4 rows free -- real cross-talk, and it interacts with keystone
+
+Config: `--free co2_ppm,p_surface_hpa,h2o_surface_vmr,albedo --vary-albedo
+--prior-fields structural`, Mode-2 representative truth (`ad4`-matched).
+58/58 windows solved, no errors
+(`co2ph2oalbedo-58-g1-ad4-pf-structural-MODE2TRUTH_analytic.pkl`).
+
+| row | rms error | max\|err\| |
+|---|---|---|
+| co2_ppm | 0.192 ppm | 2.271 ppm |
+| p_surface_hpa | 0.0199 hPa | 0.243 hPa |
+| h2o_surface_vmr | 1.50e-6 | 1.79e-5 |
+| albedo | 1.35e-4 | 4.31e-3 |
+
+CO2's own error is essentially unchanged from the earlier 3-free-row
+experiment (0.192 vs. 0.191 ppm rms) -- but p_surface got noticeably
+WORSE (0.0199 vs. 0.0171 hPa rms, 0.243 vs. 0.159 hPa max) freeing H2O
+opened a new degeneracy channel that leaks into p_surface specifically,
+not into CO2.
+
+**Cross-correlation matrix of errors** (pooled across all 1024 bins):
+
+|  | co2 | p_surf | h2o | albedo |
+|---|---|---|---|---|
+| co2 | 1.00 | 0.49 | **0.60** | 0.06 |
+| p_surf | 0.49 | 1.00 | -0.11 | -0.22 |
+| h2o | 0.60 | -0.11 | 1.00 | 0.10 |
+| albedo | 0.06 | -0.22 | 0.10 | 1.00 |
+
+Real, physically-sensible cross-talk: CO2/H2O is the strongest (0.60) --
+FPA2 (`CO2_strong`) only has `co2` and `h2o` as absorbers, so they
+directly compete for the same spectral information. CO2/p_surface shows
+the classic pressure-CO2 degeneracy (0.49). Albedo stays the most
+decoupled row (\|corr\| <= 0.22 with everything), consistent with 14.2's
+finding that albedo's error is dominated by its own prior-pull rather
+than cross-talk with the gas/pressure rows.
+
+**Keystone interaction**: `corr(|error|, G)` (higher G = narrower,
+faster-keystone windows) is +0.31 for h2o, +0.19 for co2, +0.13 for
+p_surface, and -0.01 (none) for albedo. The cross-talk PRODUCT terms
+also scale weakly positively with G (`|co2_err*albedo_err|` +0.15,
+`|co2_err*p_err|` +0.10). Keystone smearing appears to specifically
+degrade the retrieval's ability to SEPARATE correlated absorbers
+(CO2/H2O), not just add noise uniformly -- albedo, spectrally distinct
+from the two gases, shows no such dependence.
+
+**Window-position and gradient effects -- CO2 behaves oppositely from
+every other row.** Splitting bins by distance-to-nearest-window-edge
+(tercile) and by |local true-field gradient| (tercile):
+
+| row | RMS near-edge vs. central | RMS steep-gradient vs. flat |
+|---|---|---|
+| co2_ppm | 0.097 vs. 0.225 (0.43x -- **worse in center**) | 0.048 vs. 0.070 (0.68x -- worse when flat) |
+| p_surface_hpa | 0.028 vs. 0.014 (1.99x -- worse at edge) | 0.013 vs. 0.028 (0.48x -- worse when flat) |
+| h2o_surface_vmr | 2.0e-6 vs. 1.2e-6 (1.65x -- worse at edge) | 9.7e-7 vs. 7.8e-7 (1.25x -- worse when steep) |
+| albedo | 2.3e-4 vs. 1.7e-5 (**14x** -- worse at edge) | 1.2e-5 vs. 1.5e-5 (0.76x -- worse when flat) |
+
+Albedo/p_surface/h2o are all worse at window edges (albedo dramatically
+so); CO2 is worse in window INTERIORS, and worse in FLAT-truth regions
+than steep ones for both CO2 and p_surface. Checked directly that CO2's
+pattern isn't the water-region effect (14.3) leaking in -- excluding
+those 41 bins entirely leaves it essentially unchanged (0.42x vs 0.43x).
+Working hypothesis (not yet confirmed, queued as 16.3's correlation-
+length study): the spatial-correlation prior has more same-window
+neighbors to smooth against in interiors/flat regions, which blurs
+CO2's genuinely localized hot-spot structure more than it affects the
+smoother p_surface/albedo fields.
+
+### 16.2 Experiment B: a genuine (non-representable) truth reopens the frozen-row question
+
+Config: `--free co2_ppm,p_surface_hpa --vary-albedo`, frozen rows
+(`ch4_ppb`, `co_ppb`, `h2o_surface_vmr`, AND albedo -- frozen here,
+unlike 16.1) fixed at the exact continuous truth (`als.STATE_FIELDS`/
+`als.SURFACE_FIELDS`, evaluated at each bin's own position) via a new
+`dense_frozen_exact` prior-field registration. Truth: Mode-1 DENSE
+(500m, `whole_slit_truth_v1.pkl["dense"]`, reused as-is since Mode-1
+truth's own resolution doesn't depend on the retrieval's `anchor_density`)
+-- genuinely NOT representable at this retrieval's bin/anchor grid,
+unlike every other experiment this session. 58/58 windows solved
+(`co2p-58-g1-ad4-pf-densefrozenexact-DENSETRUTH_analytic.pkl`), 8 of the
+widest windows needed up to ~3.2 hours wall clock (see the sbatch-
+time-budget note this session's memory now records).
+
+| row | rms error | max\|err\| |
+|---|---|---|
+| co2_ppm | **47.3 ppm** | **388 ppm** |
+| p_surface_hpa | **26.1 hPa** | **104 hPa** |
+
+Compare to 14.1's frozen-row-exact ablation under REPRESENTABLE Mode-2
+truth: co2_ppm rms=0.191/max=2.263 ppm, p_surface_hpa rms=0.0171/
+max=0.159 hPa. **This is not a small degradation -- it is 100-250x
+worse**, and the numbers are far beyond any physically plausible CO2/
+pressure anomaly. `resid_hires_rms` stayed bounded (0.024-0.27 across
+all 58 windows, worse than the ~1e-5 near-zero residuals typical of
+every other experiment this session, but not diverging/NaN) -- GN did
+converge to a genuine local minimum, it is just a badly wrong one.
+
+**Working explanation, not yet independently confirmed**: "frozen at
+the exact truth value AT EACH BIN'S OWN POSITION" is not the same as
+"frozen at the true field everywhere" once the true field has real
+structure below the bin spacing. `state_spec_from_scene` reconstructs
+every row -- including frozen ones -- as PIECEWISE-LINEAR between bin
+centers; the forward model then renders from that reconstruction. 14.1's
+Mode-2 truth was built to be exactly representable at these same bin
+positions (representability = 0 by construction for every row, frozen
+included), so this gap could never appear there. Mode-1 dense truth has
+no such guarantee -- it is the full continuous field, including
+albedo's own real fine-scale texture (`albedo_for_label(...,
+include_fine=True)`, a genuinely finer-than-bin-spacing feature per this
+session's own albedo-variability note), which a frozen row's bin-to-bin
+LINEAR reconstruction cannot capture even though each bin's own node
+value is exact. The two free rows (co2/p_surface) then have to absorb
+whatever radiance mismatch that leaves, and apparently can be pushed to
+wildly nonphysical values doing so.
+
+**This is flagged, not fully diagnosed** -- the magnitude (hundreds of
+ppm) is large enough that it deserves a direct follow-up before being
+treated as settled: (a) score frozen-row representability specifically
+(compare the model's own piecewise-linear reconstruction of each frozen
+row against the true continuous field IN BETWEEN bin centers, the same
+way 12's investigation scored the free-row gap), and (b) check whether
+freezing albedo specifically (vs. only ch4/co/h2o) is what drives the
+blowup, by rerunning with albedo free instead of frozen against the same
+Mode-1 truth. Recorded as an addition to 16.3's queue below.
+
+### 16.3 Future work queue
 
 **Correlation-length sensitivity study** (2026-09-04, user: "let's make
 that correlation exploration study an item we want to do in the
-future"). Surfaced investigating Experiment A (all 4 rows free --
-co2_ppm, p_surface_hpa, h2o_surface_vmr, albedo -- structural prior,
-Mode-2 truth; full results below once Experiment B also completes):
-CO2's error is >2x WORSE in window INTERIORS than at window edges, and
-worse in FLAT-truth regions than steep-gradient ones -- both the
-OPPOSITE of p_surface/h2o/albedo, which are all worse at edges (albedo
-dramatically so, 14x) and show no strong gradient dependence. Checked
-directly that this isn't the water-region effect (Sec.14.3) leaking in
--- excluding those 41 bins entirely leaves the pattern essentially
-unchanged (0.42x vs 0.43x).
+future"). Surfaced by 16.1's within-window position effect: CO2's error
+is >2x WORSE in window INTERIORS than at window edges, and worse in
+FLAT-truth regions than steep-gradient ones -- both the OPPOSITE of
+p_surface/h2o/albedo, which are all worse at edges (albedo dramatically
+so, 14x) and show no strong gradient dependence.
 
-Working hypothesis, NOT yet confirmed: the spatial-correlation prior has
-more same-window neighbors to smooth against in window interiors (and
-in flat-truth stretches, where the prior and data don't disagree much on
-local shape) than at edges/steep-gradient bins, where the data has more
-leverage to resist the prior's pull. CO2 carries real localized
-structure (hotspots) that this extra interior smoothing would blur more
-than it blurs the smoother p_surface/albedo fields, whose own failure
-mode (Sec.14.2) is already prior-pull-dominated rather than structure-
-blurring.
+**The study**: directly test the smoothing-prior hypothesis (16.1) by
+varying `corr_length`/`sigma` (`state_spec_from_scene`'s own parameters,
+currently `DEFAULT_CORR_LENGTH_ETA`'s per-row physical defaults) and
+re-running Experiment A (or a cheaper single-window version) to see
+whether (a) shortening CO2's correlation length specifically closes the
+edge-vs-interior and flat-vs-steep gaps, and (b) how much of the
+cross-talk correlation matrix (co2/h2o corr=0.60, co2/p_surface
+corr=0.49) is itself sensitive to corr_length choice. Also worth
+directly inspecting `avk`'s spatial pattern WITHIN a window (not just
+the whole-window `dof` scalar already used in 14.2).
 
-**The study**: directly test this by varying `corr_length`/`sigma`
-(`state_spec_from_scene`'s own parameters, currently `DEFAULT_CORR_
-LENGTH_ETA`'s per-row physical defaults) and re-running Experiment A (or
-a cheaper single-window version) to see whether (a) shortening CO2's
-correlation length specifically closes the edge-vs-interior and flat-
-vs-steep gaps, confirming the smoothing-prior mechanism, and (b) how
-much of the cross-talk correlation matrix (co2/h2o corr=0.60, co2/
-p_surface corr=0.49) is itself sensitive to corr_length choice, since a
-looser prior gives cross-talk more room to manifest while a tighter one
-suppresses it (at the cost of blurring real local structure more, per
-the hypothesis above). Also worth directly inspecting `avk`'s spatial
-pattern WITHIN a window (not just the whole-window `dof` scalar already
-used in Sec.14.2) to see if diag(A) itself is measurably lower in window
-interiors, which would be the most direct possible confirmation.
+**Frozen-row representability gap under genuine (non-representable)
+truth** (2026-09-04, surfaced by 16.2). Score each frozen row's own
+piecewise-linear reconstruction against the true continuous field
+between bin centers (the representability-gap methodology 12 already
+built, applied to frozen rows specifically instead of free ones); and
+isolate whether albedo's real fine texture specifically is the driver
+by rerunning 16.2's config with albedo free instead of frozen against
+the same Mode-1 dense truth.
 
-Not yet run -- recorded here so it isn't lost, not yet scheduled.
+Neither item run yet -- recorded here so neither is lost.
