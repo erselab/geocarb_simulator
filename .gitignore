@@ -6,6 +6,8 @@ __pycache__/
 build/
 dist/
 results/
+**/scratch_work/*.pkl
+**/scratch_work/*.log
 *.err
 *.out
 
