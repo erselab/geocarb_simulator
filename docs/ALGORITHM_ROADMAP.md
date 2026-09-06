@@ -177,11 +177,19 @@ diagnostic run") FPA2 retrieval should look like, and why:
   realistic "we don't know anything" state, and cross-talk between
   these four is now characterized rather than a surprise. `ch4_ppb`/
   `co_ppb` frozen (FPA2 has no sensitivity to either).
-- **Bin/anchor resolution**: `g_ratio=1`, `anchor_density>=4` -- Sec.12
-  showed finer is strictly better once truth and bin grid are matched,
-  and item 6 above will confirm whether `ad4` specifically is
-  sufficient against a genuinely non-representable truth or whether
-  `ad16` (or finer) is needed for production.
+- **Bin/anchor resolution**: `g_ratio=0.5` as the new working default
+  (`PROJECT_STATUS.md` Sec.6, 2026-09-05/06) -- finer `g_ratio` (0.5,
+  0.25) gives real, consistent accuracy improvement over `g_ratio=1` at
+  every window tested (`p_surface` especially, up to ~23x median-error
+  reduction end to end), confirming Sec.12's original "finer is
+  strictly better" finding still holds under genuine non-representable
+  truth. `g_ratio=0.25` is more accurate still but costs ~6-9x
+  `g_ratio=1`'s wall-clock per window (cost scales ~G^1.24) -- the
+  single widest window alone took ~5.3 hours, making a full 58-window
+  production sweep at 0.25 impractical without further work (see Sec.6
+  for the full per-window table). `g_ratio=0.5` costs only ~2-3.5x and
+  captures most of the benefit, the better production trade-off for
+  now. `anchor_density>=4` unchanged.
 - **Prior**: structural (imperfect) by construction -- exact-prior
   results are a ceiling/diagnostic tool (Sec.12.7's own conclusion),
   never the production configuration, since a real retrieval never

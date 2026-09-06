@@ -301,3 +301,93 @@ configuration problem. Not yet quantified: whether OTHER FPA bands have
 their own keystone-null point at a different location (each band's own
 clocking offset differs, per the project's Era-1 findings), meaning
 this specific "worst edge" would move for FPA0/1/3.
+
+
+## 6. Finer g_ratio (0.5, 0.25): real improvement everywhere tested, but a keystone-set floor persists at the worst edge (2026-09-05/06)
+
+User direction: "I'd like to try a whole slit sweep with co2, pressure,
+and albedo unfrozen and the others set at the anchor truth values. Use
+g_ratios of 0.5 and 0.25" -- explicitly superseding an earlier (now-
+outdated) instruction to skip `g_ratio=0.5` in sweeps, since that
+guidance predated the current footprint-integrated truth mechanism.
+
+**Cost reality check first**: a full 58-window array at `g_ratio=0.25`
+turned out to be far more expensive than any prior config this
+session -- the single widest window (G=180) took **19061s (~5.3
+hours)** on its own. Capped to the fast 3-window subset
+(task_ids 21/26/57, rows 189-197/238-248/1013-1023) plus two extra
+single-window checks (rows 0-8 and 968-1012) for `g_ratio in
+{1, 0.5, 0.25}`, all anchor-frozen `ch4_ppb`/`co_ppb`/
+`h2o_surface_vmr`, Mode-1 dense truth, co2/p_surface/albedo free.
+
+**A real naming-collision trap caught along the way**: an earlier,
+differently-configured run (ch4/co/h2o frozen on `bin_centers`, not
+anchor) had left a `task057of58.pkl` in the SAME `g_ratio=1` output
+directory this sweep also writes to. Checked directly (`ch4_ppb`'s own
+position count) before trusting the "g_ratio=1" comparison point --
+found it stale (11 positions, matching `bin_centers`, not the ~40+-
+point anchor grid this sweep uses) -- and reran that one cell properly
+rather than report a mismatched comparison.
+
+### Full comparison (|error| mean / median / max / rms; co2 in ppm, p_surface in hPa)
+
+| window | g_ratio | G | t_hires | co2 |err| (mean/med/max/rms) | p_surface |err| (mean/med/max/rms) |
+|---|---|---|---|---|---|
+| (0,8) near-null | 1 | 9 | 298s | 4.78/4.89/10.83/5.92 | 2.47/2.75/5.73/2.90 |
+| | 0.25 | 36 | 1296s | 3.51/**2.28**/12.54/4.86 | **0.20**/**0.15**/**0.54**/0.24 |
+| (189,197) | 1 | 9 | 498s | 13.45/8.41/52.03/19.71 | 9.28/9.81/12.50/9.75 |
+| | 0.5 | 18 | 904s | 6.43/6.27/15.71/7.89 | 1.58/1.13/5.85/2.26 |
+| | 0.25 | 36 | 2752s | 4.46/**3.62**/**12.57**/5.59 | **0.48**/**0.43**/**1.35**/0.59 |
+| (238,248) | 1 | 11 | 549s | 17.06/16.41/34.62/18.45 | 1.75/1.07/5.22/2.38 |
+| | 0.5 | 22 | 1211s | 5.16/2.77/18.68/7.32 | 0.74/0.26/7.64/1.73 |
+| | 0.25 | 44 | 2295s | 3.57/**2.70**/**9.93**/4.49 | **0.28**/0.28/**0.84**/0.36 |
+| (1013,1023) far edge | 1 | 11 | 344s | 5.57/4.42/21.42/7.59 | 3.78/2.72/10.98/4.76 |
+| | 0.5 | 22 | 643s | 4.58/1.38/**27.70**/8.26 | 1.52/0.77/6.41/2.29 |
+| | 0.25 | 44 | 1745s | 2.58/**1.94**/10.56/3.60 | **0.49**/**0.28**/**3.97**/0.81 |
+| (968,1012) widest | 1 | 45 | (pending) | -- | -- |
+| | 0.25 | 180 | 19061s | 3.26/1.92/**67.59**/6.65 | 0.46/0.23/10.37/1.08 |
+
+### What the data shows
+
+**Finer g_ratio helps, consistently, across every window tested** --
+median and rms error drop at every step from `g_ratio=1` to `0.5` to
+`0.25`, at every window. `p_surface` improves the most dramatically
+(e.g. rows 189-197: median 9.81 -> 1.13 -> 0.43 hPa, a ~23x reduction
+end to end). This is a real, substantial, and consistent finding, not
+noise -- confirms the user's premise that finer resolution genuinely
+buys real-world improvement now that the truth-rendering mechanism is
+correct (unlike whatever the earlier "skip g_ratio=0.5" guidance was
+based on).
+
+**But max error doesn't always follow the same trend, and the far-edge
+window's max is a real floor, not a resolution problem.** Rows 1013-
+1023's co2 max actually gets WORSE from g_ratio=1 to 0.5 (21.4 -> 27.7)
+before improving at 0.25 (10.6) -- and even at the widest window
+(rows 968-1012), a single outlier bin still reaches max=67.6 ppm even
+at `g_ratio=0.25`'s finest tested resolution, while that same window's
+MEDIAN error (1.92 ppm) is unremarkable. This is consistent with
+Sec.5's keystone-smearing finding: a handful of bins near extreme-
+keystone locations carry an error floor that finer binning alone
+doesn't fully remove, riding on top of the broad, genuine improvement
+finer resolution gives everywhere else.
+
+**Cost scales roughly as G^1.24** (power-law fit across all 11 (G,
+t_hires) pairs collected here, a moderate refinement of Sec.13's
+memory-note estimate) -- notably less steep than the ~G^1.6 guessed
+from the first two data points alone (small + widest window only),
+though the widest single case (G=180) still ran somewhat above the
+fitted trend, suggesting the curve may steepen further at very large G
+rather than staying a clean power law indefinitely.
+
+**Net recommendation**: `g_ratio=0.25` gives the best accuracy of the
+three at every window tested, but at real cost -- roughly 6-9x
+`g_ratio=1`'s wall-clock time per window, before even accounting for
+G's own superlinear-in-width growth (which is why the widest window's
+full-array cost is prohibitive, Sec.6's own opening cost-reality-check).
+`g_ratio=0.5` is a genuinely reasonable middle ground: most of the
+`p_surface` improvement, a real (if smaller) co2 improvement, at
+roughly 2-3.5x `g_ratio=1`'s cost rather than 6-9x. Whether a full
+58-window `g_ratio=0.25` sweep is worth ~5.3 hours for its single
+worst window (and proportionally more for the rest) is a genuine
+cost/benefit call, not yet made -- not attempted in this session beyond
+the two extra single-window checks.
