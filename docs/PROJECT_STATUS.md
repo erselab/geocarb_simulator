@@ -391,3 +391,77 @@ roughly 2-3.5x `g_ratio=1`'s cost rather than 6-9x. Whether a full
 worst window (and proportionally more for the rest) is a genuine
 cost/benefit call, not yet made -- not attempted in this session beyond
 the two extra single-window checks.
+
+
+## 7. Keystone vs. truth structure, isolated: reversing the truth confirms Sec.5's geometry explanation decisively (2026-09-06)
+
+User direction: "In order to isolate the effects of keystone versus the
+structure in the truth, we can run parallel experiments with the truth
+profile along the slit reversed." A clean control: mirror EVERY truth
+field spatially (`fn(x_km) -> fn(-x_km)`) while leaving the instrument
+geometry (row<->eta mapping, the `rows_crossed` keystone curve) exactly
+as-is. Since `rows_crossed` is a pure geometry property (computed from
+`gd_polynomials` alone, no truth field involved), reversing the truth
+changes WHICH physical along-slit content sits at a given row without
+changing how much keystone smearing happens there. If a row range's
+error is really a geometry effect (Sec.5), it should stay comparably
+bad under the reversed truth; if it were really about unlucky truth
+structure happening to sit there, the error should move to wherever
+that structure now sits after mirroring.
+
+Built a reversed Mode-1 dense truth image
+(`scratch_work/build_whole_slit_truth_reversed.py`, verified via a
+direct sanity check that `reversed_fn(500) == original_fn(-500)`
+exactly) and reran Sec.6's exact `g_ratio=1` config (co2/p_surface/
+albedo free, ch4/co/h2o frozen exact on the anchor grid -- matching
+fields reversed too, so frozen rows stay consistent with the reversed
+truth) on the same 3-window fast subset.
+
+| window | keystone strength | original truth co2 \|err\| (mean/med/max/rms) | **reversed** truth co2 \|err\| (mean/med/max/rms) |
+|---|---|---|---|
+| 189-197 (near-null-ish) | ~1.8-2.3 | 13.45/8.41/52.03/19.71 | **4.14/2.56/15.41/6.11** (much BETTER) |
+| 238-248 (moderate) | ~2.3 | 17.06/16.41/34.62/18.45 | 17.91/19.04/38.14/19.89 (about the SAME) |
+| **1013-1023 (far edge, extreme)** | **~10.3-10.4** | 5.57/4.42/21.42/7.59 | **19.00/9.83/97.59/32.12 (much WORSE)** |
+
+(p_surface shows the same qualitative pattern: 189-197 improves
+9.28->1.95 mean; 1013-1023 worsens 3.78->6.44 mean, `resid_hires_rms`
+jumping 0.017->0.168 there too -- the fit itself got harder, not just
+the scoring against a different truth.)
+
+**Decisive, and stronger than expected**: rows 1013-1023 doesn't just
+stay comparably bad under the reversed truth -- it gets WORSE (co2 max
+21.4 -> 97.6 ppm, rms 7.6 -> 32.1). This rules out "the original truth
+happened to have easy structure there" as any part of the explanation;
+if anything the reversed content is harder to fit at that same extreme-
+keystone location, consistent with the mechanism being about the
+LOCATION's own geometry, not the specific values that happen to occupy
+it either way.
+
+**The near-null window's behavior is the other half of the confirmation**:
+rows 189-197 (low keystone strength, where geometry is NOT the
+bottleneck) shows a LARGE, real change under reversal (rms 19.71 ->
+6.11) -- exactly what you'd expect if error there is genuinely driven
+by which truth content sits at that location, since geometry isn't
+constraining it much either way. Rows 238-248 (intermediate keystone)
+sits in between, changing only modestly -- consistent with a real but
+smaller location-specific contribution layered on top of whatever
+content-sensitivity remains.
+
+**Conclusion**: this cleanly separates the two effects the user asked
+to disentangle. At extreme-keystone locations (rows 1013-1023), error
+is a geometry-driven floor, insensitive to (or even worsened
+regardless of) what truth content is actually there -- confirming
+Sec.5's explanation more strongly than the original single-truth
+finding alone could. At low-keystone locations, error is genuinely
+truth-content-sensitive, and finer resolution (Sec.6) or better priors
+would be expected to help there in a way they cannot fully help at the
+keystone floor. This also reframes Sec.6's own g_ratio table: finer
+binning was never going to close row 1013-1023's gap on its own (Sec.5
+already implied this; this section now shows the floor exists
+regardless of what's being fit there, not just under one particular
+truth realization).
+
+Not yet run: the same reversal test at `g_ratio=0.5`/`0.25` (does finer
+binning shrink the keystone floor's magnitude even if it can't remove
+it entirely?), and at the widest window (rows 968-1012) for a second,
+independent high-keystone data point beyond 1013-1023 alone.

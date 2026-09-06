@@ -230,10 +230,21 @@ diagnostic run") FPA2 retrieval should look like, and why:
    windows near the slit edge opposite a band's own keystone-null point
    should be EXPECTED to show elevated error under any configuration --
    an intrinsic instrument-geometry floor for that location, not a
-   fixable retrieval-configuration problem. Not yet checked: where each
-   OTHER FPA band's own keystone-null sits (clocking offsets differ per
-   band per the project's Era-1 findings), which would move this
-   "worst edge" to a different location for FPA0/1/3.
+   fixable retrieval-configuration problem. **Independently confirmed,
+   more strongly than expected** (`PROJECT_STATUS.md` Sec.7,
+   2026-09-06): reversing the truth spatially while leaving geometry
+   fixed left rows 1013-1023 comparably bad -- actually WORSE (co2 rms
+   7.6 -> 32.1 ppm) -- ruling out "the original truth happened to be
+   easy there" entirely. The same test showed the OPPOSITE signature at
+   a low-keystone window (rows 189-197: error dropped 3x under
+   reversal), confirming that away from the keystone floor, error IS
+   genuinely truth-content-sensitive -- cleanly separating the two
+   effects rather than leaving them conflated. Not yet checked: where
+   each OTHER FPA band's own keystone-null sits (clocking offsets
+   differ per band per the project's Era-1 findings), which would move
+   this "worst edge" to a different location for FPA0/1/3; and whether
+   finer `g_ratio` (Sec.6) shrinks the keystone floor's magnitude even
+   though it can't remove it.
 2. Correlation-length sensitivity study (Sec.2 item 1) -- cheapest next
    diagnostic, and gates whether item 3 (a bias-correction strategy) is
    even the right lever to pull.
