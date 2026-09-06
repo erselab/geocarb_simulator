@@ -268,3 +268,23 @@ diagnostic run") FPA2 retrieval should look like, and why:
    (Sec.2 items 4-5) -- the largest remaining piece of new design work,
    and the one that actually turns this into a GeoCarb-wide (not
    FPA2-only) production algorithm.
+6. **Defocus (wide-PSF) experiments: the retrieval largely self-corrects
+   for an unmodeled defocus, EXCEPT at the extreme-keystone floor**
+   (`PROJECT_STATUS.md` Sec.9, 2026-09-06, user: simulating the
+   telescope's focal-adjustment mechanism, spatial-only). Decoupled the
+   TRUTH's along-slit PSF from what the RETRIEVAL's own forward model
+   assumes (new `--retrieval-psf-fwhm-px` flag, `spatial_psf_fwhm_px`
+   threaded through `render_at_anchors`/`build_forward_state`). At
+   low/moderate-keystone windows, a completely wrong retrieval PSF
+   assumption (mismatched vs. matched) makes little to no difference --
+   at one cell the two were identical to 5 significant figures -- the
+   free parameters (especially free albedo) absorb the mismatch almost
+   perfectly. At the extreme-keystone far edge (rows 1013-1023, the
+   same location Sec.5/7/8 already flagged), the mismatch compounds the
+   existing keystone floor instead (co2 rms +14-31% worse mismatched
+   vs. matched, growing with defocus severity). Practical implication:
+   the focal-adjustment mechanism's calibration matters most exactly
+   where retrieval is already most fragile, not uniformly across the
+   slit. Not yet run: the same matrix at the widest window (968-1012);
+   finer g_ratio combined with defocus; a middle-ground FWHM to locate
+   where matched/mismatched divergence begins.

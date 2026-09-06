@@ -544,3 +544,119 @@ the underlying geometry effect Sec.5/7 established.
 Not yet run: the same reversal test at the widest window (rows
 968-1012) for a second, independent high-keystone data point at finer
 g_ratio; determining each other FPA band's own keystone-null location.
+
+## 9. Defocus (wide-PSF) experiments: the retrieval largely compensates for an assumed-vs-true PSF mismatch except at the extreme-keystone edge (2026-09-06)
+
+User direction: "I'd like to plan some experiments with wider PSFs to
+simulate a defocusing effect with a focal adjustment mechanism that
+exists on the telescope. It doesn't affect the spectral resolution, just
+the spatial blurring." The instrument's along-slit (N/S) PSF FWHM was
+hardcoded at 1.5px (the real ground-test-measured value) at every call
+site in the whole-slit pipeline, with truth and retrieval PSF always
+coupled purely because nothing ever passed a different value. Added an
+explicit `spatial_psf_fwhm_px` parameter threaded end-to-end
+(`geocarb_gert.joint_state.render_at_anchors`/`build_forward_state`,
+`gd_build_resolution_matched_truth.py`'s truth-render functions, a new
+`--retrieval-psf-fwhm-px` CLI flag on the sweep script), decoupling what
+PSF the TRUTH is rendered with from what the RETRIEVAL's own forward
+model assumes -- `default_pad_for_psf` scales the render padding
+proportionally so a wider PSF doesn't truncate its own Gaussian kernel
+at window edges. See the approved plan
+(`resolution-matched truth images`/defocus plan, superseded content) for
+the full design.
+
+**A real naming-collision bug caught along the way**: the sweep script's
+own output-directory suffix keys on `--prior-fields`' STRING NAME, not
+its content, and had no dependence on `--retrieval-psf-fwhm-px` at all.
+The first full 6-config matrix run (3 truth PSF FWHMs x matched/
+mismatched retrieval PSF) registered every truth-PSF config under the
+SAME literal prior-fields name, so all 6 configs silently wrote into
+ONE shared `_parts` directory -- caught by checking the directory
+listing (3 files, not 18) before trusting any comparison. Fixed both the
+sweep script's suffix (`_retrpsf{value}` whenever non-default) and the
+driver's registry naming (embeds the truth PSF tag), verified two
+distinct directories result, and reran the clean matrix.
+
+Ran the fast 3-window subset (task_ids 21/26/57, rows 189-197/238-248/
+1013-1023) at truth PSF FWHM in {3, 5, 8} px (vs. nominal 1.5px),
+each against BOTH a matched retrieval (told the true PSF) and a
+mismatched one (still assumes nominal 1.5px -- an uncorrected/
+uncalibrated defocus event), `g_ratio=1` fixed, same anchor-frozen
+ch4/co/h2o config as Sec.6/7/8.
+
+### co2 |error| (mean/median/max/rms, ppm)
+
+| window | FWHM | G | matched | mismatched |
+|---|---|---|---|---|
+| 189-197 | 3px | 9 | 1.53/1.31/2.80/1.66 | 1.49/1.24/2.88/1.64 |
+| | 5px | 9 | 2.90/3.14/5.34/3.11 | 2.79/2.94/5.35/3.02 |
+| | 8px | 9 | 7.42/7.21/11.58/7.61 | 7.24/7.13/11.57/7.48 |
+| 238-248 | 3px | 11 | 2.78/1.10/7.98/3.85 | 3.30/1.26/9.43/4.50 |
+| | 5px | 11 | 1.55/1.55/3.69/1.81 | 1.62/1.49/3.96/1.92 |
+| | **8px** | 11 | 4.75/4.31/7.50/4.92 | **4.75/4.31/7.50/4.92 (identical)** |
+| **1013-1023 (far edge)** | 3px | 11 | 5.42/5.33/14.26/6.42 | 7.06/5.87/16.79/8.41 |
+| | 5px | 11 | 6.95/6.02/20.50/8.97 | 7.67/6.14/20.89/10.21 |
+| | 8px | 11 | 11.04/9.16/28.51/13.78 | 12.19/10.26/36.75/15.91 |
+
+### p_surface |error| (mean/median/max/rms, hPa)
+
+| window | FWHM | matched | mismatched |
+|---|---|---|---|
+| 189-197 | 3px | 0.55/0.63/1.28/0.71 | 0.52/0.41/1.22/0.65 |
+| | 5px | 0.44/0.30/1.04/0.56 | 0.42/0.43/0.77/0.49 |
+| | 8px | 0.84/0.77/1.77/0.96 | 0.71/0.60/1.78/0.85 |
+| 238-248 | 3px | 0.47/0.14/1.40/0.69 | 0.53/0.22/1.81/0.79 |
+| | 5px | 0.20/0.13/0.74/0.28 | 0.22/0.15/0.81/0.31 |
+| | 8px | 0.58/0.39/1.46/0.69 | 0.58/0.39/1.46/0.69 (identical) |
+| **1013-1023** | 3px | 1.73/0.74/9.03/3.02 | 2.07/1.18/9.18/3.16 |
+| | 5px | 2.48/2.04/8.63/3.26 | 2.37/2.03/8.62/3.22 |
+| | 8px | 4.08/3.50/11.36/5.09 | 4.19/3.08/11.09/5.09 |
+
+### What the data shows
+
+**Defocus alone (even MATCHED, i.e. the retrieval knows about it) makes
+error worse, monotonically with FWHM, at every window** -- e.g. 189-197's
+co2 rms goes 1.66 -> 3.11 -> 7.61 ppm from 3px to 5px to 8px even when
+the retrieval is told the correct PSF. This is expected: a wider PSF
+mixes more along-slit content into every detector row regardless of
+whether the retrieval models it, so information content genuinely drops
+with defocus even in the best (fully-corrected) case.
+
+**At low/moderate-keystone windows (189-197, 238-248), matched vs.
+mismatched makes little to no difference** -- at 238-248/8px they are
+IDENTICAL to 5 significant figures (verified directly: distinct output
+files, `retrieval_psf_fwhm_px` correctly recorded as 8.0 vs 1.5 in each,
+not a stale-file collision). The retrieval's own free parameters
+(especially free albedo, which has the most local degrees of freedom)
+apparently absorb a completely wrong PSF assumption almost perfectly at
+these locations -- an uncorrected/uncalibrated defocus event would be
+nearly invisible in the RETRIEVED STATE at these rows, even though the
+underlying forward-model mismatch is real.
+
+**At the extreme-keystone far edge (1013-1023), the mismatch matters
+substantially and grows with FWHM** -- co2 rms mismatched-vs-matched
+gap: 6.42 vs 8.41 (3px, +31%), 8.97 vs 10.21 (5px, +14%), 13.78 vs 15.91
+(8px, +15%); the max error gap is starker still (14.3 vs 16.8 at 3px;
+28.5 vs 36.8 at 8px). This is the same location Sec.5/7/8 already
+identified as keystone-floor-limited -- with less local flexibility to
+compensate (the window's own information content is already
+compromised by extreme keystone smearing), an uncorrected defocus event
+compounds the existing floor rather than being absorbed by the free
+parameters the way it is elsewhere.
+
+**Conclusion**: this reframes the practical stakes of the telescope's
+focal-adjustment mechanism. If a defocus event went uncorrected
+(retrieval never told), the damage would be roughly self-limiting at
+most of the slit (the free-parameter fit compensates), but would
+compound on top of the existing keystone floor specifically at the
+worst-keystone rows -- exactly where Sec.5/7/8 already showed retrieval
+performance is most fragile. A calibration/monitoring priority
+implication: knowing the true PSF matters most exactly where it's
+already hardest to retrieve well, not uniformly across the slit.
+
+Not yet run: the same matrix at the widest window (968-1012, second
+independent high-keystone data point); finer g_ratio combined with
+defocus (does resolution help the mismatched case the way it helped the
+reversed-truth keystone floor in Sec.8?); a middle-ground defocus level
+between nominal and 3px, to locate where the matched/mismatched
+divergence actually begins.
