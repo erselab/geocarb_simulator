@@ -463,7 +463,84 @@ already implied this; this section now shows the floor exists
 regardless of what's being fit there, not just under one particular
 truth realization).
 
-Not yet run: the same reversal test at `g_ratio=0.5`/`0.25` (does finer
-binning shrink the keystone floor's magnitude even if it can't remove
-it entirely?), and at the widest window (rows 968-1012) for a second,
-independent high-keystone data point beyond 1013-1023 alone.
+Not yet run at the time this section was first written: the same
+reversal test at `g_ratio=0.5`/`0.25` (does finer binning shrink the
+keystone floor's magnitude even if it can't remove it entirely?), and
+at the widest window (rows 968-1012) for a second, independent
+high-keystone data point beyond 1013-1023 alone -- see Sec.8 for the
+former.
+
+## 8. Reversed-truth control at finer g_ratio: the keystone floor shrinks with resolution, but doesn't flatten out like the low-keystone window does (2026-09-06)
+
+Follow-up to Sec.7, requested directly ("Yes please" in response to
+"want me to queue that up next?"): reran the exact Sec.7 reversed-truth
+config at `g_ratio in {0.5, 0.25}` on the same fast 3-window subset,
+using a new GRATIO-env-var-parameterized driver
+(`scratch_work/retrieval_co2palbedo_reversed_truth_anchorfrozen_gratio.py`,
+generalizing the g_ratio=1-only script Sec.7 used).
+
+### co2 |error| (mean/median/max/rms, ppm) -- reversed truth, by g_ratio
+
+| window | keystone strength | g_ratio=1 | g_ratio=0.5 | g_ratio=0.25 |
+|---|---|---|---|---|
+| 189-197 (near-null-ish) | ~1.8-2.3 | 4.14/2.56/15.41/6.11 | 7.63/6.32/16.65/9.34 | 5.86/4.78/16.72/7.16 |
+| 238-248 (moderate) | ~2.3 | 17.91/19.04/38.14/19.89 | 4.70/2.37/**33.26**/8.64 | 4.67/3.76/21.26/6.39 |
+| **1013-1023 (far edge, extreme)** | **~10.3-10.4** | 19.00/9.83/**97.59**/32.12 | 3.36/2.91/15.36/4.73 | **1.95**/**1.71**/**6.85**/**2.41** |
+
+### p_surface |error| (mean/median/max/rms, hPa)
+
+| window | g_ratio=1 | g_ratio=0.5 | g_ratio=0.25 |
+|---|---|---|---|
+| 189-197 | 1.95/1.92/3.37/2.27 | 1.17/0.65/3.65/1.65 | 0.63/0.60/1.99/0.76 |
+| 238-248 | 1.71/1.95/3.25/2.07 | 0.82/0.40/4.20/1.40 | 0.39/0.26/1.60/0.53 |
+| **1013-1023** | 6.44/5.13/11.64/7.26 | 3.19/1.43/14.19/4.89 | **0.75**/**0.52**/**3.75**/**0.99** |
+
+### What the data shows
+
+**At the extreme-keystone window (1013-1023), finer g_ratio shrinks the
+floor substantially -- co2 rms drops 32.1 -> 4.7 -> 2.4 from g_ratio=1
+to 0.5 to 0.25, a ~13x reduction end to end, and the max error (driven
+by the worst single bin) drops even more, 97.6 -> 15.4 -> 6.9.** This
+is a real, monotonic improvement, unlike the non-reversed truth's
+version of this same window in Sec.6, where co2 max actually got WORSE
+from g_ratio=1 to 0.5 (21.4 -> 27.7) before improving at 0.25. So under
+this harder (reversed) truth, finer binning behaves more predictably --
+monotonic improvement at every step -- than it did under the original
+truth's own particular structure at that location.
+
+**Surprisingly, the floor doesn't just shrink -- at fine enough
+resolution it stops being a floor at all relative to the low-keystone
+window.** At `g_ratio=0.25`, 1013-1023's co2 rms (2.41) is actually
+LOWER than 189-197's rms at `g_ratio=1` (6.11), i.e. the extreme-
+keystone window's error is now competitive with, or better than, the
+low-keystone window's own numbers. That reframes the "floor" language
+from Sec.5/7 somewhat: the keystone effect sets how much a GIVEN
+resolution can achieve at that location, but it does not set an
+absolute, resolution-independent worst case -- sufficiently fine
+`g_ratio` closes most of the reversed-truth gap at the worst edge,
+consistent with Sec.6's original (non-reversed) finding that finer
+resolution helps broadly, just confirmed here to also apply under the
+harder reversed-truth stress test.
+
+**The other two windows show the more familiar non-monotonic/noisy
+behavior already seen in Sec.6's non-reversed table**: 238-248's co2
+max actually jumps at `g_ratio=0.5` (38.1 -> 33.3, roughly flat) before
+dropping at 0.25 (21.3), and 189-197 gets modestly WORSE at 0.5 before
+partially recovering at 0.25 (never returning fully to its `g_ratio=1`
+level) -- a reminder that a single fine-binning step can occasionally
+make one bin's fit locally worse even as the aggregate (median/rms)
+trend across all windows keeps improving with resolution, matching the
+same non-monotonic caveat already flagged in Sec.6.
+
+**Conclusion**: the keystone-driven floor identified in Sec.5/7 is real
+but not fixed in magnitude -- it is a floor FOR A GIVEN g_ratio, and
+finer resolution buys real, substantial relief at exactly the location
+predicted (the extreme-keystone far edge), more so than it does
+elsewhere. This strengthens the case for `g_ratio=0.5`/`0.25` (per the
+updated production-default guidance in Sec.6/roadmap) specifically as a
+mitigation for the worst-affected rows, even though it cannot eliminate
+the underlying geometry effect Sec.5/7 established.
+
+Not yet run: the same reversal test at the widest window (rows
+968-1012) for a second, independent high-keystone data point at finer
+g_ratio; determining each other FPA band's own keystone-null location.

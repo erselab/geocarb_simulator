@@ -239,12 +239,23 @@ diagnostic run") FPA2 retrieval should look like, and why:
    a low-keystone window (rows 189-197: error dropped 3x under
    reversal), confirming that away from the keystone floor, error IS
    genuinely truth-content-sensitive -- cleanly separating the two
-   effects rather than leaving them conflated. Not yet checked: where
-   each OTHER FPA band's own keystone-null sits (clocking offsets
-   differ per band per the project's Era-1 findings), which would move
-   this "worst edge" to a different location for FPA0/1/3; and whether
-   finer `g_ratio` (Sec.6) shrinks the keystone floor's magnitude even
-   though it can't remove it.
+   effects rather than leaving them conflated. **Follow-up** (`PROJECT_
+   STATUS.md` Sec.8, 2026-09-06): reran the reversed-truth control at
+   `g_ratio in {0.5, 0.25}` -- finer resolution shrinks the floor
+   substantially and monotonically at the extreme-keystone window
+   (co2 rms 32.1 -> 4.7 -> 2.4 ppm end to end), enough that at
+   `g_ratio=0.25` its error is actually competitive with, or better
+   than, the low-keystone window's own `g_ratio=1` numbers. So the
+   keystone effect is a floor FOR A GIVEN resolution, not an absolute
+   resolution-independent one -- `g_ratio=0.5`/`0.25` (Sec.6's
+   production-default recommendation) is a real, substantial mitigation
+   for the worst-affected rows specifically, not just a broad average
+   improvement. Not yet checked: where each OTHER FPA band's own
+   keystone-null sits (clocking offsets differ per band per the
+   project's Era-1 findings), which would move this "worst edge" to a
+   different location for FPA0/1/3; and the same reversed-truth/finer-
+   g_ratio check at the widest window (rows 968-1012) as a second,
+   independent high-keystone data point.
 2. Correlation-length sensitivity study (Sec.2 item 1) -- cheapest next
    diagnostic, and gates whether item 3 (a bias-correction strategy) is
    even the right lever to pull.
