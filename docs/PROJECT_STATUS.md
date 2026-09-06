@@ -242,3 +242,62 @@ both anomalously bad relative to interior windows of similar width,
 that's a strong, cheap confirmation of the edge-artifact hypothesis
 before investing in tracking down the specific mechanism (PAD
 truncation, extreme keystone, or something else at the boundary).
+
+
+## 5. Resolved: rows 1013-1023's blowup is extreme keystone smearing, not a representability gap -- the same mechanism as the archived Sec.14.4 water-region finding (2026-09-05)
+
+Direct follow-up to Sec.4's "check the other slit edge" test. Pulled
+the first window (rows 0-8, task_id=0) directly from the already-
+archived full-58-window runs (no new job needed) for both the plain
+bin-frozen (`archive/initial_build/.../co2p-58-g1-ad4-pf-
+densefrozenexact-DENSETRUTH_analytic.pkl`) and albedo-anchor-frozen
+configs, and compared both slit edges:
+
+| window | x_km range | bin-frozen co2/p_surface max | anchor-frozen co2/p_surface max | resid_rms (bin-frozen) |
+|---|---|---|---|---|
+| (0,8) first edge | [-1400.5,-1378.0] | 28.7 / 63.8 | 12.5 / 20.6 | 0.218 |
+| (1013,1023) last edge | [1309.5,1364.4] | 167.7 / 67.3 | 110.5 / 22.5 | 0.078 |
+| (189,197) typical interior | -- | -- | 1.9 / 3.1 | 0.020 |
+
+**Partial confirmation, then a clean resolution.** Both edges ARE
+elevated relative to a typical interior window -- especially
+`p_surface` (63.8/67.3 vs. ~1-3 elsewhere), confirming a real edge
+effect exists. But it's asymmetric, not symmetric: CO2's error at the
+LAST window (110-168) is 5-9x worse than at the FIRST window (12.5-
+28.7). Checked directly whether this was proximity to the known CO2
+hotspot at x0=+1050km (width 9km) -- ruled out: rows 1013-1023 sit at
+x_km=[1310,1364], 260+ km from the hotspot, far outside a 9km-wide
+feature's influence.
+
+**The actual explanation**: `rows_crossed` (the keystone-smearing proxy
+-- how many true along-slit rows a single detector row's spectrum
+averages over) is ~0.06-0.27 near the LEFT edge (rows 0-19, essentially
+FPA2's own keystone-null point, consistent with the project's earlier-
+established finding that FPA2's zero-point sits near row 25) but
+~10.2-10.4 near the RIGHT edge (rows 1004-1023) -- a ~40x difference in
+physical keystone smearing between the two ends of the slit. Rows
+1013-1023 sits in a region of genuinely extreme keystone distortion,
+maximally far from the null point.
+
+**This is the SAME mechanism as the archived-record's own Sec.14.4
+finding** (water-region damage reaching neighboring rows via keystone,
+each detector row's spectral samples spanning ~20km along the slit) --
+not a new, separate phenomenon. Extreme keystone smearing degrades the
+retrieval's ability to separate correlated absorbers and pin down
+localized structure regardless of what mechanism (frozen-row resolution,
+water/albedo contrast, or here, sheer proximity to the keystone-null-
+point's opposite extreme) creates the local difficulty. Frozen-row
+representability (Sec.1-4) was a real, genuine, but ultimately SEPARATE
+and smaller effect (closing ~90% of a DIFFERENT blowup, Sec.1) from
+this keystone mechanism, which explains the specific residual that
+survived every representability fix tried.
+
+**Practical implication**: rows 1013-1023 (and by extension, any window
+near the slit edge opposite FPA2's keystone-null point) should be
+expected to show elevated error under ANY frozen-row or resolution
+configuration -- this is closer to an intrinsic instrument-geometry
+floor for that specific along-slit location than a fixable retrieval-
+configuration problem. Not yet quantified: whether OTHER FPA bands have
+their own keystone-null point at a different location (each band's own
+clocking offset differs, per the project's Era-1 findings), meaning
+this specific "worst edge" would move for FPA0/1/3.

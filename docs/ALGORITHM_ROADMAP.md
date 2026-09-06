@@ -206,23 +206,26 @@ diagnostic run") FPA2 retrieval should look like, and why:
 
 ## 4. Prioritized next steps
 
-1. **Frozen-row representability RULED OUT entirely; the remaining
-   ~25x looks like a slit-edge artifact, not a resolution problem**
-   (`PROJECT_STATUS.md` Sec.1-4). Giving albedo its true value at every
-   anchor closed ~90% of the original 100-250x gap, but a residual
-   remained concentrated at one window (rows 1013-1023, 110 ppm co2
-   max). Neither finer albedo resolution (ad16, Sec.3) nor freezing
-   ch4/co/h2o at anchor resolution too (Sec.4, using the new general
-   `row_positions`/`--frozen-atmosphere-positions` mechanism) moved
-   that number at all (110.5 -> 117.5 -> 110.5, all within noise).
-   Frozen-row representability, at any tested resolution for any tested
-   row, is not the mechanism. New leading hypothesis: rows 1013-1023 is
-   the LAST window on the whole 1024-row detector -- a slit-edge
-   artifact (PAD truncation, extreme keystone at the boundary), not a
-   representability gap at all. Next concrete test: check whether the
-   FIRST window (rows 0-8) shows the same pathology -- if both slit
-   edges are anomalously bad, that's a cheap, strong confirmation before
-   chasing the specific edge mechanism.
+1. **RESOLVED: the residual ~25x at rows 1013-1023 is extreme keystone
+   smearing, the same mechanism as the archived Sec.14.4 water-region
+   finding -- not a representability gap at all** (`PROJECT_STATUS.md`
+   Sec.1-5). Chain: giving albedo its true value at every anchor closed
+   ~90% of the original 100-250x gap (Sec.1); neither finer albedo
+   resolution (Sec.3) nor freezing ch4/co/h2o at anchor resolution too
+   (Sec.4) moved the remaining residual at all; checking the OTHER slit
+   edge (Sec.5) found `rows_crossed` (keystone-smearing strength) is
+   ~0.06-0.27 near the left edge (FPA2's own keystone-null, near row
+   25) but ~10.2-10.4 near the right edge -- a ~40x difference,
+   directly explaining why rows 1013-1023 specifically (maximally far
+   from the null point) behaves so much worse than a typical window,
+   independent of any frozen-row assumption. Practical implication:
+   windows near the slit edge opposite a band's own keystone-null point
+   should be EXPECTED to show elevated error under any configuration --
+   an intrinsic instrument-geometry floor for that location, not a
+   fixable retrieval-configuration problem. Not yet checked: where each
+   OTHER FPA band's own keystone-null sits (clocking offsets differ per
+   band per the project's Era-1 findings), which would move this
+   "worst edge" to a different location for FPA0/1/3.
 2. Correlation-length sensitivity study (Sec.2 item 1) -- cheapest next
    diagnostic, and gates whether item 3 (a bias-correction strategy) is
    even the right lever to pull.
