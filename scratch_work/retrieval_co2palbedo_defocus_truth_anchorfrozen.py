@@ -55,10 +55,24 @@ _merged_fields = {
     name: (als.STATE_FIELDS_PRIOR[name] if name in FREE_ATM_ROWS else als.STATE_FIELDS[name])
     for name in als.STATE_FIELDS
 }
-als.PRIOR_FIELD_SETS["dense_frozen_exact_defocus"] = _merged_fields
-als.SURFACE_PRIOR_FIELD_SETS["dense_frozen_exact_defocus"] = als.SURFACE_FIELDS_PRIOR
+# Registry name embeds the truth PSF tag (2026-09-06 bugfix -- caught after
+# the first full 6-config matrix run silently collided: the sweep script's
+# own output-directory suffix keys on --prior-fields' STRING NAME, not its
+# content, and all 3 truth-PSF configs originally registered under the
+# SAME literal name "dense_frozen_exact_defocus" -- so all 6 configs
+# (3 truth FWHMs x matched/mismatched) wrote into ONE shared _parts
+# directory, each task file silently overwritten by whichever config's
+# job happened to finish last. The frozen-row VALUES themselves (ch4/co/
+# h2o, from the raw continuous als.STATE_FIELDS) don't actually depend on
+# truth PSF at all -- only the injected detector image A_TRUTH does -- but
+# the registry name must still vary per truth, purely so the sweep
+# script's own suffix-naming (which reads this string, not its content)
+# produces a distinct directory per config.
+PRIOR_NAME = f"dense_frozen_exact_defocus_truth{truth_fwhm_tag}"
+als.PRIOR_FIELD_SETS[PRIOR_NAME] = _merged_fields
+als.SURFACE_PRIOR_FIELD_SETS[PRIOR_NAME] = als.SURFACE_FIELDS_PRIOR
 
-print("dense_frozen_exact_defocus atmosphere prior rows:", flush=True)
+print(f"{PRIOR_NAME} atmosphere prior rows:", flush=True)
 for name in als.STATE_FIELDS:
     src = "structural (FREE, bin_centers grid)" if name in FREE_ATM_ROWS else "EXACT TRUTH (frozen, ANCHOR grid)"
     print(f"  {name}: {src}", flush=True)
@@ -102,7 +116,7 @@ sys.argv = [
     "--g-ratio", "1", "--free", "co2_ppm,p_surface_hpa,albedo", "--vary-albedo",
     "--frozen-atmosphere-positions", "anchor",
     "--retrieval-psf-fwhm-px", RETRIEVAL_PSF_FWHM_PX,
-    "--prior-fields", "dense_frozen_exact_defocus", "--n-windows", "58", "--anchor-density", "4",
+    "--prior-fields", PRIOR_NAME, "--n-windows", "58", "--anchor-density", "4",
     "--resolution-matched-g-ratio-bins", "1",
     "--hires-only", "--jacobian", "analytic", "--prior-form", "exponential",
     "--overlap", "0", "--n-workers", "1", "--anchor-workers", str(anchor_workers),

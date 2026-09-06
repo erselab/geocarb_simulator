@@ -1014,6 +1014,14 @@ def main() -> int:
         suffix += "_valb"
     if args.sub_bin_anomaly != "none":
         suffix += f"_anomaly-{args.sub_bin_anomaly}"
+    if args.retrieval_psf_fwhm_px != 1.5:
+        # 2026-09-06 (defocus experiments): without this, two configs that
+        # differ ONLY in --retrieval-psf-fwhm-px (e.g. matched vs mismatched
+        # defocus against the SAME injected truth/prior_fields name) would
+        # silently collide in the SAME _parts directory -- caught the hard
+        # way once already this session (see docs/PROJECT_STATUS.md's
+        # standing naming-collision note).
+        suffix += f"_retrpsf{args.retrieval_psf_fwhm_px:g}"
     payload = {"results": results, "tiles": all_tiles, "fpa": fpa, "uniform": args.uniform,
               "barcode": args.barcode, "realistic_barcode": args.realistic_barcode,
               "barcode_bars": args.barcode_bars if (args.barcode or args.realistic_barcode) else None,
