@@ -344,8 +344,8 @@ rather than report a mismatched comparison.
 | (1013,1023) far edge | 1 | 11 | 344s | 5.57/4.42/21.42/7.59 | 3.78/2.72/10.98/4.76 |
 | | 0.5 | 22 | 643s | 4.58/1.38/**27.70**/8.26 | 1.52/0.77/6.41/2.29 |
 | | 0.25 | 44 | 1745s | 2.58/**1.94**/10.56/3.60 | **0.49**/**0.28**/**3.97**/0.81 |
-| (968,1012) widest | 1 | 45 | (pending) | -- | -- |
-| | 0.25 | 180 | 19061s | 3.26/1.92/**67.59**/6.65 | 0.46/0.23/10.37/1.08 |
+| (968,1012) widest | 1 | 45 | 5678s | 5.60/5.23/31.16/7.38 | 3.55/2.47/17.28/5.00 |
+| | 0.25 | 180 | 19061s | 3.26/**1.92**/**67.59**/6.65 | **0.46**/**0.23**/10.37/1.08 |
 
 ### What the data shows
 
@@ -371,13 +371,15 @@ keystone locations carry an error floor that finer binning alone
 doesn't fully remove, riding on top of the broad, genuine improvement
 finer resolution gives everywhere else.
 
-**Cost scales roughly as G^1.24** (power-law fit across all 11 (G,
-t_hires) pairs collected here, a moderate refinement of Sec.13's
-memory-note estimate) -- notably less steep than the ~G^1.6 guessed
-from the first two data points alone (small + widest window only),
-though the widest single case (G=180) still ran somewhat above the
-fitted trend, suggesting the curve may steepen further at very large G
-rather than staying a clean power law indefinitely.
+**Cost scales roughly as G^1.20** (power-law fit across all 12 (G,
+t_hires) pairs collected here, refined again now that the (968,1012)
+widest-window `g_ratio=1` cell -- G=45, t_hires=5678s -- has finally
+finished; barely moved the exponent from the earlier 11-point ~G^1.24
+estimate, itself a refinement of Sec.13's memory-note ~G^1.6 guess from
+just two data points). The widest single case (G=180) still ran
+somewhat above the fitted trend, suggesting the curve may steepen
+further at very large G rather than staying a clean power law
+indefinitely.
 
 **Net recommendation**: `g_ratio=0.25` gives the best accuracy of the
 three at every window tested, but at real cost -- roughly 6-9x
