@@ -1114,9 +1114,23 @@ def _render_one_anchor(g):
     return g, G["spectrum"](atm_p)
 
 
+def default_pad_for_psf(spatial_psf_fwhm_px: float) -> int:
+    """Padded-render margin [rows] that keeps `gd_render.
+    predict_neighborhood`'s Gaussian PSF blur from being truncated at the
+    window edges (2026-09-06, user: defocus experiments). The project's
+    own default `pad=4` matches the nominal `spatial_psf_fwhm_px=1.5`
+    (`predict_neighborhood`'s own docstring: pad should be "a few
+    multiples of spatial_psf_fwhm_px") -- scale it proportionally so a
+    wider PSF (e.g. simulating telescope defocus) gets a correspondingly
+    wider padded region instead of silently reusing `pad=4` and clipping
+    the kernel. Never returns less than 4 (today's default, for FWHM at
+    or below nominal)."""
+    return max(4, int(np.ceil(4 * spatial_psf_fwhm_px / 1.5)))
+
+
 def render_at_anchors(fpa, rows_win, anchor_etas, atm_params, surf_params,
                       spectrum, wn_hires, ils, pad: int = 4, n_workers: int | None = None,
-                      return_spectra: bool = False):
+                      return_spectra: bool = False, spatial_psf_fwhm_px: float = 1.5):
     """THE one shared forward model (2026-09-02, user: "the forward model
     should be the same for generating any detector measured radiances") --
     every caller that turns along-slit state into a detector sub-image,
@@ -1169,6 +1183,19 @@ def render_at_anchors(fpa, rows_win, anchor_etas, atm_params, surf_params,
         can never itself spawn a pool (Python forbids it), so this is
         silently forced to 1 there regardless of what's passed --
         matching `build_lookup_radiance`'s own guard.
+    spatial_psf_fwhm_px : float
+        Along-slit (N/S) PSF FWHM [detector pixels] forwarded to
+        :func:`gd_render.predict_neighborhood` (2026-09-06, user: plan
+        defocus experiments -- a wider PSF simulates the telescope's focal-
+        adjustment mechanism moving out of nominal focus; purely spatial,
+        does not touch spectral resolution). Default 1.5 matches the real
+        ground-test-measured value (`_GEOCARB_CFG.focal_plane.measured.
+        spatial_psf_fwhm_px`) and every prior caller's behavior exactly.
+        Callers rendering at a wider FWHM should also widen `pad`
+        accordingly (`predict_neighborhood`'s own docstring: a few
+        multiples of `spatial_psf_fwhm_px`) -- this function does not do
+        that automatically, since `pad` also has to match the caller's own
+        window-overlap/anchor-extension bookkeeping.
 
     Returns
     -------
@@ -1222,7 +1249,8 @@ def render_at_anchors(fpa, rows_win, anchor_etas, atm_params, surf_params,
     # (the caller's own PAD/extension margin >= this `pad`).
     radiance = footprint_average_scene(anchor_etas, cache_S)
     image = gd_render.predict_neighborhood(fpa, rows_win, wn_hires, radiance,
-                                           ils, pad=pad, footprint=True)
+                                           ils, pad=pad, footprint=True,
+                                           spatial_psf_fwhm_px=spatial_psf_fwhm_px)
     if return_spectra:
         # `anchor_etas`/`cache_S` are already sorted (the `order` applied
         # above) -- a caller reusing these (e.g. a point-query radiance
@@ -1261,7 +1289,8 @@ def _render_one_missing_anchor(g):
 
 def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
                         wn_hires, ils, pad: int = 4, state_interp: str = "linear",
-                        n_workers: int | None = 1, min_parallel_anchors: int = 8):
+                        n_workers: int | None = 1, min_parallel_anchors: int = 8,
+                        spatial_psf_fwhm_px: float = 1.5):
     """``forward(x) -> raveled sub-image`` for a :class:`StateSpec`, on an
     arbitrary set of scene positions.
 
@@ -1342,6 +1371,16 @@ def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
         fewer than this many anchors are actually cache-misses this call
         -- Pool creation/teardown overhead isn't worth paying for a
         handful of anchors.
+    spatial_psf_fwhm_px : float
+        Along-slit (N/S) PSF FWHM [detector pixels] the RETRIEVAL's own
+        forward model assumes -- forwarded to `gd_render.
+        predict_neighborhood` (2026-09-06, user: defocus experiments).
+        Independent of whatever PSF the TRUTH was actually rendered with
+        (see `render_at_anchors`'s own parameter of the same name) -- a
+        mismatch here (e.g. truth rendered wide, retrieval still assuming
+        the nominal 1.5px default) simulates an uncorrected/uncalibrated
+        defocus event; matching values simulates a known, modeled one.
+        Default 1.5 reproduces every existing caller's behavior exactly.
     """
     import multiprocessing as mp
     from . import gd_render
@@ -1403,6 +1442,7 @@ def build_forward_state(fpa, rows_win, scene_etas, spec: StateSpec, spectrum,
         # inside scene_etas' coverage by construction (PAD >= pad).
         radiance = footprint_average_scene(scene_etas, cache_S)
         return gd_render.predict_neighborhood(fpa, rows_win, wn_hires, radiance,
-                                              ils, pad=pad, footprint=True).ravel()
+                                              ils, pad=pad, footprint=True,
+                                              spatial_psf_fwhm_px=spatial_psf_fwhm_px).ravel()
 
     return forward

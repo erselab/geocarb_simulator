@@ -58,7 +58,7 @@ import geosat_geometry as gg  # noqa: E402
 import gert  # noqa: E402
 from geocarb_gert import along_slit_scene as als, sample_geometries  # noqa: E402
 from geocarb_gert.joint_state import (build_forward_state, gauss_newton_state,  # noqa: E402
-                                      state_spec_from_scene)
+                                      state_spec_from_scene, default_pad_for_psf)
 from gert.forward_model import ForwardModel  # noqa: E402
 from gert.rt_solver import SingleScatterSolver  # noqa: E402
 from geocarb_gert.gd_polynomials import rows_crossed  # noqa: E402
@@ -252,6 +252,8 @@ def _solve_window(row_lo: int, row_hi: int):
     anchor_workers = _SWEEP.get("anchor_workers", 1)      # ANCHOR-level parallelism within build_forward_state's own forward() (2026-09-02); see --anchor-workers' own help
     surface_positions_mode = _SWEEP.get("surface_positions_mode", "shared")  # "shared" (default) or "anchor" -- see --surface-positions' own help
     frozen_atmosphere_positions_mode = _SWEEP.get("frozen_atmosphere_positions_mode", "shared")  # "shared" (default) or "anchor" -- see --frozen-atmosphere-positions' own help
+    retrieval_psf_fwhm_px = _SWEEP.get("retrieval_psf_fwhm_px", 1.5)  # PSF the retrieval's OWN forward model assumes -- see --retrieval-psf-fwhm-px' own help
+    retrieval_pad = default_pad_for_psf(retrieval_psf_fwhm_px)  # auto-scaled to avoid truncating a wider PSF's own kernel at window edges
 
     rows_win = np.arange(row_lo, row_hi + 1)
     width = len(rows_win)
@@ -361,8 +363,9 @@ def _solve_window(row_lo: int, row_hi: int):
         # coarse: scene positions ARE the state positions, so interpolation is
         # the identity regardless of kind -- state_interp is genuinely a no-op here.
         fwd_c = build_forward_state(FPA, rows_win, bin_centers, spec_c, spectrum,
-                                    wn_hires, ils, pad=PAD, state_interp="linear",
-                                    n_workers=anchor_workers)
+                                    wn_hires, ils, pad=retrieval_pad, state_interp="linear",
+                                    n_workers=anchor_workers,
+                                    spatial_psf_fwhm_px=retrieval_psf_fwhm_px)
         x_c, S_ret_c, avk_c = gauss_newton_state(fwd_c, y_true, spec_c, Sy_inv_diag,
                                                  label=f"[{row_lo}-{row_hi}] coarse", verbose=False,
                                                  jacobian_fn=_linearizer(spec_c, bin_centers, use_analytic, "linear"),
@@ -389,7 +392,8 @@ def _solve_window(row_lo: int, row_hi: int):
         out["resid_coarse_rms"] = float(np.sqrt(np.mean(resid_c ** 2)))
         out["t_coarse"] = time.time() - t0
 
-    a_lo, a_hi = max(0, row_lo - PAD), min(ROW_MAX_IDX, row_hi + PAD)
+    anchor_ext = max(PAD, retrieval_pad)
+    a_lo, a_hi = max(0, row_lo - anchor_ext), min(ROW_MAX_IDX, row_hi + anchor_ext)
     anchor_rows = np.arange(a_lo, a_hi + 1e-9, 1.0 / anchor_density)
     anchor_etas = np.sort(_eta_of(FPA, np.full(len(anchor_rows), 512.0),
                                   anchor_rows.astype(float)))
@@ -408,8 +412,9 @@ def _solve_window(row_lo: int, row_hi: int):
                                    prior_anchor_density=prior_anchor_density,
                                    row_sub_bin_anomaly=row_sub_bin_anomaly)
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
-                                wn_hires, ils, pad=PAD, state_interp=state_interp,
-                                n_workers=anchor_workers)
+                                wn_hires, ils, pad=retrieval_pad, state_interp=state_interp,
+                                n_workers=anchor_workers,
+                                spatial_psf_fwhm_px=retrieval_psf_fwhm_px)
     x_h, S_ret_h, avk_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
                                              label=f"[{row_lo}-{row_hi}] hires", verbose=False,
                                              jacobian_fn=_linearizer(spec_h, anchor_etas, use_analytic_hires,
@@ -683,6 +688,21 @@ def main() -> int:
                          "reconstructed at the same fine resolution the forward model already "
                          "renders from, instead of piecewise-linear between (coarser) bin "
                          "centers. Only affects the hires solve; coarse mode is unaffected.")
+    ap.add_argument("--retrieval-psf-fwhm-px", type=float, default=1.5,
+                    help="along-slit (N/S) PSF FWHM [detector pixels] the RETRIEVAL's own "
+                         "forward model assumes (2026-09-06, user: defocus experiments -- "
+                         "the telescope has a focal-adjustment mechanism that can shift focus "
+                         "without changing spectral resolution, purely spatial blurring). "
+                         "Default 1.5 matches the real ground-test-measured nominal value and "
+                         "every prior run's behavior exactly. Independent of whatever PSF the "
+                         "TRUTH image was actually rendered with (see scratch_work's "
+                         "defocus truth-build driver, and --prior-fields' own injected-truth "
+                         "mechanism) -- passing a value here that DIFFERS from the truth's own "
+                         "PSF simulates an uncorrected/uncalibrated defocus event; passing the "
+                         "SAME value simulates a known, modeled one. Affects both the coarse "
+                         "and hires forward models (build_forward_state); pad auto-scales via "
+                         "geocarb_gert.joint_state.default_pad_for_psf to avoid truncating a "
+                         "wider PSF's own Gaussian kernel at window edges.")
     ap.add_argument("--prior-anchor-density", type=float, default=None,
                     help="resolution knob for the prior, independent of --prior-fields: "
                          "None (default) samples the prior fields exactly at each bin's own "
@@ -931,7 +951,8 @@ def main() -> int:
                        row_sub_bin_anomaly=row_sub_bin_anomaly,
                        surface_positions_mode=args.surface_positions,
                        frozen_atmosphere_positions_mode=args.frozen_atmosphere_positions,
-                       anchor_workers=args.anchor_workers))
+                       anchor_workers=args.anchor_workers,
+                       retrieval_psf_fwhm_px=args.retrieval_psf_fwhm_px))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
     if args.anchor_workers > 1 and n_workers > 1 and args.task_id is None:
@@ -1012,7 +1033,8 @@ def main() -> int:
               "prior_anchor_density": args.prior_anchor_density,
               "flat_sy_inv": args.flat_sy_inv, "overlap": args.overlap,
               "vary_albedo": args.vary_albedo, "sub_bin_anomaly": args.sub_bin_anomaly,
-              "anchor_workers": args.anchor_workers}
+              "anchor_workers": args.anchor_workers,
+              "retrieval_psf_fwhm_px": args.retrieval_psf_fwhm_px}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
         out_dir = REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{fpa}{suffix}_parts"
