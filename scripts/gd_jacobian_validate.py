@@ -44,6 +44,7 @@ from geocarb_gert import jacobians as jac  # noqa: E402
 from geocarb_gert.joint_state import (build_forward_state,  # noqa: E402
                                       state_spec_from_scene)
 from gd_joint_block_retrieve import FPA, GERT_ROOT, _eta_of, band_basics  # noqa: E402
+from gd_joint_block_whole_slit_sweep import ROW_KINDS  # noqa: E402
 
 PAD = 4
 
@@ -111,7 +112,7 @@ def main() -> int:
     # band_label adds the `surface` rows (albedo) on their own denser grid;
     # harmless when albedo is not among `free`, since frozen rows cost nothing
     spec = state_spec_from_scene(bin_centers, free=free, band_label=wide_win.label,
-                                 surface_density=args.surface_density)
+                                 surface_density=args.surface_density, kinds=ROW_KINDS)
     x0 = spec.x0()
     print(f"FPA{FPA} rows {row_lo}-{row_hi} (width {width}), G={G}, "
           f"{len(anchor_etas)} anchors, free={free} -> {spec.n_free} elements")

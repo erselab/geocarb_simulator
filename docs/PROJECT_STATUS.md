@@ -761,3 +761,87 @@ shrinks at wide windows, or is genuinely location-driven and holds
 regardless of tiling); a location where co2's structural prior more
 meaningfully diverges from truth, to get a real co2 data point for this
 same wide-window test.
+
+## 10. Temperature added as a retrievable state row (T_offset_K) (2026-09-07)
+
+Direct follow-up to `docs/ALGORITHM_ROADMAP.md` Sec.2 item 3 (open since
+2026-09-04): temperature was not retrievable at all before this -- fixed
+via the standard atmosphere. Added `t_offset_k`, a uniform additive shift
+to the standard-atmosphere temperature profile, following the pattern
+every other row already uses:
+
+- **Truth field**: a synoptic sinusoid, ±3K amplitude, same 2800km period
+  as `p_surface_hpa`'s own synoptic term but a distinct phase (both
+  represent "today's weather," deliberately not perfectly correlated
+  along the slit). No localized plume/hot-spot term -- temperature has no
+  point-source physical analogue.
+- **Structural prior**: flat 0K ("standard atmosphere, no known anomaly"),
+  mirroring co2/ch4/co's own background-only prior convention -- unlike
+  `p_surface_hpa` there's no static/topographic component worth keeping.
+- **Analytic Jacobian** (`geocarb_gert.jacobians.t_offset_dI_dparam`):
+  exactly the temperature-path term `p_surface_dI_dparam` already uses
+  (`dtau_mol_dT_lay_hires` x `K_mol_lay_hires`), but with `dT_lay/
+  d(t_offset_k) = 1` at every layer instead of p_surface's finite-
+  differenced `dT_lay/d(p_surface)` -- genuinely zero finite differences,
+  the simplest Jacobian in the module after albedo.
+- **`kind="absolute"` wired end-to-end for the first time** -- the second
+  item the roadmap flagged as "not yet checked." Found and fixed a real
+  gap while doing so: `geocarb_gert.jacobians.linearize` hardcoded the
+  `kind="scale"` chain-rule factor (`d(value)/dx = prior[k]`) and
+  explicitly RAISED on any other `kind`, meaning `kind="absolute"` was
+  advertised as available (module docstring) but not actually reachable
+  through the analytic path at all. Fixed: `linearize` now branches
+  `dval_dx = prior[k]` (`kind="scale"`) or `1.0` (`kind="absolute"`),
+  matching `ParamSpec.apply`'s own identical branch exactly.
+
+**A real, material side effect found and accepted (user's explicit
+call)**: `PRIOR_FIELD_SETS["exact"]`/`["structural"]` point AT
+`STATE_FIELDS`/`STATE_FIELDS_PRIOR` (not copies), and most of this
+session's own driver scripts build their prior-fields registry via a dict
+comprehension OVER those same dicts' `.items()`. Adding `t_offset_k` there
+means it now flows automatically -- FROZEN at its real ±3K truth value --
+into every one of Sec.1-9's own driver scripts if rerun from now on, even
+ones that never asked for temperature. This is the intended consequence
+of the file's own "no quantity is privileged" design (the same thing
+presumably happened when p_surface/H2O were first added) -- accepted
+rather than special-cased away. Practical implication: Sec.1-9's own
+numbers stay valid as a record of what was true when written; a FRESH
+rerun of any of those scripts from now on picks up a new, real temperature
+confound that wasn't part of the original experiment.
+
+### Verification (all four passed)
+
+1. **`x0()`/prior round-trip for `kind="absolute"`**: confirmed directly
+   -- with the structural (flat 0K) prior as the reference, `x0()` returns
+   the prior itself (`[0,0,0,0,0]`), not a `1.0` scale-factor vector.
+2. **Analytic-vs-FD cross-check** (`gd_jacobian_validate.py --free
+   co2_ppm,t_offset_k --h-scan`): co2 validates as before (rel L2 ~1e-8 to
+   1e-10, cosine 1.0 exactly). `t_offset_k` at the script's own default
+   h-scan range (1e-3 to 1e-6 K) showed the OPPOSITE of the expected
+   V-curve -- disagreement rising monotonically as h shrank, never
+   bottoming out (worst case 1.7 rel L2 at h=1e-6). Root cause: those
+   steps are calibrated for `kind="scale"` rows near O(1), far too small
+   an ABSOLUTE Kelvin perturbation for this row's own numerical
+   resolution. Rerun at `--h 0.1`: rel L2 1.1e-5 to 2.7e-5, cosine
+   exactly 1.0 -- matching `p_surface_hpa`'s own documented gert-internal
+   precision floor (2.1e-5, from `dtau_mol_dT_lay_hires` itself not being
+   exact) almost exactly. Confirms the Jacobian is correct; the small-h
+   scan was testing an under-resolved step, not a real bug.
+3. **Smoke test**: one fast-subset window (rows 189-197), fully
+   representable config (`--prior-fields exact`, co2/p_surface/t_offset_k
+   free, ch4/co/h2o frozen exact at bin_centers -- no representability
+   gap by construction). `resid_hires_rms` = 9.7e-6 (excellent fit).
+   `t_offset_k` converged to within **9.3e-5 K mean / 2.4e-4 K max** of
+   the true ~1.3-1.5K local sinusoid value -- essentially exact, matching
+   the precision of the already-working co2/p_surface rows in the same
+   solve (co2 mean 0.0085 ppm, p_surface mean 0.0095 hPa).
+4. Forward-model agreement (`gd_jacobian_validate.py`'s own standing
+   check): analytic-path vs. sweep-path prediction, rel L2 = 0.0 exactly.
+
+**Conclusion**: temperature is now a real, working member of the joint
+state -- retrievable, freezable, with a validated analytic Jacobian and a
+correctly-wired `kind="absolute"` parameterization (now generally
+available to any future absolute-valued row, not just this one). Not yet
+run: any real experiment putting `t_offset_k` through the same class of
+diagnostics every other row has already faced this session (prior-pull,
+keystone-floor sensitivity, defocus interaction).

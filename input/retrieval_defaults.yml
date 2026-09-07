@@ -48,6 +48,13 @@ correlation_length_eta:
   co_ppb: 0.0393            # ~55 km -- its own broad plume width
   h2o_surface_vmr: 0.357    # ~500 km -- the smooth climatological tanh gradient
   p_surface_hpa: 0.100      # ~140 km -- the topographic depression width
+  t_offset_k: 0.357         # ~500 km -- matches h2o_surface_vmr's own "smooth,
+                            # broad-scale, no localized structure" designation,
+                            # NOT p_surface_hpa's 0.100 (that value governs
+                            # p_surface's TOPOGRAPHIC feature width, which
+                            # t_offset_k has no analogue of -- its truth field
+                            # is a single full-slit synoptic sinusoid, smoother
+                            # than any other row's own spatial content)
   albedo: 0.0214            # ~30 km -- ALBEDO_CORR_KM / SLIT_HALF_KM; shorter than the gas rows
 
 # source: scripts/gd_joint_block_whole_slit_sweep.py --n-lookup-samples /

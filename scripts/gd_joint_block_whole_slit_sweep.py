@@ -221,6 +221,17 @@ def _oracle_g_prior(eta, fpa):
 #: pointing at a trivial g.
 SUB_BIN_ANOMALY_ORACLES = {"truth": _oracle_g_truth, "prior": _oracle_g_prior}
 
+#: Row name -> ParamSpec `kind` override, passed to every `state_spec_
+#: from_scene` call (2026-09-07, the `t_offset_k` state row). Every row
+#: not listed here keeps `state_spec_from_scene`'s own default ("scale"),
+#: so this dict is harmless for any run that doesn't free/freeze
+#: `t_offset_k` at all. `t_offset_k` uses "absolute" (the retrieved number
+#: IS the physical offset in Kelvin, not a multiplier on a prior that could
+#: be zero) -- only valid with `--jacobian analytic` (`gauss_newton_state`
+#: raises otherwise; see its own docstring on why kind="scale" is required
+#: for the finite-difference step).
+ROW_KINDS = {"t_offset_k": "absolute"}
+
 
 def _solve_window(row_lo: int, row_hi: int):
     # Shadows the module-level `FPA` import for the rest of this function:
@@ -359,7 +370,8 @@ def _solve_window(row_lo: int, row_hi: int):
                                        fields=prior_fields, band_label=band_label,
                                        surface_fields=surface_fields,
                                        prior_anchor_density=prior_anchor_density,
-                                       row_sub_bin_anomaly=row_sub_bin_anomaly)
+                                       row_sub_bin_anomaly=row_sub_bin_anomaly,
+                                       kinds=ROW_KINDS)
         # coarse: scene positions ARE the state positions, so interpolation is
         # the identity regardless of kind -- state_interp is genuinely a no-op here.
         fwd_c = build_forward_state(FPA, rows_win, bin_centers, spec_c, spectrum,
@@ -410,7 +422,8 @@ def _solve_window(row_lo: int, row_hi: int):
                                    surface_positions=surface_positions,
                                    row_positions=row_positions,
                                    prior_anchor_density=prior_anchor_density,
-                                   row_sub_bin_anomaly=row_sub_bin_anomaly)
+                                   row_sub_bin_anomaly=row_sub_bin_anomaly,
+                                   kinds=ROW_KINDS)
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
                                 wn_hires, ils, pad=retrieval_pad, state_interp=state_interp,
                                 n_workers=anchor_workers,

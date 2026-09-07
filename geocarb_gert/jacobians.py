@@ -37,9 +37,14 @@ returning `dS/dparam` instead of `S`:
 
     dY/dx_k = predict_neighborhood(..., footprint=True, radiance=footprint_average_scene(etas, dS_k))
 
-with `dS_k[g] = (dS/dparam_r)[g] * W[g, k] * prior_r[k]`, where `W` is
+with `dS_k[g] = (dS/dparam_r)[g] * W[g, k] * dval_dx_r[k]`, where `W` is
 `StateSpec.interp_weights` (the state-space interpolation written as a
-matrix) and the `prior_r[k]` factor is `d(value)/dx` for `kind="scale"`.
+matrix) and `dval_dx_r[k]` is `d(value)/dx` -- `prior_r[k]` for
+`kind="scale"` (the retrieved number multiplies the prior), or `1.0` for
+`kind="absolute"` (the retrieved number IS the physical value -- 2026-09-07,
+first exercised end-to-end by the `t_offset_k` row; see `linearize`'s own
+`dval_dx` branch, kept in lockstep with `ParamSpec.apply`'s identical
+`kind` branch by construction).
 
 `instrument` rows are the exception: they never enter the radiance at all,
 so they use `gd_render._diagonal_ils_convolve_dnu` instead. Not implemented
@@ -55,6 +60,9 @@ ch4_ppb            atmosphere   same (exactly zero in a band without ch4)
 co_ppb             atmosphere   same
 h2o_surface_vmr    atmosphere   same, plus a known omitted q-coupling term below
 p_surface_hpa      atmosphere   composite chain rule; 2.1e-5, see below
+t_offset_k         atmosphere   gert `dtau_mol_dT_lay_hires` x `K_mol_lay_hires`,
+                                no chain rule (uniform additive shift, no
+                                altitude/VMR feedback) -- exact, like albedo
 albedo             surface      gert `K_albedo_hires` -- exact, nothing to chain
 albedo_slope       surface      gert `K_slope_hires`  -- exact (spectral slope)
 dispersion         instrument   derivative built (`_diagonal_ils_convolve_dnu`),
@@ -284,6 +292,31 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6):
     return out
 
 
+def t_offset_dI_dparam(res, window: int = 0):
+    """``dI_hires/d(t_offset_k)`` -- exact, no finite differences.
+
+    Unlike `p_surface_dI_dparam`'s temperature-path term, a uniform
+    additive shift moves every layer's temperature by exactly 1K per 1K of
+    offset with no altitude/VMR feedback (see `along_slit_scene.
+    atmosphere_from_params`'s own `t_offset_k` docstring) -- so this is
+    nothing but gert's own ``dtau_mol_dT_lay_hires`` summed against
+    ``K_mol_lay_hires``, the SAME per-layer arrays `p_surface_dI_dparam`
+    already reads for its own temperature path, just without the
+    `dT_lay` chain-rule factor (here it's implicitly 1 everywhere, so it
+    drops out of the einsum entirely). No Rayleigh term either -- Rayleigh
+    optical depth depends on the layer's air column (pressure), not
+    temperature, under this scene's pure-sigma levels.
+    """
+    K_mol_lay = res.K_mol_lay_hires[window]
+    dtau_dT = res.dtau_mol_dT_lay_hires[window]
+    n_hires = np.shape(res.I_hires[window])[0]
+    out = np.zeros(n_hires)
+    for mol, K in K_mol_lay.items():
+        if mol in dtau_dT:
+            out += np.einsum("lw,wl->w", K, dtau_dT[mol])
+    return out
+
+
 def make_spectrum_jac(absco, wide_inst, geo, solar, albedo):
     """``spectrum_jac(params, rows) -> (S_hires, {row: dS/d(param)})``.
 
@@ -317,6 +350,8 @@ def make_spectrum_jac(absco, wide_inst, geo, solar, albedo):
                 d[row] = surface_dI_dparam(res, row)
             elif row == "p_surface_hpa":
                 d[row] = p_surface_dI_dparam(res, params)
+            elif row == "t_offset_k":
+                d[row] = t_offset_dI_dparam(res)
             elif row in GAS_ROW_MOLECULE:
                 d[row] = gas_dI_dparam(res, GAS_ROW_MOLECULE[row], params[row])
             else:
@@ -458,7 +493,8 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
     scene_etas = scene_etas[order]
 
     free = spec.free_params
-    supported = set(GAS_ROW_MOLECULE) | set(SURFACE_ROW_JACOBIAN) | {"p_surface_hpa"}
+    supported = (set(GAS_ROW_MOLECULE) | set(SURFACE_ROW_JACOBIAN)
+                | {"p_surface_hpa", "t_offset_k"})
     unsupported = [p.name for p in free if p.name not in supported]
     if unsupported:
         raise NotImplementedError(
@@ -466,7 +502,7 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
             f"{sorted(supported)}. dispersion (instrument target) is the "
             f"remaining step -- until then run that row with finite differences.")
     for p in free:
-        if p.kind != "scale":
+        if p.kind not in ("scale", "absolute"):
             raise NotImplementedError(f"{p.name}: kind={p.kind!r} not yet wired here")
 
     atm_names = [p.name for p in spec.rows_for("atmosphere")]
@@ -526,8 +562,14 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
         dS_row = np.asarray([d[p.name] for d in dS])     # (n_scene, n_hires)
         sl = slices[p.name]
         for k in range(p.n):
-            # d(param at anchor g)/dx_k = W[g,k] * prior[k]   (kind="scale")
-            jobs.append((("K", sl.start + k), dS_row * (W[:, k] * p.prior[k])[:, None]))
+            # d(param at anchor g)/dx_k = W[g,k] * prior[k]   (kind="scale",
+            # the retrieved number multiplies the prior) or W[g,k] * 1.0
+            # (kind="absolute", the retrieved number IS the physical value
+            # -- ParamSpec.apply's own "xi if kind=='absolute'" branch,
+            # mirrored here exactly so this module's d(value)/dx factor never
+            # silently disagrees with what apply() actually computes).
+            dval_dx = p.prior[k] if p.kind == "scale" else 1.0
+            jobs.append((("K", sl.start + k), dS_row * (W[:, k] * dval_dx)[:, None]))
         if p.sub_bin_anomaly is not None and p.sub_bin_anomaly.g_cov is not None:
             dval_dg = _g_anomaly_sensitivity(p, scene_etas, W, state_interp)
             dval_dg_by_name[p.name] = dval_dg

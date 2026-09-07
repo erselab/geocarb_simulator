@@ -469,6 +469,17 @@ def p_surface_hpa(x_km):
     return background + mountain
 
 
+def t_offset_k(x_km):
+    # A synoptic temperature anomaly, mirroring p_surface_hpa's own
+    # "today's weather" sinusoid at the same 2800km period (both represent
+    # the same class of unmodeled synoptic structure) -- but with its own
+    # phase (+1.5 vs p_surface's +0.5) so the two aren't perfectly
+    # correlated along the slit, and no localized plume/hot-spot term
+    # (temperature has no point-source physical analogue the way a gas
+    # emission source does). Amplitude +/-3K (2026-09-07, user).
+    return 3.0 * np.sin(2 * np.pi * (x_km + 1400) / 2800 + 1.5)
+
+
 # -- "structural" priors for the realistic-prior experiment class --
 #
 # A real L2 prior is not the truth: it knows large-scale/climatological
@@ -504,6 +515,14 @@ def p_surface_hpa_prior(x_km):
     return np.full_like(np.asarray(x_km, dtype=float), background_ref) + mountain
 
 
+def t_offset_k_prior(x_km):
+    # Flat 0K -- "standard atmosphere, no known anomaly" (2026-09-07,
+    # user). Unlike p_surface_hpa there is no static/topographic component
+    # worth keeping; this mirrors co2/ch4/co's own background-only
+    # convention (drop the synoptic term entirely, keep nothing else).
+    return np.zeros_like(np.asarray(x_km, dtype=float))
+
+
 # The canonical truth-state parameter table: one row per along-slit-varying
 # quantity, keyed by the exact keyword `atmosphere_from_params` takes. Every
 # consumer (truth generation, state interpolation, forward-model anchors)
@@ -516,12 +535,30 @@ def p_surface_hpa_prior(x_km):
 # belongs in the same table once the forward models take a combined
 # state+surface record; see JOINT_BLOCK_MIGRATION_PLAN.md Sec.4.1/Sec.5,
 # where albedo also has to become per-bin AND per-FPA.
+#
+# 2026-09-07 (t_offset_k added, user: accepted the consequence directly):
+# because `PRIOR_FIELD_SETS["exact"]`/`["structural"]` POINT AT these two
+# dicts (not a copy) and most driver scripts build their own custom
+# prior-fields registry via a dict comprehension OVER these dicts'
+# `.items()`, adding a new row here means it now flows into every one of
+# those registries automatically -- FROZEN at its real truth value unless
+# a driver explicitly frees it. Concretely: any of this project's existing
+# driver scripts (the reversed-truth/defocus/anchor-frozen configs
+# documented in docs/PROJECT_STATUS.md Sec.1-9) reruns FROM NOW ON with a
+# real +/-3K synoptic temperature term baked into the truth atmosphere that
+# was not there when those sections were originally written -- a genuine
+# new confound, not a bug. This is the intended consequence of "no
+# quantity is privileged" (the same thing presumably happened when
+# p_surface/H2O were first added to this table) -- past PROJECT_STATUS.md
+# sections stay valid as a record of what was true THEN; only a fresh
+# rerun of an old script picks up the new physics.
 STATE_FIELDS = {
     "co2_ppm": lambda x: xco2_ppm(x),
     "ch4_ppb": lambda x: xch4_ppb(x),
     "co_ppb": lambda x: xco_ppb(x),
     "h2o_surface_vmr": lambda x: h2o_surface_vmr(x),
     "p_surface_hpa": lambda x: p_surface_hpa(x),
+    "t_offset_k": lambda x: t_offset_k(x),
 }
 
 # Same shape as STATE_FIELDS, but each field is the "structural" prior
@@ -534,6 +571,7 @@ STATE_FIELDS_PRIOR = {
     "co_ppb": lambda x: xco_ppb_prior(x),
     "h2o_surface_vmr": lambda x: h2o_surface_vmr(x),
     "p_surface_hpa": lambda x: p_surface_hpa_prior(x),
+    "t_offset_k": lambda x: t_offset_k_prior(x),
 }
 
 # -- uniform multiplicative-bias priors (2026-08-20) --
@@ -805,7 +843,8 @@ def build_scene_fields(uniform: bool = False, barcode: bool = False,
 
 def atmosphere_from_params(co2_ppm: float, ch4_ppb: float, co_ppb: float,
                            h2o_surface_vmr: float, p_surface_hpa: float,
-                           h2o_scale_height_km: float = 2.0) -> AtmosphericProfile:
+                           h2o_scale_height_km: float = 2.0,
+                           t_offset_k: float = 0.0) -> AtmosphericProfile:
     """Build the truth ``AtmosphericProfile`` from explicit scalar state
     parameters, instead of from an along-slit position.
 
@@ -818,13 +857,23 @@ def atmosphere_from_params(co2_ppm: float, ch4_ppb: float, co_ppb: float,
     "the correct place to interpolate is the *state* ... followed by a fresh
     RT run") with a guarantee that nothing else about the profile
     construction differs from the truth generator.
+
+    ``t_offset_k`` (2026-09-07, the `t_offset_k` state row) is a uniform
+    additive shift applied to the standard-atmosphere temperature profile
+    AFTER it is built from pressure alone -- it never feeds back into
+    ``z_km`` (hence never into the H2O profile, which depends on altitude
+    only) the way ``p_surface_hpa`` does. That is exactly what makes its
+    own analytic Jacobian trivial (`geocarb_gert.jacobians.
+    t_offset_dI_dparam`): every layer's temperature moves by exactly 1K per
+    1K of offset, with no VMR-coupling term to chain through. Default 0.0
+    reproduces every existing caller exactly.
     """
     # pure sigma, NOT gert_levels: see geocarb_gert.levels for why -- it is
     # what makes d(p_level)/d(p_sfc) exactly parallel to p, hence an exact
     # analytic surface-pressure Jacobian.
     p = np.asarray(sigma_levels(float(p_surface_hpa) * 100.0), dtype=float)  # TOA -> surface
     z_km = np.asarray(pressure_to_alt_std_atm(p / 100.0), dtype=float)
-    T = _std_temperature(z_km)
+    T = _std_temperature(z_km) + float(t_offset_k)
 
     h2o = float(h2o_surface_vmr) * np.exp(-z_km / float(h2o_scale_height_km))
     gases = {g: np.full_like(p, v) for g, v in _WELL_MIXED.items()}

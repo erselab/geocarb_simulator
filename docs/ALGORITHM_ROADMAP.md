@@ -110,18 +110,35 @@ Roughly in the order they'd need resolving:
    proposed two candidates (a looser/shorter spatial prior; an
    averaging-kernel-weighted post-hoc correction) -- neither has been
    built or tested yet.
-3. **Temperature as a state parameter.** Not yet a retrievable quantity
-   at all (fixed via the standard atmosphere). A concrete implementation
-   plan exists (this session, 2026-09-04): GERT already provides the
-   exact per-layer `dtau_mol_dT_lay_hires` term `p_surface_hpa`'s own
-   Jacobian already uses, so a uniform `T_offset_K` row's analytic
-   Jacobian needs no finite differences at all -- simpler than every
-   existing row but albedo. Two things need deciding before building
-   it: the truth field's spatial structure (a synoptic sinusoid,
-   analogous to `p_surface_hpa`'s, is the natural default), and whether
-   `kind="absolute"` (vs. the `kind="scale"` every current row uses)
-   actually works end-to-end in `StateSpec`/`gauss_newton_state` --
-   flagged, not yet checked.
+3. **RESOLVED: temperature (`t_offset_k`) is now a retrievable state row**
+   (`PROJECT_STATUS.md` Sec.10, 2026-09-07). A uniform additive shift to
+   the standard-atmosphere temperature profile, ±3K synoptic-sinusoid
+   truth (same period as `p_surface_hpa`'s own synoptic term, distinct
+   phase), flat 0K structural prior. Its analytic Jacobian
+   (`geocarb_gert.jacobians.t_offset_dI_dparam`) needed genuinely zero
+   finite differences, exactly as predicted -- just `dtau_mol_dT_lay_
+   hires` x `K_mol_lay_hires` with no chain rule. `kind="absolute"` is
+   now wired end-to-end for the first time (the second open item this
+   entry flagged) -- found and fixed a real gap along the way:
+   `jacobians.linearize` hardcoded the `kind="scale"` chain-rule factor
+   and explicitly raised on any other kind, so `kind="absolute"` was
+   advertised (module docstring) but not actually reachable through the
+   analytic path. Fixed generically (any future absolute-valued row
+   benefits, not just this one). Verified four ways: the `x0()`/prior
+   round-trip, an analytic-vs-FD cross-check (correct once the FD step
+   was rescaled from the other rows' O(1)-multiplier convention to a
+   physically appropriate Kelvin-sized step -- rel L2 ~2e-5, matching
+   `p_surface_hpa`'s own documented gert-internal precision floor), a
+   smoke test (converged to within 1e-4 K of the true value in a fully
+   representable config), and the standing forward-model-agreement check.
+   **Accepted side effect** (user's explicit call): since `PRIOR_FIELD_
+   SETS["exact"]`/`["structural"]` point at `STATE_FIELDS`/`STATE_FIELDS_
+   PRIOR` directly, every driver script that builds its own prior-fields
+   registry by comprehending over those dicts now picks up `t_offset_k`
+   automatically (frozen at its real ±3K truth) if rerun from now on --
+   intended, matching the file's own "no quantity is privileged" design,
+   not a bug. Not yet run: any of the prior-pull/keystone-floor/defocus
+   diagnostics this session already put every other row through.
 4. **Multi-band bin placement** (`PROJECT_STATUS.md` Sec.15). Each
    band's window/bin tiling is chosen independently today (`--fpa`
    refuses more than one band outright) -- 58/66/63/78 natural windows
