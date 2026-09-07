@@ -285,6 +285,28 @@ diagnostic run") FPA2 retrieval should look like, and why:
    vs. matched, growing with defocus severity). Practical implication:
    the focal-adjustment mechanism's calibration matters most exactly
    where retrieval is already most fragile, not uniformly across the
-   slit. Not yet run: the same matrix at the widest window (968-1012);
-   finer g_ratio combined with defocus; a middle-ground FWHM to locate
-   where matched/mismatched divergence begins.
+   slit. **Important correction** (`PROJECT_STATUS.md` Sec.9a,
+   2026-09-06/07): the "even MATCHED defocus gets worse with wider
+   FWHM" half of this finding turned out to be a tiling artifact, not a
+   real property of defocus. Root cause: free parameters live only on a
+   window's own local `bin_centers`, but the PSF blur needs a padded
+   render region scaling with FWHM (`default_pad_for_psf`) --
+   `_row_interp1d` CLAMPS the free state into that padding rather than
+   extrapolating, so a narrow window (Sec.9's 9-11-row fast subset)
+   sees pad/width reach ~200% at FWHM=8px. Rerunning the SAME matched-
+   defocus config at a much wider window (41 rows, pad/width ~54%)
+   removed the effect entirely -- error went from a sharp edge-U-shape
+   to a flat, near-constant residual across every bin, and aggregate
+   error IMPROVED versus nominal PSF rather than worsening. The
+   MISMATCHED-vs-matched finding (real degradation at the extreme-
+   keystone edge) is unaffected -- that comparison holds window
+   width/pad fixed between the two configs being compared. Practical
+   takeaway: any future sweep axis that changes `pad` (PSF FWHM
+   included) must use production-representative window widths, or
+   narrow fast-subset windows will systematically overstate the effect.
+   Not yet run: the same matrix at the widest window (968-1012); finer
+   g_ratio combined with defocus; a middle-ground FWHM to locate where
+   matched/mismatched divergence begins; the wide-window
+   matched-vs-mismatched comparison (does the keystone-edge mismatch
+   penalty also shrink at wide windows, or is it genuinely
+   location-driven).

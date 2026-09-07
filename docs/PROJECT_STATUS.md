@@ -660,3 +660,82 @@ defocus (does resolution help the mismatched case the way it helped the
 reversed-truth keystone floor in Sec.8?); a middle-ground defocus level
 between nominal and 3px, to locate where the matched/mismatched
 divergence actually begins.
+
+## 9a. Confirming the edge-clamp confound: a much wider window removes the "even matched gets worse" pattern (2026-09-06/07)
+
+Direct follow-up, requested after Sec.9's own per-bin analysis identified
+a confound: `state_spec_from_scene`'s free parameters (co2_ppm/
+p_surface_hpa/albedo) live only on a window's own local `bin_centers`,
+but `predict_neighborhood`'s PSF blur needs a padded render region
+scaling with FWHM (`default_pad_for_psf`: 4/8/14/22 rows at FWHM
+1.5/3/5/8px) -- `_row_interp1d`'s `fill_value=(lo, hi)` CLAMPS the free
+state to the nearest window-edge value in that padding rather than
+extrapolating any real gradient. For Sec.9's narrow fast-subset windows
+(9-11 rows), pad/width ratio reaches ~200% at FWHM=8px; a much wider
+window should shrink this ratio and, if the hypothesis is right, largely
+remove the "even MATCHED defocus gets worse with wider FWHM" pattern.
+
+**Test**: reran ONE much wider window (`--min-window 20` -> 41-row
+window, rows 205-245, vs. the original 11-row window at a nearby slit
+location -- pad/width ratio drops from ~200% to ~54% at FWHM=8px) at
+both nominal (1.5px) and defocused (8px) matched PSF, same anchor-frozen
+config otherwise.
+
+(co2_ppm turned out uninformative for this specific window -- its
+structural prior happens to agree with the true field to ~6 significant
+figures at this slit location, so GN correctly left it at scale factor
+1.0 regardless of PSF, giving near-zero error at BOTH configs. p_surface
+is the real test here, since it did move.)
+
+### p_surface |error| per-bin profile, rows 205-245 (G=41)
+
+- **nominal (1.5px)**: highly variable, 0.02-9.04 hPa across bins --
+  real per-location fit structure, no systematic pattern.
+- **defocus (8px, matched)**: nearly FLAT, 2.75-2.96 hPa across every
+  single bin -- no edge elevation anywhere, a smooth near-constant
+  residual from one end of the window to the other.
+
+### Aggregate p_surface stats
+
+| config | mean | median | max | rms |
+|---|---|---|---|---|
+| nominal (1.5px) | 3.30 | 2.62 | 9.04 | 4.28 |
+| defocus (8px, matched) | 2.87 | 2.88 | 2.96 | **2.87 (BETTER than nominal)** |
+
+### What this shows
+
+**Decisive confirmation of the edge-clamp confound.** At the wide
+window, the defocused-matched result is not just less bad than the
+narrow-window pattern predicted -- it's actually BETTER than nominal in
+aggregate, with a flat, edge-effect-free error profile. This is the
+opposite of Sec.9's narrow-window finding (error growing monotonically
+and worst at the edges as FWHM increased). The narrow-window "even
+matched gets worse with wider PSF" result was therefore dominated by the
+pad/width-ratio artifact (free parameters clamped, not extrapolated,
+into an increasingly large padded region relative to window width), not
+a fundamental information-loss property of defocus itself.
+
+**Reframes Sec.9's headline finding**: defocus's TRUE cost to a
+well-modeled (matched) retrieval is much smaller than the narrow-window
+numbers suggested -- most of that apparent cost was a tiling artifact of
+testing on very narrow windows relative to the PSF's own reach, not
+something a real production algorithm (which would use wider windows,
+`MIN_WINDOW`>=Sec.3's own production tiling) would actually suffer from
+comparably. The MISMATCHED (uncorrected) result's own real degradation
+at the extreme-keystone edge (Sec.9's other finding) is unaffected by
+this correction -- that comparison held two configs at the SAME window
+width and PSF-vs-pad ratio, so the artifact cancels out between them.
+
+**Practical implication for future defocus/PSF experiments**: always use
+production-representative window widths (large `min_window`), or the
+narrow fast-subset windows this session's other experiments relied on
+for speed will systematically overstate any effect that depends on
+`pad` -- a new caveat to flag whenever `pad` (or anything that scales
+with it, like `spatial_psf_fwhm_px`) is a sweep axis.
+
+Not yet run: the same wide-window matched-vs-mismatched comparison
+(to see whether the extreme-keystone mismatch-penalty finding also
+shrinks at wide windows, or is genuinely location-driven and holds
+regardless of tiling); a location where co2's structural prior more
+meaningfully diverges from truth, to get a real co2 data point for this
+same wide-window test.
