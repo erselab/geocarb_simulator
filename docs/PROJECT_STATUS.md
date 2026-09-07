@@ -541,9 +541,31 @@ updated production-default guidance in Sec.6/roadmap) specifically as a
 mitigation for the worst-affected rows, even though it cannot eliminate
 the underlying geometry effect Sec.5/7 established.
 
-Not yet run: the same reversal test at the widest window (rows
-968-1012) for a second, independent high-keystone data point at finer
-g_ratio; determining each other FPA band's own keystone-null location.
+**Second, independent high-keystone data point (rows 968-1012, the
+widest window)**, run 2026-09-06/07: same reversed-truth config,
+`g_ratio in {1, 0.5, 0.25}`.
+
+| g_ratio | G | t_hires | co2 |err| (mean/med/max/rms) | p_surface |err| (mean/med/max/rms) |
+|---|---|---|---|---|
+| 1 | 45 | 12247s | 14.58/6.52/105.94/25.96 | 11.07/8.99/39.36/13.65 |
+| 0.5 | 90 | 12939s | 3.79/2.34/26.44/5.63 | 2.67/1.48/17.82/3.92 |
+| 0.25 | 180 | 25941s | 3.09/1.94/57.51/6.19 | **0.60**/**0.40**/6.98/**1.08** |
+
+Confirms the same qualitative pattern as rows 1013-1023: co2/p_surface
+rms both drop sharply from g_ratio=1 to 0.5 (co2 rms 26.0->5.6, p_surface
+13.6->3.9), and p_surface keeps improving cleanly to 0.25 (down to 1.08
+hPa). co2's max/rms at 0.25 are NOT a clean further improvement over 0.5
+here (rms ticks up slightly 5.63->6.19, max jumps 26.4->57.5) -- a
+reminder, at an even larger G (180) than any single-window case tested
+in Sec.6/8's fast subset, that a single fine-binning step can still make
+one or two bins locally worse even as the broad trend keeps improving
+(the same non-monotonic caveat flagged for the other two windows in this
+section and in Sec.6). Net: the keystone-floor-shrinks-with-resolution
+finding holds up at a second, independent extreme-keystone location, not
+just the one window Sec.7/8 first tested it on.
+
+Not yet run: determining each other FPA band's own keystone-null
+location.
 
 ## 9. Defocus (wide-PSF) experiments: the retrieval largely compensates for an assumed-vs-true PSF mismatch except at the extreme-keystone edge (2026-09-06)
 
