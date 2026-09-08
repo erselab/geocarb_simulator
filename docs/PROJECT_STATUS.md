@@ -845,3 +845,22 @@ available to any future absolute-valued row, not just this one). Not yet
 run: any real experiment putting `t_offset_k` through the same class of
 diagnostics every other row has already faced this session (prior-pull,
 keystone-floor sensitivity, defocus interaction).
+
+**Reversed-truth mechanism updated too** (2026-09-08, user: "make sure to
+create this for the reversed truth as well" -- the Sec.7/8/9 keystone/
+defocus control-experiment image, `scratch_work/whole_slit_truth_
+reversed.pkl`, built before `t_offset_k` existed). Verified the generic
+reversal wrapper (`_reversed1(fn) = lambda x: fn(-x)`, applied over
+`als.STATE_FIELDS.items()`) already handles `t_offset_k` correctly with
+zero code changes -- `reversed_t_offset_k(500) == original_t_offset_k
+(-500)` exactly, same sanity check every other row in that mechanism
+already gets. Rebuilt the reversed-truth image (old one backed up as
+`whole_slit_truth_reversed.PRE_TOFFSET_backup.pkl`, not deleted); the new
+image differs from the old by up to 0.17 radiance units (~1.2% relative)
+-- a real, physically-sensible-magnitude change from the temperature-
+driven optical-depth shift now present, not a rendering artifact.
+`retrieval_co2palbedo_reversed_truth_anchorfrozen_gratio.py`'s own
+`_merged_fields` comprehension already iterates `als.STATE_FIELDS`
+generically too, so it now freezes `t_offset_k` at its exact (reversed)
+truth value at every anchor automatically, the same as ch4/co/h2o --
+no driver-script edit needed, only the truth-image rebuild.
