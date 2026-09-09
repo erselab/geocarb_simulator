@@ -137,11 +137,28 @@ def main() -> int:
             atm = als.atmosphere_from_params(**params)
             alb = float((surface or {}).get("albedo", albedo))
             slope = float((surface or {}).get("albedo_slope", 0.0))
+            # tau_aerosol/height_aerosol (2026-09-08) -- must match
+            # _make_state_spectrum's own threading exactly, or this
+            # "FD reference" silently omits aerosol physics the analytic
+            # path (spectrum_jac) DOES include whenever either row is
+            # free/frozen -- caught directly (co2_ppm's own forward
+            # agreement broke, not just the aerosol rows', the first time
+            # this drifted out of sync).
+            tau_aer = (surface or {}).get("tau_aerosol")
+            height_aer = (surface or {}).get("height_aerosol")
+            n_wn = len(wide_inst.windows[0].wn_hires)
+            p_aer_val = als.aerosol_phase_hg(als.AEROSOL_G, np.cos(geo.scattering_angle))
             fm = ForwardModel(atm, absco, wide_inst, geo,
                               solver=SingleScatterSolver(), solar_spectrum=solar)
-            return np.asarray(fm.run(albedo=np.array([alb]),
-                                     albedo_slope=np.array([slope])).I_hires[0],
-                              dtype=float)
+            res = fm.run(albedo=np.array([alb]), albedo_slope=np.array([slope]),
+                         tau_aerosol=tau_aer, height_aerosol=height_aer,
+                         aerosol_profile_shape="gaussian",
+                         thickness_aerosol=als.AEROSOL_THICKNESS_PA,
+                         ssa_aerosol=[np.full(n_wn, als.AEROSOL_SSA)],
+                         g_aerosol=[als.AEROSOL_G],
+                         qext_aerosol=[np.full(n_wn, als.AEROSOL_QEXT_NORM)],
+                         P_aerosol=[np.full(n_wn, p_aer_val)])
+            return np.asarray(res.I_hires[0], dtype=float)
         return spectrum
 
     forward = build_forward_state(FPA, rows_win, anchor_etas, spec, make_spectrum(),

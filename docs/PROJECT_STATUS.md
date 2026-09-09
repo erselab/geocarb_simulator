@@ -864,3 +864,266 @@ driven optical-depth shift now present, not a rendering artifact.
 generically too, so it now freezes `t_offset_k` at its exact (reversed)
 truth value at every anchor automatically, the same as ch4/co/h2o --
 no driver-script edit needed, only the truth-image rebuild.
+
+## 11. Aerosol added as retrievable state (tau_aerosol, height_aerosol) (2026-09-08)
+
+Direct infrastructure prerequisite for the user's own stated multi-FPA
+coupling goal ("couple FPA0 with FPA2 and FPA3 (separately) to get a
+column average that is responsive to aerosols and surface pressure
+errors"): without an aerosol state row, FPA0 coupling cannot inform
+anything aerosol-related at all. Checked directly: `gert.ForwardModel`
+already has full aerosol support (`tau_aerosol`, `height_aerosol`,
+`thickness_aerosol`, `ssa_aerosol`/`g_aerosol`/`P_aerosol`/
+`qext_aerosol`, analytic `K_tau_aer_hires`/`K_aer_lay_hires`) but this
+project's own scene layer (`along_slit_scene.py`) had never threaded any
+of it through.
+
+**Correction along the way** (user caught this directly): `tau_aerosol`
+is NOT a band-independent physical quantity -- it is "total aerosol
+optical depth at the O2-A REFERENCE WAVELENGTH" (`gert.ForwardModel.
+run`'s own docstring). Different aerosol species have genuinely
+different spectral extinction signatures (the Angstrom-exponent effect),
+so the same physical aerosol layer produces a different optical depth in
+different bands -- `gert` models this via `qext_aerosol` (per-window
+normalised extinction, `tau_aerosol` scaled by this factor per
+wavenumber), held fixed per this work but requiring a real aerosol
+type's own spectral shape once multi-band coupling is built (not a flat
+placeholder).
+
+**Design**, mirroring the `t_offset_k` addition (Sec.10) closely: two new
+`surface`-target rows (`tau_aerosol`, `height_aerosol` are passed
+directly to `ForwardModel.run`, like `albedo`, never through
+`AtmosphericProfile`) in `SURFACE_FIELDS`/`SURFACE_FIELDS_PRIOR` --
+spatially-varying truth (0.05 background AOD + a moderate haze event,
+mirroring every other row's background+localized-feature convention;
+85000 Pa background height + a synoptic drift, phase-offset from
+`t_offset_k`'s own sinusoid), flat structural priors, `kind="absolute"`
+(reusing the generic machinery already built for `t_offset_k`). Fixed
+aerosol microphysics (`AEROSOL_SSA`/`AEROSOL_G`/`AEROSOL_THICKNESS_PA`/
+`AEROSOL_QEXT_NORM`, `along_slit_scene.py`): `smoke` (fresh biomass-
+burning)'s band-1 (CO2-weak, closest available proxy in gert's 3-band
+registry to GeoCarb's own CO2_strong) values from `gert.
+aerosol_properties.get_aerosol_scalars`.
+
+### Two real bugs found and fixed along the way (not in this project's own logic, but exposed by exercising it for the first time)
+
+1. **`gd_jacobian_validate.py`'s own hand-duplicated FD-reference forward
+   model silently omitted aerosol physics entirely** -- it never threads
+   `tau_aerosol`/`height_aerosol` through at all, so the moment either
+   row was free, the analytic path (which DOES include it) and this
+   "FD reference" disagreed on EVERY row's own forward computation, not
+   just the aerosol rows' -- caught directly when `co2_ppm`'s own
+   forward-agreement check broke (rel L2 0.135, should be exactly 0).
+   Fixed by threading the same aerosol kwargs through this script's own
+   duplicated `make_spectrum()`.
+2. **`P_aerosol` (the scattering phase function) has never been computed
+   anywhere in this whole codebase -- not even in `gert`'s own sanity-
+   check scripts.** Every `ForwardModel.run()` call before this work
+   omitted it, silently defaulting to `np.zeros(n_wn)`
+   (`forward_model.py`'s own fallback), which makes `I_scatter` --
+   the ONLY mechanism `height_aerosol` can act through -- identically
+   zero regardless of height. Found by tracing why `height_aerosol`'s
+   own analytic Jacobian column measured ~1e-19 (floating-point noise,
+   not a small-but-real derivative) despite `K_aer_lay_hires` and the
+   layer-redistribution finite difference both being individually
+   nonzero and correctly computed -- the two combine to EXACTLY cancel
+   when `K_aer_lay` is constant across layers (true in the single-
+   scatter solver, checked directly) and the Gaussian profile's own
+   `aer_frac` is mass-conserving (`sum_l d(aer_frac[l])/d(height) = 0`
+   exactly, by construction of the normalization). Fixed by implementing
+   the real Henyey-Greenstein phase function (`along_slit_scene.
+   aerosol_phase_hg`) using `gert.geometry.Geometry`'s own already-
+   computed `scattering_angle`, wired into all three `fm.run()` call
+   sites (`_make_state_spectrum`, `spectrum_jac`, and
+   `height_aerosol_dI_dparam`'s own internal RT calls).
+
+### `tau_aerosol`'s analytic Jacobian: fully validated
+
+Reuses `surface_dI_dparam` completely unchanged (`K_tau_aer_hires` is
+already a direct column derivative, no chain rule) -- just one new
+`SURFACE_ROW_JACOBIAN` entry. Verified all four ways (mirroring Sec.10's
+own template): `x0()`/prior round-trip; byte-identical when absent
+(regression); analytic-vs-FD agreement ~2e-5 relative at an
+appropriately-sized step (matching the same gert-internal precision
+floor already documented for `p_surface_hpa`'s temperature path); smoke
+test.
+
+### `height_aerosol`'s analytic Jacobian: a genuine, structural non-smoothness in `gert`'s own forward model, not a bug to keep chasing
+
+`height_aerosol` acts on radiance ONLY through `tau_abv` (gas+Rayleigh
+optical depth ABOVE the aerosol layer, inside `I_scatter`'s own
+`exp(-m*tau_abv)` term) -- `K_aer_lay_hires` alone cannot capture this
+(see bug 2 above), so `height_aerosol_dI_dparam` is a genuine RT-level
+finite difference (2 extra full `ForwardModel.run()` calls per anchor,
+unlike every other row's Jacobian, which reuses the SAME `jacobians=True`
+call already made for the nominal state) -- an accepted cost tradeoff
+for correctness, since `gert` doesn't expose `I_scatter`/`tau_abv`/the
+airmass factor as separate `ForwardResult` fields to compose more
+cheaply.
+
+After fixing the `P_aerosol` bug, this Jacobian is no longer
+mathematically forced to zero -- it shows real, plausible-magnitude,
+mostly-correctly-signed sensitivity. But it does not cleanly pass a
+classic analytic-vs-FD validation, and an h-scan from 10 to 5000 Pa
+shows why: **`ForwardModel.run`'s own `above_mask = atm.p_layers <
+height_aerosol` is a hard BOOLEAN threshold**, not a smooth function --
+`tau_abv` (and hence radiance) has a genuine step discontinuity every
+time `height_aerosol` crosses one of the atmosphere's discrete layer
+pressures. Both the analytic path (itself an internal FD at a fixed
+~100 Pa step) and any external FD reference are each sampling a
+DIFFERENT, discretization-dependent slice of a fundamentally non-smooth
+function -- the erratic, non-converging disagreement across the h-scan
+(rel L2 ranging 0.43-14+ with no clean monotonic trend either direction)
+is the expected signature of that, not evidence either implementation is
+wrong. This is a property of `gert`'s own Gaussian-aerosol-profile
+implementation (a hard layer-count threshold where a smooth weighting
+would be physically better-justified anyway), not this project's code.
+
+**Decision (user's explicit call): keep the row, document the caveat**
+rather than dropping it or chasing a clean analytic Jacobian further.
+Practical implication: Gauss-Newton retrieval of `height_aerosol` may be
+locally unreliable specifically near a layer-boundary crossing (a real
+property of the current forward model, not something a better Jacobian
+implementation on this project's own side could fix) -- worth keeping in
+mind when interpreting any future `height_aerosol` retrieval result that
+sits close to one of `atm.p_layers`' own discrete values.
+
+### Smoke test -- caught a real convergence failure, not just a CLI gap
+
+`--free co2_ppm,p_surface_hpa,tau_aerosol,height_aerosol --vary-albedo`
+(fully representable `--prior-fields exact` config, fast-subset window).
+**Real gap caught first**: `state_spec_from_scene`'s own surface-row gate
+is `band_label = ... if ("albedo" in free or vary_albedo) else None` --
+since neither `tau_aerosol` nor `height_aerosol` triggers this on their
+own, `--vary-albedo` MUST be passed even when albedo itself isn't in
+`--free`, or `tau_aerosol`/`height_aerosol` are silently absent from the
+state entirely despite being named in `--free`. Not obvious from either
+flag's own name; worth a clearer error message as a follow-up (today: no
+explicit check catches "surface-target row in --free without
+vary_albedo" the way the reverse -- "albedo in --free without
+--vary-albedo" -- already has one).
+
+**But the smoke test itself revealed something much bigger once run**:
+`resid_hires_rms=0.147` (should be ~1e-5 for a fully-representable
+config, matching every OTHER row's own smoke test this session) and
+wildly wrong retrieved values (`co2_ppm` off by up to 47 ppm,
+`tau_aerosol` retrieved NEGATIVE -- unphysical for an optical depth).
+Isolating this (removing `height_aerosol` from `--free` gave a BIT-
+IDENTICAL bad result) ruled out `height_aerosol`'s own known non-
+smoothness as the cause -- something else was broken.
+
+### Bug 3: `p_surface_hpa`'s existing (pre-aerosol) analytic Jacobian is missing a real cross-term
+
+Re-running `gd_jacobian_validate.py` with `co2_ppm,p_surface_hpa,
+tau_aerosol` together (never tested as a trio before -- only pairs)
+found `p_surface_hpa`'s own Jacobian now disagrees with FD by ~6-10%
+(cosine ~0.9997 -- direction right, magnitude wrong, not FD noise).
+Root cause: `p_surface_dI_dparam` was written before aerosol existed.
+Changing `p_surface_hpa` rescales the ENTIRE sigma-level pressure grid
+(`atm.p_layers`), which shifts which physical layers count as "above"
+the aerosol's own FIXED `height_aerosol` threshold
+(`ForwardModel.run`'s own `above_mask = atm.p_layers < height_aerosol`)
+-- a geometric effect the existing composition (built from
+`K_mol_lay_hires`/`dtau_mol_dpscale_lay_hires`, which correctly handle
+GAS-amount changes but know nothing about the pressure GRID itself
+shifting) has no way to capture. Confirmed `K_mol_lay_hires` already
+includes gert's OWN `above_frac`-weighted scattering term (`K_tau_lay`
+from `rt_solver.py`, chained in at `forward_model.py`'s own
+`K_mol_lay_this[mol] = K_tau_l + ...`) -- so the missing piece is
+specifically the GEOMETRY shift, not the gas-amount path.
+
+**Fix**: `p_surface_dI_dparam` now dispatches to the existing fast
+analytic composition when no aerosol row is present (`tau_aer is None`
+-- zero behavior change for every existing caller), or a genuine RT-
+level finite difference (2 extra full `ForwardModel.run()` calls, same
+accepted-cost pattern as `height_aerosol_dI_dparam`) whenever aerosol IS
+present -- since `gert` doesn't expose `tau_abv`/`I_scatter`/the airmass
+factor as separate fields, there is no cheaper way to compose just the
+missing piece without risking double-counting the parts that were
+already correct.
+
+Re-validating after this fix still shows ~7-13% disagreement -- but this
+is very likely the SAME hard-threshold non-smoothness already found and
+accepted for `height_aerosol` (Sec.11's own finding above), now showing
+up via `p_surface_hpa`'s indirect coupling to the identical `above_mask`
+geometry, not a remaining bug in this fix. Re-running the smoke test
+after this fix alone changed NOTHING (identical `resid_hires_rms` to 5
+significant figures) -- a strong signal that `p_surface`'s own Jacobian
+precision was not, in fact, the dominant problem.
+
+### Bug 4: the actual truth-rendering path never threaded aerosol through at all
+
+`gd_test.py::_band_setup` -- the function that renders the TRUTH image
+`--prior-fields exact` (and every standard, non-"dense-truth" run) is
+scored against -- has its OWN THIRD independent inline `spectrum(atm_p,
+surf_p)` closure, completely separate from both `_make_state_spectrum`
+(`gd_joint_block_whole_slit_sweep.py`, fixed earlier) and `spectrum_jac`
+(`jacobians.py`, fixed earlier). This third copy's own `fm.run()` call
+only ever passed `albedo`/`albedo_slope` -- no aerosol kwargs at all --
+and `_band_setup`'s own `surf_params` construction hardcoded `{"albedo":
+...}`, never extracting `tau_aerosol`/`height_aerosol` even when present
+in the state. **This is a genuine truth-vs-model physics mismatch, not
+a Jacobian precision issue**: the retrieval's forward model included
+aerosol; the truth it was being scored against did not. This is very
+likely why `tau_aerosol` wanted to go negative -- the model had MORE
+optical depth than the (aerosol-free) truth, and GN pushed the aerosol
+term toward zero/negative trying to compensate.
+
+**Fix**: `spectrum`'s own `fm.run()` call now threads the same aerosol
+kwargs every other fixed call site uses; `surf_params` now also pulls
+`tau_aerosol`/`height_aerosol` directly from the RAW (row-name-keyed,
+matching `als.SURFACE_FIELDS`'s own convention) `surface_fields`
+parameter -- bypassing `als.build_scene_fields`'s own band-label-keyed
+reshaping (which exists only for albedo's per-band/uniform/barcode
+needs, irrelevant to aerosol). A related bug fixed alongside: `surf_p[
+"albedo"]` would `KeyError` once `surf_p` could be non-empty without an
+"albedo" key (the aerosol-only case) -- changed to `.get("albedo",
+albedo)`.
+
+**A real, separate caching gap found and worked around**: `_band_setup_
+cached`'s own cache key has no dependence on the FIELD FUNCTIONS' own
+content (only coarse metadata like `scene`/`vary_albedo`/`spatial_psf_
+fwhm_px`) -- so a truth image rendered with the OLD, aerosol-blind code
+was silently served as a "cache HIT" to a run using the NEW, fixed code,
+with no error and no way to tell from the log alone. Caught by checking
+file mtimes directly (the cache entry predated today's fix); worked
+around by moving the 2 stale entries aside (`results/truth_cache_stale_
+backup/`, not deleted) rather than deleting them outright. Not fixed at
+the root -- a real, general gap (this project's OWN prior sessions
+already flagged the identical class of issue and built a `resolution_
+tag` escape hatch for ONE specific caller; this default code path has no
+such protection) worth a proper fix later: hash the actual `fields`/
+`surface_fields` dict CONTENTS into the key, not just whether they were
+given.
+
+### Where this stands after all four fixes
+
+Real, measured improvement at each step (`resid_hires_rms`: 0.147 ->
+0.147 (p_surface fix alone, no change) -> **0.101** (truth-rendering
+fix) -- `tau_aerosol`'s own mean error roughly halved, 0.050 -> 0.026
+ppm-equivalent AOD), but **still far from the ~1e-5-level convergence
+every other row's own smoke test achieved this session**. At least one
+more issue remains, not yet found -- candidates: another duplicated
+spectrum-builder somewhere; a genuine Gauss-Newton conditioning problem
+from real co2/p_surface/aerosol cross-talk (three free rows now
+share overlapping sensitivity in ways none of this session's other
+combinations have tested); or a residual effect of `height_aerosol`'s
+own accepted non-smoothness bleeding into the joint solve even when it
+is not itself free (the frozen row's own EXACT truth value still sits
+near a layer boundary, feeding a discontinuous forward model regardless
+of whether GN is solving FOR it).
+
+**Explicitly scoped as a follow-up, not resolved today**: "aerosol
+converges correctly in a real joint retrieval" needs more work before
+any aerosol-related result from a whole-slit sweep should be trusted.
+What IS trustworthy today: `tau_aerosol`'s own analytic Jacobian in
+isolation (validated cleanly, Sec.11 above); the fact that truth
+rendering and the retrieval's forward model are now at least physically
+consistent with each other (bug 4); the general pattern this session
+surfaced repeatedly -- **this codebase has multiple independent,
+hand-duplicated copies of "build a spectrum from state parameters,"
+and any new physics (aerosol today; conceivably anything else in the
+future) must be threaded through EVERY one of them, with no single
+choke point that guarantees this by construction.** Worth a real
+refactor at some point (one shared spectrum-builder, not three), flagged
+here rather than attempted today.

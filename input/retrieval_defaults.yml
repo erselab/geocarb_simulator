@@ -56,6 +56,13 @@ correlation_length_eta:
                             # is a single full-slit synoptic sinusoid, smoother
                             # than any other row's own spatial content)
   albedo: 0.0214            # ~30 km -- ALBEDO_CORR_KM / SLIT_HALF_KM; shorter than the gas rows
+  tau_aerosol: 0.0714       # ~100 km -- a haze event's own spatial scale, closer
+                            # to ch4_ppb/co_ppb's own broad-plume width (100/55 km)
+                            # than a sharp CO2/CO hot spot (10 km) or the broad
+                            # synoptic rows (500 km)
+  height_aerosol: 0.357     # ~500 km -- broad synoptic drift, same scale as
+                            # t_offset_k/h2o_surface_vmr (unlike tau_aerosol's
+                            # own localized haze-event scale above)
 
 # source: scripts/gd_joint_block_whole_slit_sweep.py --n-lookup-samples /
 # --out-root's own documented conditional defaults (400/results under

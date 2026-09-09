@@ -387,6 +387,111 @@ def albedo_for_label_prior_fine(x_km, label):
     return float(out[0]) if scalar else out
 
 
+def tau_aerosol(x_km, label=None):
+    """Total aerosol optical depth AT THE O2-A REFERENCE WAVELENGTH
+    (matching `gert.ForwardModel.run`'s own `tau_aerosol` convention --
+    NOT a band-independent physical quantity; the per-band optical depth
+    each band's own RT actually uses is `tau_aerosol * qext_aerosol[
+    window]`, band-specific by construction -- see `SURFACE_FIELDS`'s own
+    docstring on this point).
+
+    Background + one moderate haze event (2026-09-08), mirroring the
+    background+localized-feature convention every other row uses (`_gauss`,
+    same as `xco2_ppm`'s plume term) -- a haze layer is physically broader
+    than a point-source combustion plume, so its width here (120km) is
+    deliberately wider than the CO2/CH4/CO hot spots' own 9-12km scale.
+    `label` accepted (unused) for signature parity with `SURFACE_FIELDS`'s
+    other entries -- no real per-band variation to model with only one
+    band in play yet; see this row's own note in the implementation plan
+    about what changes once multi-band coupling shares this value.
+    """
+    background = 0.05
+    haze = _gauss(x_km, x0=200.0, width=120.0, amp=0.30)
+    return np.clip(background + haze, 0.0, None)
+
+
+def tau_aerosol_prior(x_km, label=None):
+    """Structural prior: flat background only, matching co2/ch4/co's own
+    background-only convention (`xco2_ppm_prior` etc.) -- no knowledge of
+    the localized haze event.
+    """
+    return np.full_like(np.asarray(x_km, dtype=float), 0.05)
+
+
+def height_aerosol(x_km, label=None):
+    """Gaussian aerosol-profile centroid pressure [Pa] (`aerosol_profile_
+    shape="gaussian"`'s own `height_aerosol` convention in `gert.
+    ForwardModel.run` -- see that function's docstring).
+
+    Background mid-boundary-layer placement plus a modest synoptic-like
+    drift, phase-offset from `t_offset_k`'s own sinusoid (`+2.2` here vs.
+    `+1.5` there) so the two aren't locked together -- same "not perfectly
+    correlated" convention `t_offset_k`'s own phase offset from
+    `p_surface_hpa` already established.
+    """
+    background_pa = 85000.0
+    drift = 8000.0 * np.sin(2 * np.pi * (x_km + 1400) / 2800 + 2.2)
+    return background_pa + drift
+
+
+def height_aerosol_prior(x_km, label=None):
+    """Structural prior: flat background only, matching `t_offset_k_prior`'s
+    "no known anomaly" convention.
+    """
+    return np.full_like(np.asarray(x_km, dtype=float), 85000.0)
+
+
+#: Fixed aerosol microphysics for the `tau_aerosol`/`height_aerosol` state
+#: rows (2026-09-08) -- `smoke` (fresh biomass-burning), matching the
+#: haze-event truth-field narrative above.
+#: `gert.aerosol_properties.get_aerosol_scalars('smoke')`'s band-1
+#: (CO2-weak, ~1.60um) values, the closest available proxy in gert's
+#: 3-band registry (O2-A/CO2-weak/CH4) to GeoCarb's own CO2_strong
+#: (~2.05um) -- gert's registry doesn't have a GeoCarb-specific band set;
+#: revisit with real per-FPA values once multi-band coupling is built.
+#: `AEROSOL_THICKNESS_PA` matches `gert.ForwardModel.run`'s own internal
+#: default sigma (1.0e4 Pa) when `thickness_aerosol` is omitted, made
+#: explicit here rather than left implicit.
+#: `AEROSOL_QEXT_NORM` is a single-band no-op by construction (`Forward
+#: Model.run` normalizes `qext_aerosol[i]` against `qext_aerosol[0][0]` --
+#: with only one window ever passed by this project's single-band
+#: drivers, that ratio is always 1.0 regardless of which value is chosen)
+#: -- kept at `1.0` directly rather than smoke's own `qext_norm[1]=0.42`
+#: (which only has meaning relative to a DIFFERENT band's own array, not
+#: yet built). Shared by `scripts/gd_joint_block_whole_slit_sweep.py`'s
+#: `_make_state_spectrum` (FD path) and `jacobians.make_spectrum_jac`'s
+#: `spectrum_jac` (analytic path) so the two paths can never silently
+#: disagree about which aerosol type is in effect.
+AEROSOL_SSA = 0.87
+AEROSOL_G = 0.50
+AEROSOL_THICKNESS_PA = 1.0e4
+AEROSOL_QEXT_NORM = 1.0
+
+
+def aerosol_phase_hg(g: float, cos_theta: float) -> float:
+    """Henyey-Greenstein aerosol phase function, standard (un-normalized-by
+    -4pi) form -- integrates to 4*pi over the full sphere, matching `gert.
+    rt_solver.SingleScatterSolver`'s own `I_scatter = (F_sun/pi)*ssa_aer*
+    P_aer*tau_aer*exp(-m*tau_abv)/(4*mu)` formula convention (an isotropic
+    P=1 there reproduces the standard single-scatter formula with no extra
+    normalization factor needed).
+
+    2026-09-08 -- found and fixed a real gap while digging into why
+    `height_aerosol` showed zero sensitivity: NOTHING in `gert` (not even
+    its own sanity-check scripts) has ever actually computed a real
+    `P_aerosol` before -- every `ForwardModel.run` call in this project
+    omitted it, so it silently defaulted to `np.zeros(n_wn)`
+    (`forward_model.py`'s own `P_aer_wn = ... if P_aerosol is not None
+    else np.zeros(n_wn)`), making `I_scatter` -- the ONLY term
+    `height_aerosol` can act through (its own `tau_abv` dependence) --
+    identically zero regardless of height. `tau_aerosol`'s own Jacobian
+    validated fine despite this, because its dominant sensitivity is via
+    `I_direct`'s `tau_total` term, independent of `P_aerosol`/`I_scatter`
+    entirely.
+    """
+    return (1.0 - g ** 2) / (1.0 + g ** 2 - 2.0 * g * float(cos_theta)) ** 1.5
+
+
 #: Truth-state parameters that are NOT part of `AtmosphericProfile` and so
 #: cannot live in `STATE_FIELDS`: they are passed separately to
 #: `ForwardModel.run`. Keyed by the argument name that call expects.
@@ -405,6 +510,8 @@ def albedo_for_label_prior_fine(x_km, label):
 #: defaults to False for every OTHER caller, unaffected.
 SURFACE_FIELDS = {
     "albedo": albedo_for_label,
+    "tau_aerosol": tau_aerosol,
+    "height_aerosol": height_aerosol,
 }
 
 #: Imperfect surface prior (2026-08-25) -- the surface-side sibling of
@@ -418,6 +525,8 @@ SURFACE_FIELDS = {
 #: atmosphere rows -- one flag now drives both.
 SURFACE_FIELDS_PRIOR = {
     "albedo": albedo_for_label_prior,
+    "tau_aerosol": tau_aerosol_prior,
+    "height_aerosol": height_aerosol_prior,
 }
 
 SURFACE_PRIOR_FIELD_SETS = {

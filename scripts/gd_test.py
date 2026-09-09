@@ -182,12 +182,33 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
         vary_albedo=vary_albedo, barcode_bars=barcode_bars, band_labels=[label],
         constant_albedo=albedo, fields=fields, surface_fields=surface_fields)
 
+    n_wn_hires = len(wide_win.wn_hires)
+    p_aer_val = als.aerosol_phase_hg(als.AEROSOL_G, np.cos(geo.scattering_angle))
+
     def spectrum(atm_p, surf_p=None):
         atm = als.atmosphere_from_params(**atm_p)
         fm = ForwardModel(atm, absco, wide_inst, geo, solver=SingleScatterSolver(),
                           solar_spectrum=solar)
-        px_albedo = surf_p["albedo"] if surf_p else albedo
-        res = fm.run(albedo=np.array([px_albedo]), albedo_slope=np.zeros(1))
+        px_albedo = surf_p.get("albedo", albedo) if surf_p else albedo
+        # tau_aerosol/height_aerosol (2026-09-08) -- None when neither row
+        # is present, matching every other spectrum-builder's own `.get(
+        # ...)` default (gert.ForwardModel.run treats `tau_aerosol=None`
+        # as "aerosol term omitted") -- zero behavior change by default.
+        # Found and fixed after tracing a joint retrieval's own failure to
+        # converge back to THIS function -- the actual truth-rendering
+        # path for --prior-fields exact (and every standard, non-"dense
+        # truth" run) -- never threading aerosol through at all, a real
+        # truth-vs-model physics mismatch, not a Jacobian precision issue.
+        px_tau_aer = surf_p.get("tau_aerosol") if surf_p else None
+        px_height_aer = surf_p.get("height_aerosol") if surf_p else None
+        res = fm.run(albedo=np.array([px_albedo]), albedo_slope=np.zeros(1),
+                     tau_aerosol=px_tau_aer, height_aerosol=px_height_aer,
+                     aerosol_profile_shape="gaussian",
+                     thickness_aerosol=als.AEROSOL_THICKNESS_PA,
+                     ssa_aerosol=[np.full(n_wn_hires, als.AEROSOL_SSA)],
+                     g_aerosol=[als.AEROSOL_G],
+                     qext_aerosol=[np.full(n_wn_hires, als.AEROSOL_QEXT_NORM)],
+                     P_aerosol=[np.full(n_wn_hires, p_aer_val)])
         return np.asarray(res.I_hires[0], dtype=float)
 
     # Whole-slit anchor grid, uniform `dx_km` spacing -- `uniform`/`barcode`
@@ -201,10 +222,21 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
 
     atm_names = list(fields_resolved.keys())
     atm_params = {n: np.asarray(fields_resolved[n](anchor_x_km), dtype=float) for n in atm_names}
+    # tau_aerosol/height_aerosol (2026-09-08) -- pulled from the RAW
+    # (row-name-keyed, matching als.SURFACE_FIELDS's own convention)
+    # `surface_fields` parameter, NOT `surface_fields_resolved` (band-
+    # label-keyed, `build_scene_fields`'s own albedo-specific reshaping --
+    # aerosol needs no per-band/uniform/barcode resolution, so this
+    # bypasses that layer entirely). `None` (every existing caller that
+    # never asked for aerosol) reproduces prior behavior exactly.
+    _aer_fields = surface_fields if surface_fields is not None else als.SURFACE_FIELDS
+    _aer_extra = {n: np.asarray(_aer_fields[n](anchor_x_km, label), dtype=float)
+                 for n in ("tau_aerosol", "height_aerosol") if n in _aer_fields}
     if surface_fields_resolved is not None:
-        surf_params = {"albedo": np.asarray(surface_fields_resolved[label](anchor_x_km), dtype=float)}
+        surf_params = {"albedo": np.asarray(surface_fields_resolved[label](anchor_x_km), dtype=float),
+                       **_aer_extra}
     else:
-        surf_params = {}
+        surf_params = dict(_aer_extra)
 
     rows_win = np.arange(1024)
     A, anchor_etas_sorted, cache_S = render_at_anchors(

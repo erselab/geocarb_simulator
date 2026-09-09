@@ -327,3 +327,54 @@ diagnostic run") FPA2 retrieval should look like, and why:
    matched-vs-mismatched comparison (does the keystone-edge mismatch
    penalty also shrink at wide windows, or is it genuinely
    location-driven).
+7. **Aerosol (`tau_aerosol`, `height_aerosol`) added as retrievable
+   state -- NOT YET converging in a real joint retrieval, root cause
+   partially found** (`PROJECT_STATUS.md` Sec.11, 2026-09-08) --
+   infrastructure prerequisite for coupling FPA0 with FPA2/FPA3 (user's
+   own stated next goal: "get a column average that is responsive to
+   aerosols and surface pressure errors"). `tau_aerosol`'s analytic
+   Jacobian is fully validated in isolation (reuses the existing
+   `SURFACE_ROW_JACOBIAN` machinery unchanged). `height_aerosol` needed
+   a genuine RT-level finite difference instead and surfaced a real,
+   structural finding: `gert.ForwardModel.run`'s own aerosol-layer-
+   placement logic uses a hard layer-boundary threshold, not a smooth
+   function of height, so `height_aerosol`'s own sensitivity is
+   genuinely non-smooth -- accepted as a documented limitation (user's
+   call), and this same threshold was later found to also corrupt
+   `p_surface_hpa`'s own Jacobian once aerosol is present (below).
+
+   **Four real bugs found and fixed, none specific to this project's
+   own retrieval logic** (a smoke test kept failing to converge --
+   `resid_hires_rms` ~0.10-0.15 instead of the ~1e-5 every other row's
+   own smoke test reached -- until these were found): (1)
+   `gd_jacobian_validate.py`'s own duplicated FD-reference forward model
+   silently omitted aerosol physics entirely; (2) `P_aerosol` (the
+   scattering phase function) had never been computed anywhere in this
+   whole codebase, making the aerosol single-scatter term identically
+   zero regardless of height; (3) `p_surface_dI_dparam`'s existing
+   (pre-aerosol) analytic Jacobian is missing a real cross-term through
+   the SAME hard pressure-grid/aerosol-mask threshold -- fixed via a
+   conditional RT-level-FD fallback, zero behavior change when aerosol
+   is absent; (4) **the actual truth-rendering path** (`gd_test.py::
+   _band_setup`'s own THIRD independent inline spectrum-builder, used
+   by `--prior-fields exact` and every standard run) **never threaded
+   aerosol through at all** -- a genuine truth-vs-model physics
+   mismatch, not a Jacobian issue, and very likely why `tau_aerosol`
+   was retrieving unphysical negative values.
+
+   Fixing all four improved things measurably (`resid_hires_rms` 0.147
+   -> 0.101 from bug 4 alone) but **did not fully resolve convergence**
+   -- at least one more issue remains, not yet found. **The general
+   pattern this surfaced, worth fixing at the root**: this codebase has
+   at least three independent, hand-duplicated "build a spectrum from
+   state parameters" functions (`_make_state_spectrum`, `spectrum_jac`,
+   `_band_setup`'s own inline one), each needing the same aerosol
+   threading applied separately with no single choke point guaranteeing
+   it by construction -- a real refactor target. Also found: `_band_
+   setup_cached`'s own truth-image cache key has no dependence on the
+   field functions' own content, so a stale (pre-fix) cached truth was
+   silently served as a "hit" with no error -- worked around by moving
+   the 2 stale entries aside, not fixed at the root. **Explicitly NOT
+   resolved**: getting aerosol to converge cleanly in a real joint
+   retrieval is its own follow-up task, not something to build the
+   FPA0+FPA2/FPA3 coupling work on top of yet.

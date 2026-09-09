@@ -186,13 +186,35 @@ def _make_state_spectrum(absco, wide_inst, geo, solar, albedo):
     per-position value, not the fixed scalar -- is what actually reaches
     the forward model, matching `state_spec_from_scene`'s whole point in
     adding that row in the first place.
+
+    `surface.get("tau_aerosol")`/`.get("height_aerosol")` (2026-09-08,
+    `None` when neither row is present -- every existing caller, and any
+    current one that doesn't free/freeze them) forward straight to `fm.
+    run`'s own `tau_aerosol`/`height_aerosol` kwargs, which already treat
+    `None` as "aerosol term omitted" -- zero behavior change by default,
+    the same guarantee `t_offset_k=0.0`'s own default gave.
     """
     def spectrum(params: dict, surface: dict | None = None):
         atm = als.atmosphere_from_params(**params)
         fm = ForwardModel(atm, absco, wide_inst, geo, solver=SingleScatterSolver(),
                           solar_spectrum=solar)
         px_albedo = surface["albedo"] if surface is not None else albedo
-        res = fm.run(albedo=np.array([px_albedo]), albedo_slope=np.zeros(1))
+        px_tau_aer = surface.get("tau_aerosol") if surface is not None else None
+        px_height_aer = surface.get("height_aerosol") if surface is not None else None
+        n_wn = len(wide_inst.windows[0].wn_hires)
+        # P_aerosol (2026-09-08): the Henyey-Greenstein phase function at
+        # this geometry's own real scattering angle -- REQUIRED, not
+        # optional, for I_scatter to be nonzero at all (see `als.
+        # aerosol_phase_hg`'s own docstring on the bug this fixes).
+        p_aer_val = als.aerosol_phase_hg(als.AEROSOL_G, np.cos(geo.scattering_angle))
+        res = fm.run(albedo=np.array([px_albedo]), albedo_slope=np.zeros(1),
+                     tau_aerosol=px_tau_aer, height_aerosol=px_height_aer,
+                     aerosol_profile_shape="gaussian",
+                     thickness_aerosol=als.AEROSOL_THICKNESS_PA,
+                     ssa_aerosol=[np.full(n_wn, als.AEROSOL_SSA)],
+                     g_aerosol=[als.AEROSOL_G],
+                     qext_aerosol=[np.full(n_wn, als.AEROSOL_QEXT_NORM)],
+                     P_aerosol=[np.full(n_wn, p_aer_val)])
         return np.asarray(res.I_hires[0], dtype=float)
     return spectrum
 
@@ -222,15 +244,17 @@ def _oracle_g_prior(eta, fpa):
 SUB_BIN_ANOMALY_ORACLES = {"truth": _oracle_g_truth, "prior": _oracle_g_prior}
 
 #: Row name -> ParamSpec `kind` override, passed to every `state_spec_
-#: from_scene` call (2026-09-07, the `t_offset_k` state row). Every row
-#: not listed here keeps `state_spec_from_scene`'s own default ("scale"),
-#: so this dict is harmless for any run that doesn't free/freeze
-#: `t_offset_k` at all. `t_offset_k` uses "absolute" (the retrieved number
-#: IS the physical offset in Kelvin, not a multiplier on a prior that could
-#: be zero) -- only valid with `--jacobian analytic` (`gauss_newton_state`
-#: raises otherwise; see its own docstring on why kind="scale" is required
-#: for the finite-difference step).
-ROW_KINDS = {"t_offset_k": "absolute"}
+#: from_scene` call (2026-09-07, the `t_offset_k` state row; extended
+#: 2026-09-08 for `tau_aerosol`/`height_aerosol`). Every row not listed
+#: here keeps `state_spec_from_scene`'s own default ("scale"), so this
+#: dict is harmless for any run that doesn't free/freeze any of these
+#: rows at all. All three use "absolute" -- the retrieved number IS the
+#: physical value (Kelvin offset; AOD; Pa) rather than a multiplier on a
+#: prior that could be zero -- only valid with `--jacobian analytic`
+#: (`gauss_newton_state` raises otherwise; see its own docstring on why
+#: kind="scale" is required for the finite-difference step).
+ROW_KINDS = {"t_offset_k": "absolute", "tau_aerosol": "absolute",
+            "height_aerosol": "absolute"}
 
 
 def _solve_window(row_lo: int, row_hi: int):
