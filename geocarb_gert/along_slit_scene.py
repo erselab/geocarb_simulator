@@ -9,7 +9,7 @@ keystone/smile row-crossing confuses a retrieval when the along-slit
 variability is geophysical, not just radiometric.
 
 Since 2026-08-17 it can also vary surface albedo along the slit at the same
-time (:func:`albedo_at`, enabled via ``scripts/gd_test.py``'s own
+time (:func:`albedo_at`, enabled via ``scripts/gd_per_row_retrieve.py``'s own
 ``--vary-albedo``), giving a scene where composition, surface pressure and
 reflectance all vary together -- the realistic case, and the one needed
 before any albedo-induced bias can be measured. It is opt-in, and OFF by
@@ -18,7 +18,7 @@ default, so every result produced before that date reproduces bit-for-bit.
 (The two-sample spectral-blend truth renderer that originally lived at the
 bottom of this file, ``build_lookup_radiance``/``_lookup_sample``/
 ``_G_LOOKUP``, was retired 2026-09-09 -- dead in the live tree since
-``scripts/gd_test.py::_band_setup``'s own per-anchor rendering superseded
+``scripts/gd_per_row_retrieve.py::_band_setup``'s own per-anchor rendering superseded
 it; only ``archive/`` scripts still called it.)
 
 Design (see ``scripts/gd_along_slit_atm_profiles.py`` for the plots this was
@@ -108,7 +108,7 @@ HOTSPOTS_CO = [(-1100.0, 10.0, 35.0), (1050.0, 9.0, 28.0)]    # (x0_km, width_km
 #
 # Added 2026-08-17. Until then this module varied ONLY the atmosphere
 # (gases + surface pressure) and every caller passed one fixed scalar
-# albedo -- `gd_test._band_setup` used `albedo_for(inst, "desert")`, a
+# albedo -- `gd_per_row_retrieve._band_setup` used `albedo_for(inst, "desert")`, a
 # single desert value for the entire 2800 km slit. That was a deliberate
 # design choice (see this module's own opening docstring), but it makes the
 # scene unable to say anything about albedo-induced bias, and it is
@@ -461,7 +461,7 @@ def height_aerosol_prior(x_km, label=None):
 #: drivers, that ratio is always 1.0 regardless of which value is chosen)
 #: -- kept at `1.0` directly rather than smoke's own `qext_norm[1]=0.42`
 #: (which only has meaning relative to a DIFFERENT band's own array, not
-#: yet built). Shared by `scripts/gd_joint_block_whole_slit_sweep.py`'s
+#: yet built). Shared by `scripts/gd_joint_block_retrieve.py`'s
 #: `_make_state_spectrum` (FD path) and `jacobians.make_spectrum_jac`'s
 #: `spectrum_jac` (analytic path) so the two paths can never silently
 #: disagree about which aerosol type is in effect.
@@ -507,9 +507,9 @@ def aerosol_phase_hg(g: float, cos_theta: float) -> float:
 #:
 #: RESOLVED (2026-08-25, was open 2026-08-18 -> 2026-08-25): the joint-block
 #: sweep script now has its own `--vary-albedo` flag
-#: (`scripts/gd_joint_block_whole_slit_sweep.py`), required (and validated)
+#: (`scripts/gd_joint_block_retrieve.py`), required (and validated)
 #: whenever `"albedo"` is in `--free` -- see that script for the actual
-#: production wiring. `gd_test._band_setup`'s own `vary_albedo` still
+#: production wiring. `gd_per_row_retrieve._band_setup`'s own `vary_albedo` still
 #: defaults to False for every OTHER caller, unaffected.
 SURFACE_FIELDS = {
     "albedo": albedo_for_label,
@@ -743,7 +743,7 @@ def atmosphere_at(x_km: float, h2o_scale_height_km: float = 2.0, fields=None) ->
     To get radiance from a state returned here, run it through
     ``gert.forward_model.ForwardModel`` -- radiance(x_km) = RT(atmosphere_at(x_km)).
     See ``scripts/gd_joint_block_retrieve.py``'s ``spectrum_for`` or
-    ``scripts/gd_test.py``'s ``_band_setup`` for the concrete pattern. No
+    ``scripts/gd_per_row_retrieve.py``'s ``_band_setup`` for the concrete pattern. No
     function in this module performs that RT step itself; it only ever
     returns the state.
 
@@ -850,7 +850,7 @@ def build_scene_fields(uniform: bool = False, barcode: bool = False,
     (``{band_label: fn(x_km)}``, matching :data:`SURFACE_FIELDS`/
     :func:`resolution_matched_albedo_fn`'s own convention -- NOT
     `state_spec_from_scene`'s `{"albedo": fn(x_km, label)}`, since this
-    feeds straight into the anchor-rendering path (`gd_test.py::
+    feeds straight into the anchor-rendering path (`gd_per_row_retrieve.py::
     _band_setup`), not a `StateSpec`), fed into ONE rendering mechanism --
     barcode stops being a separate code path.
 

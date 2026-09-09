@@ -43,8 +43,7 @@ from geocarb_gert import along_slit_scene as als, sample_geometries  # noqa: E40
 from geocarb_gert import jacobians as jac  # noqa: E402
 from geocarb_gert.joint_state import (build_forward_state,  # noqa: E402
                                       state_spec_from_scene)
-from gd_joint_block_retrieve import FPA, GERT_ROOT, _eta_of, band_basics  # noqa: E402
-from gd_joint_block_whole_slit_sweep import ROW_KINDS  # noqa: E402
+from gd_joint_block_retrieve import FPA, GERT_ROOT, _eta_of, band_basics, ROW_KINDS  # noqa: E402
 
 PAD = 4
 

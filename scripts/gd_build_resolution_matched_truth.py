@@ -16,13 +16,13 @@ model can, in principle, perfectly represent isolates real retrieval/model
 error from truth the anchor grid could never have captured.
 
 The anchor grid itself is the exact union (sorted, deduplicated) of every
-window's own anchor grid from `gd_joint_block_whole_slit_sweep.py::_solve_
+window's own anchor grid from `gd_joint_block_retrieve.py::_solve_
 window`'s own formula (`a_lo, a_hi = max(0, row_lo-PAD), min(ROW_MAX_IDX,
 row_hi+PAD)`, `anchor_rows = arange(a_lo, a_hi, 1/anchor_density)`), over
 the standard 58-window tiling -- the SAME grid a real whole-slit retrieval
 at that anchor_density actually uses, not an approximation of it.
 
-Caching: routed through `gd_test._band_setup_cached`'s existing
+Caching: routed through `gd_per_row_retrieve._band_setup_cached`'s existing
 `truth_cache` mechanism, with a `resolution_tag` (an anchor-grid hash, not
 just the anchor_density label) so a silently-different tiling/PAD from a
 future code change can never collide with a stale cache entry, and so a
@@ -57,11 +57,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(REPO_ROOT))
 
-import gd_test as gdt  # noqa: E402
-from gd_joint_block_retrieve import FPA, GERT_ROOT, _eta_of  # noqa: E402
-from gd_joint_block_whole_slit_sweep import (build_window_tiles, PAD, ROW_MAX_IDX,  # noqa: E402
-                                             _make_state_spectrum)
-from gd_joint_block_diagnostics import pixel_density_bin_centers  # noqa: E402
+import gd_per_row_retrieve as gpr  # noqa: E402
+from gd_joint_block_retrieve import (FPA, GERT_ROOT, _eta_of,  # noqa: E402
+                                     build_window_tiles, PAD, ROW_MAX_IDX,
+                                     _make_state_spectrum)
+from geocarb_gert.joint_state import pixel_density_bin_centers  # noqa: E402
 import geosat_geometry as gg  # noqa: E402
 import gert  # noqa: E402
 from geocarb_gert import along_slit_scene as als, sample_geometries  # noqa: E402
@@ -148,7 +148,7 @@ def render_representative_truth_window(fpa: int, row_lo: int, row_hi: int, bin_c
 
     Returns this window's own ``(row_hi-row_lo+1, 1024)`` sub-image.
     """
-    from gd_joint_block_whole_slit_sweep import state_spec_from_scene
+    from gd_joint_block_retrieve import state_spec_from_scene
     from geocarb_gert.joint_state import build_forward_state
 
     if pad is None:
@@ -159,7 +159,7 @@ def render_representative_truth_window(fpa: int, row_lo: int, row_hi: int, bin_c
     # state_spec_from_scene's own surface_fields convention is
     # {"albedo": fn(x_km, band_label)} -- keyed by ROW NAME (2 positional
     # args), NOT {band_label: fn(x_km)} (a mismatch already found and
-    # fixed once before for gd_joint_block_whole_slit_sweep.py's own
+    # fixed once before for gd_joint_block_retrieve.py's own
     # wiring -- resolution_matched_albedo_fn itself returns a 1-arg
     # fn(x_km), so it needs the same wrap here).
     surface_fields = ({"albedo": lambda x_km, label, _fn=als.resolution_matched_albedo_fn(
@@ -191,7 +191,7 @@ def whole_slit_anchor_etas(fpa: int, anchor_density: int, *, min_window: int = N
                            window_scale: float = 1.0, overlap: int = 0) -> np.ndarray:
     """The exact union of every window's own anchor grid, standard 58-
     window tiling -- the SAME grid a real whole-slit retrieval at this
-    anchor_density uses (`gd_joint_block_whole_slit_sweep.py::_solve_
+    anchor_density uses (`gd_joint_block_retrieve.py::_solve_
     window`'s own formula), not a from-scratch uniform approximation of it.
 
     2026-09-01 (bug fix): `min_window`/`window_scale`/`overlap` MUST match
@@ -268,7 +268,7 @@ def _render_one_window(tile):
     """Module-level (picklable, fork-inherited -- same pattern as
     `along_slit_scene._lookup_sample`/`geocarb_gert.joint_state._render_
     one_anchor`) so `build_whole_slit_truth` parallelizes across WINDOWS,
-    the same granularity `gd_joint_block_whole_slit_sweep.py`'s own sweep
+    the same granularity `gd_joint_block_retrieve.py`'s own sweep
     already parallelizes at -- each window-level worker then falls back
     to a single-process anchor loop internally (render_at_anchors/
     build_forward_state detect the daemon worker process and refuse to
@@ -435,8 +435,8 @@ def main() -> int:
     absco = gert.ABSCOTable.load_all(str(GERT_ROOT / "input/absco/absco.h5"))
     solar = gert.SolarSpectrum.load(str(GERT_ROOT / "input/solar/solar.h5"))
     atm_center = als.atmosphere_at(0.0)
-    gdt._G.update(dict(atm=atm_center, absco=absco, geo=geo, solar=solar))
-    snr = gdt.DEFAULT_SNR_BY_FPA[fpa]
+    gpr._G.update(dict(atm=atm_center, absco=absco, geo=geo, solar=solar))
+    snr = gpr.DEFAULT_SNR_BY_FPA[fpa]
     print("done.\n", flush=True)
 
     anchor_densities = args.anchor_density
@@ -459,7 +459,7 @@ def main() -> int:
         resolution_tag = f"ad{anchor_density}-{match_hash}"
 
         t0 = time.time()
-        band = gdt._band_setup_cached(
+        band = gpr._band_setup_cached(
             fpa, atm_center, absco, geo, solar, snr, args.n_lookup_samples, None,
             False, False, None, False, 0, False, vary_albedo=True,
             fields=fields, surface_fields=surface_fields, resolution_tag=resolution_tag)
@@ -483,7 +483,7 @@ def main() -> int:
         resolution_tag = f"gr{g_ratio:g}bins-{match_hash}"
 
         t0 = time.time()
-        band = gdt._band_setup_cached(
+        band = gpr._band_setup_cached(
             fpa, atm_center, absco, geo, solar, snr, args.n_lookup_samples, None,
             False, False, None, False, 0, False, vary_albedo=True,
             fields=fields, surface_fields=surface_fields, resolution_tag=resolution_tag)

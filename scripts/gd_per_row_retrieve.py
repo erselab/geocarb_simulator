@@ -83,7 +83,7 @@ no real calibration error for them to explain); they're floated purely to
 force `gert`'s exact-center ILS convolution path, matching this project's
 truth-rendering convention -- see the "undistorted" bullet above.
 
-Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_test.py \\
+Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_per_row_retrieve.py \\
         --fpas 0,2 [--uniform | --barcode [--barcode-bars N]] \\
         [--noise [--snr S] [--noise-seed N]] [--row-step N] [--out-tag TAG]
       (--fpas takes any >=2 comma-separated FPA indices, e.g. 0,1,2,3)

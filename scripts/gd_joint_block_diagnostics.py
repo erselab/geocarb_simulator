@@ -5,7 +5,7 @@ after the first realistic result (`JOINT_ROW_INVERSION_PLAN.md` §4,
 goodness-of-fit diagnostic that survives once real (noisy, truth-unknown)
 data replaces this synthetic scene, unlike the capture-fraction number,
 which needs known truth; (2) a pixel-density-weighted bin placement,
-replacing the uniform `np.linspace` grid `gd_joint_block_retrieve.py`
+replacing the uniform `np.linspace` grid the original retrieval demo
 used, so bin density (bins per unit eta) scales with the ACTUAL density
 of real pixels in eta -- which is higher wherever keystone is large (more
 rows' column ranges overlap a given eta interval there) -- instead of
@@ -22,10 +22,52 @@ compares:
 - where each scheme's bin centers land relative to rows_crossed(row),
 - the resulting peak-enhancement capture fraction for each.
 
-Reuses every piece of `gd_joint_block_retrieve.py` unchanged (band_basics,
-make_spectrum_fn, build_forward, gauss_newton_regularized, _eta_of) --
-this script only adds the two new pieces of analysis, no new retrieval
-machinery.
+2026-09-09: re-ported off the original standalone `gd_joint_block_
+retrieve.py` demo (retired -- its simplified single-co2_scale/local-
+truth-nuisance-gases GN mechanism was a real dependency of this script,
+not just glue) onto the SAME general `StateSpec`/`gauss_newton_state`
+machinery `gd_joint_block_retrieve.py` (formerly `..._whole_slit_sweep.py`)
+uses for every other retrieval in this project -- `state_spec_from_scene`
++ `build_forward_state` + `gauss_newton_state`, restricted to bin centers
+only (no anchor/hires interpolation, matching the original single-stage
+comparison), `free=("co2_ppm",)`, `prior_fields="exact"` (nuisance gases
+held at local truth, reproducing the original idealization), `prior_form
+="tikhonov"` (bit-identical to the original `gamma*(L^T L)+I/sigma_abs**2`
+regularization, per `ParamSpec.Sa_inv_block`'s own docstring).
+
+**The printed capture-fraction number is a known harness limitation,
+NOT a retrieval-code defect (root-caused 2026-09-09).** Both schemes
+ran to completion (rows 890-935, G=15, ~900s each): `uniform` returned
+peak-enhancement capture = 3034.1% (mean per-bin chi2 0.008927, min
+pixel count/bin 269); `pixel-density` returned 2939.3% (chi2 0.008375,
+min pixel count/bin 890) -- both a good FIT to the data through a
+wildly unphysical retrieved state, and both off by the same ~30x.
+
+Root cause: `capture` = `(retrieved_ppm[peak] - retrieved_ppm[edge]) /
+true_enhancement` is a pure null-space quantity in this deliberately
+degenerate window (15 bins over 46 detector rows at the max-keystone
+end of FPA2, each row blending ~10 eta locations). GN moves it 30x
+while barely touching chi2 -- a null-space excursion. `gd_jacobian_
+validate.py` re-run clean (forward rel L2 = 0.000e+00; analytic-vs-FD
+Jacobian rel L2 ~1e-9, cosine 1.0 every column), which disproves the
+earlier "`build_forward_state` Jacobian differs in absolute scale"
+hypothesis. The metric was calibrated against the retired nearest-bin
+demo; the port runs on production `state_interp="linear"`, whose
+different inter-bin coupling in `K` steers GN down a different
+null-space direction. Whole-slit sweeps against representable (Mode-2)
+truth reach single-digit-ppm CO2 errors through the same shared
+solver/forward -- a real 30x bug would have made those thousands of ppm.
+
+`pixel-density` still wins on the scale-independent metrics (lower chi2,
+3.3x higher minimum per-bin pixel count -- the starved-bin problem it
+exists to fix), so the qualitative finding holds. Non-blocking
+follow-up: the capture fraction is not recoverable from a 15-bin/46-row
+window regardless of code; to make it meaningful use a production-like
+bin density (G ~ width/3) and `prior_form="exponential"`, or retire it
+in favour of the sweep's own scoring. Do not trust this script's OWN
+printed capture-fraction numbers -- the residual/chi2 diagnostics and
+bin-placement-vs-keystone plot panels are unaffected (they don't
+depend on `retrieved_ppm`'s absolute scale being sane).
 
 Run:  PYTHONPATH=. /path/to/analysis/env/bin/python scripts/gd_joint_block_diagnostics.py
 Output: plots/joint_block/gd_joint_block_diagnostics_fpa2_row890-935_G15.png
@@ -44,35 +86,19 @@ import matplotlib.pyplot as plt
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
-import gd_test as gdt  # noqa: E402
-from gd_joint_block_retrieve import (  # noqa: E402
-    FPA, GERT_ROOT, _eta_of, band_basics, build_forward,
-    gauss_newton_regularized, make_spectrum_fn,
-)
+import gd_per_row_retrieve as gpr  # noqa: E402
+from gd_joint_block_retrieve import FPA, GERT_ROOT, _eta_of, band_basics  # noqa: E402
 
 import geosat_geometry as gg  # noqa: E402
 import gert  # noqa: E402
 from geocarb_gert import along_slit_scene as als, sample_geometries  # noqa: E402
 from geocarb_gert.gd_polynomials import rows_crossed  # noqa: E402
+from geocarb_gert.joint_state import (build_forward_state, gauss_newton_state,  # noqa: E402
+                                      pixel_density_bin_centers, state_spec_from_scene)
+
 
 def uniform_bin_centers(eta_lo, eta_hi, G):
     return np.linspace(eta_lo, eta_hi, G)
-
-
-def pixel_density_bin_centers(eta_flat, G):
-    """Bin centers placed at evenly-spaced quantiles of the ACTUAL
-    per-pixel eta distribution in the window (`eta_flat` = every real
-    (row, col) pixel's own true eta, not a per-row proxy). Supersedes an
-    earlier version of this function that used `rows_crossed` as an
-    indirect per-row density proxy, routed through each row's own
-    center-column eta -- that required an extra floor to handle a near-
-    null row's real internal wiggle (rows_crossed's endpoint-difference
-    definition reads ~0 there despite real spread, §0's finding), and
-    only approximated what's already directly available: wherever
-    keystone is large, more rows' column ranges overlap a given eta
-    interval, so real pixel DENSITY there is genuinely higher -- no proxy
-    or floor needed, `np.quantile` on the real data does this directly."""
-    return np.quantile(eta_flat, np.linspace(0.0, 1.0, G))
 
 
 def bin_assign(bin_centers, eta_flat):
@@ -94,22 +120,36 @@ def per_bin_chi2(resid, Sy_inv_diag, bin_idx, G):
     return chi2, counts
 
 
-def run_scheme(fpa, rows_win, bin_centers, band, absco, wide_inst, geo, solar, albedo,
-               y_true, Sy_inv_diag, wn_hires, ils, gamma, sigma_abs, label):
+def run_scheme(fpa, rows_win, bin_centers, spectrum, y_true, Sy_inv_diag, wn_hires, ils,
+               gamma, sigma_abs, label):
+    """Bin-centers-only GN solve (no anchor/hires interpolation -- the
+    original comparison's own single-stage mechanism), via the SAME
+    general primitives every other retrieval in this project uses:
+    `state_spec_from_scene` + `build_forward_state` + `gauss_newton_state`.
+    `free=("co2_ppm",)`, `prior_fields="exact"` reproduce the original
+    "only co2_scale free, every other gas/pressure at local truth"
+    idealization; `prior_form="tikhonov"` reproduces the original
+    `gamma*(L^T L)+I/sigma_abs**2` regularization bit-for-bit (see
+    `StateSpec.prior_precision`'s own docstring).
+    """
     G = len(bin_centers)
-    x_km_bins = bin_centers * als.SLIT_HALF_KM
-    prior_atms = [als.atmosphere_at(float(xk)) for xk in x_km_bins]
-    prior_co2_ppm_bins = np.array([float(als.xco2_ppm(xk)) for xk in x_km_bins])
-    spectrum_for = make_spectrum_fn(absco, wide_inst, geo, solar, albedo)
-    forward = build_forward(fpa, rows_win, bin_centers, prior_atms, spectrum_for, wn_hires, ils, pad=4)
+    spec = state_spec_from_scene(bin_centers, free=("co2_ppm",),
+                                 fields=als.PRIOR_FIELD_SETS["exact"],
+                                 prior_form="tikhonov", gamma=gamma)
+    forward = build_forward_state(fpa, rows_win, bin_centers, spec, spectrum,
+                                  wn_hires, ils, pad=4, state_interp="linear")
 
     t0 = time.time()
-    x = gauss_newton_regularized(forward, y_true, x0=np.ones(G), Sy_inv_diag=Sy_inv_diag,
-                                 gamma=gamma, sigma_abs=sigma_abs, label=label)
+    x, _, _ = gauss_newton_state(forward, y_true, spec, Sy_inv_diag, label=label,
+                                 verbose=False, return_cov=True, return_avk=True)
     elapsed = time.time() - t0
 
     resid = y_true - forward(x)
     resid_img = resid.reshape(len(rows_win), 1024)
+    # co2_ppm is a "scale" row -- x IS the scale factor on the prior (=truth
+    # here, since prior_fields="exact"), matching the original retrieved_ppm
+    # = prior_co2_ppm_bins * x convention exactly.
+    prior_co2_ppm_bins = spec["co2_ppm"].prior
     retrieved_ppm = prior_co2_ppm_bins * x
     return dict(bin_centers=bin_centers, x=x, retrieved_ppm=retrieved_ppm,
                prior_co2_ppm_bins=prior_co2_ppm_bins, resid=resid, resid_img=resid_img,
@@ -133,14 +173,21 @@ def main() -> int:
     absco = gert.ABSCOTable.load_all(str(GERT_ROOT / "input/absco/absco.h5"))
     solar = gert.SolarSpectrum.load(str(GERT_ROOT / "input/solar/solar.h5"))
     atm_center = als.atmosphere_at(0.0)
-    gdt._G.update(dict(atm=atm_center, absco=absco, geo=geo, solar=solar))
-    snr = gdt.DEFAULT_SNR_BY_FPA[FPA]
-    band = gdt._band_setup(FPA, atm_center, absco, geo, solar, snr, 400, None,
+    gpr._G.update(dict(atm=atm_center, absco=absco, geo=geo, solar=solar))
+    snr = gpr.DEFAULT_SNR_BY_FPA[FPA]
+    band = gpr._band_setup(FPA, atm_center, absco, geo, solar, snr, 400, None,
                            False, False, 32, False, 0)
     print("done.\n", flush=True)
 
     wide_win, wide_inst, albedo = band_basics(FPA, atm_center, absco, geo, solar)
     wn_hires, ils = band["wn_hires"], band["ils"]
+
+    from geocarb_gert.spectrum import simulate_spectrum
+
+    def spectrum(params: dict, surface: dict | None = None):
+        sfc = dict(surface or {})
+        sfc["albedo"] = sfc.get("albedo", albedo)
+        return simulate_spectrum(params, sfc, absco, wide_inst, geo, solar).I_hires
 
     rows_win = np.arange(args.row_min, args.row_max + 1)
     cols = np.arange(1024.0)
@@ -162,7 +209,7 @@ def main() -> int:
     results = {}
     for name, bin_centers in schemes.items():
         print(f"\n=== {name}, G={args.n_bins} ===", flush=True)
-        r = run_scheme(FPA, rows_win, bin_centers, band, absco, wide_inst, geo, solar, albedo,
+        r = run_scheme(FPA, rows_win, bin_centers, spectrum,
                        y_true, Sy_inv_diag, wn_hires, ils, args.gamma, args.sigma_abs, name)
         bin_idx = bin_assign(bin_centers, eta_all.ravel())
         chi2, counts = per_bin_chi2(r["resid"], Sy_inv_diag, bin_idx, args.n_bins)

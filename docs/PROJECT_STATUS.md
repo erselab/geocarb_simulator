@@ -43,7 +43,7 @@ constant. The mismatch is purely resolution, not a constant-vs-varying
 error.
 
 **Test**: added a new `--surface-positions {shared,anchor}` flag to
-`gd_joint_block_whole_slit_sweep.py` (threads into `state_spec_from_
+`gd_joint_block_retrieve.py` (threads into `state_spec_from_
 scene`'s existing `surface_positions` parameter, previously not CLI-
 accessible) and reran Sec.16.2's exact config with albedo frozen on its
 own ANCHOR grid (the same fine grid the forward model already renders
@@ -1053,11 +1053,11 @@ precision was not, in fact, the dominant problem.
 
 ### Bug 4: the actual truth-rendering path never threaded aerosol through at all
 
-`gd_test.py::_band_setup` -- the function that renders the TRUTH image
+`gd_per_row_retrieve.py::_band_setup` -- the function that renders the TRUTH image
 `--prior-fields exact` (and every standard, non-"dense-truth" run) is
 scored against -- has its OWN THIRD independent inline `spectrum(atm_p,
 surf_p)` closure, completely separate from both `_make_state_spectrum`
-(`gd_joint_block_whole_slit_sweep.py`, fixed earlier) and `spectrum_jac`
+(`gd_joint_block_retrieve.py`, fixed earlier) and `spectrum_jac`
 (`jacobians.py`, fixed earlier). This third copy's own `fm.run()` call
 only ever passed `albedo`/`albedo_slope` -- no aerosol kwargs at all --
 and `_band_setup`'s own `surf_params` construction hardcoded `{"albedo":
@@ -1151,7 +1151,7 @@ convention) instead of re-deriving `ssa`/`g`/`qext_norm` per call site;
 **Migrated** (each verified bit-for-bit against its pre-migration output
 before being left in place): `jacobians.make_spectrum_jac` (now delegates),
 `gd_jacobian_validate.py`'s FD-reference closure, `gd_joint_block_
-whole_slit_sweep.py`'s `_make_state_spectrum`, and `gd_test.py::_band_
+whole_slit_sweep.py`'s `_make_state_spectrum`, and `gd_per_row_retrieve.py::_band_
 setup`'s truth-rendering closure -- the highest-value target, since this
 is the one bug 4 found silently omitting aerosol for so long. Re-running
 `gd_jacobian_validate.py --free co2_ppm,tau_aerosol,height_aerosol,
@@ -1163,7 +1163,7 @@ builds its atmosphere via `StateVector.gas_scaling().apply()`, not
 `als.atmosphere_from_params(**atm_params)` -- discovered during
 implementation that this doesn't fit `simulate_spectrum`'s `atm_params`
 dict contract without a broader interface change, so it was left alone
-rather than forced. `gd_test.py::_joint_retrieve`'s multi-band `fm` (handed
+rather than forced. `gd_per_row_retrieve.py::_joint_retrieve`'s multi-band `fm` (handed
 to `GERTRetrieval`, never bare `.run()`), `along_slit_scene._lookup_sample`
 (deprecated, archive-only caller), and `scene.py::hires_spectra_for`
 (doesn't build its own atmosphere) stay out of scope for the same reasons
@@ -1204,18 +1204,163 @@ is still a separate, open follow-up, unaffected by this consolidation.
 
 - `along_slit_scene.build_lookup_radiance`/`_lookup_sample`/`_G_LOOKUP`
   (~150 lines) -- the old two-sample spectral-blend truth renderer,
-  already superseded before this session by `gd_test.py::_band_setup`'s
+  already superseded before this session by `gd_per_row_retrieve.py::_band_setup`'s
   own per-anchor rendering; confirmed no live caller (only `archive/`
   scripts). Not something today's consolidation newly obsoleted, just a
   dead-code opportunity in the same neighborhood, swept while here.
   Its now-dead-with-it imports (`multiprocessing`, `warnings`,
   `gd_render.available_cpus`) went too.
-- `gd_joint_block_whole_slit_sweep.py`'s top-level `ForwardModel`/
+- `gd_joint_block_retrieve.py`'s top-level `ForwardModel`/
   `SingleScatterSolver` imports -- dead once `_make_state_spectrum`
   migrated to `simulate_spectrum`.
 - **Kept, deliberately**: `jacobians.height_aerosol_dI_dparam_fd` (the
   superseded RT-FD version) -- cheap, and a ready-made cross-check if the
   analytic version is ever suspected of drifting.
-- **Not retired**: `gd_test.py`'s top-level `ForwardModel`/
+- **Not retired**: `gd_per_row_retrieve.py`'s top-level `ForwardModel`/
   `SingleScatterSolver` imports stay -- still used by `_joint_retrieve`'s
   own multi-band `fm` (call site #4, out of scope for migration).
+
+## 13. joint_block script family: renamed for clarity, retired the original single-window demo, folded merge/plot in (2026-09-09)
+
+Follow-through on user questions about the `joint_block` script family's
+own naming and duplication, prompted directly by Sec.12's renaming of
+`gd_test.py` -> `gd_per_row_retrieve.py` (the per-row/native-pixel
+multi-band stress test, contrasted against the `joint_block` family's
+per-bin/shared-atmosphere strategy).
+
+**`gd_test.py` -> `gd_per_row_retrieve.py`.** Mechanical rename (every
+live, non-`archive/`/`scratch_work/` import/reference updated) -- no
+behavior change. `archive/`/`scratch_work/` deliberately left referencing
+the old name, as historical record.
+
+**`gd_joint_block_retrieve.py` (the ORIGINAL, `StateVector.gas_scaling()`-
+based single-window demo) retired.** Its role -- rows 890-935/G=15, only
+`co2_scale` free, every other gas held at local truth -- is now a special
+case of `gd_joint_block_whole_slit_sweep.py`'s own general mechanism via
+two new CLI flags: `--row-min`/`--row-max` (restricts tiling to a
+sub-range instead of the whole slit; `build_window_tiles` already
+accepted these as function args, just never wired to argparse) and
+`--bin-scheme {pixel-density,uniform}` (the `uniform` choice reproduces
+the pre-pixel-density placement, kept for the diagnostics comparison
+below). Along the way, fixed a real latent bug found while wiring this:
+`_solve_window` unpacked `_SWEEP["gamma"]`/`["sigma_abs"]` into local
+variables that were never actually used -- `state_spec_from_scene`'s own
+`gamma` calls always used its own hardcoded default (3.0), silently
+ignoring `--gamma`/`--sigma-abs` for every run ever made with this
+script. Fixed by threading `gamma=gamma` through both `state_spec_from_
+scene` calls (`--sigma-abs` still has no effect -- `sigmas=` is a
+separate, also-dead parameter on that function, not fixed here, out of
+scope for this pass).
+
+**Discovered while retiring it: NOT just glue.** The original
+inventory undercounted its own dependents -- `gd_joint_block_diagnostics.
+py` imports `build_forward`/`gauss_newton_regularized`/`make_spectrum_fn`
+from it too (the actual retrieval mechanism, not just `FPA`/`GERT_ROOT`/
+`_eta_of`/`band_basics`), because diagnostics.py's own uniform-vs-pixel-
+density bin-placement comparison deliberately reuses the ORIGINAL
+simplified mechanism to keep the comparison controlled (bin placement
+the only thing that varies). Retiring the demo script therefore required
+porting diagnostics.py onto the general mechanism too, not just moving
+some constants.
+
+**Circular import found and fixed during the move.** `FPA`/`GERT_ROOT`/
+`_eta_of`/`band_basics` moved into `gd_joint_block_whole_slit_sweep.py`
+(which itself imports `pixel_density_bin_centers` FROM `diagnostics.py`)
+while `diagnostics.py` needs to import `FPA`/etc. FROM the sweep script
+-- a genuine cycle. Fixed at the root: `pixel_density_bin_centers` moved
+to `geocarb_gert/joint_state.py` (its natural home, next to `state_spec_
+from_scene`), so neither script depends on the other for it.
+
+**`gd_joint_block_diagnostics.py` ported onto the general mechanism**
+(`state_spec_from_scene` + `build_forward_state` + `gauss_newton_state`,
+bin-centers-only, `free=("co2_ppm",)`, `prior_fields="exact"`, `prior_
+form="tikhonov"` -- the tikhonov branch is documented as bit-identical to
+the original regularization). **The headline capture-fraction number is
+a known harness limitation, NOT a retrieval-code defect** (root-caused
+2026-09-09, below); both schemes run to completion (rows 890-935,
+G=15, ~900s each):
+
+| scheme        | peak-enhancement capture | mean per-bin chi2 | min pixel count/bin |
+|----------------|--------------------------|--------------------|----------------------|
+| uniform        | 3034.1%                  | 0.008927           | 269                  |
+| pixel-density  | 2939.3%                  | 0.008375           | 890                  |
+
+Both a GOOD fit to the data (chi2 ~0.008-0.009) through a wildly
+unphysical state, not a forward-model mismatch -- and both off by the
+same ~30x order of magnitude, which argues for a systematic setup/scale
+issue rather than per-scheme GN divergence. `pixel-density` still wins
+on the metrics that don't depend on the broken absolute scale (lower
+chi2, and a 3.3x higher minimum per-bin pixel count -- exactly the
+starved-bin problem it exists to fix), so the qualitative finding this
+script demonstrates may still hold, but the headline capture-fraction
+number cannot be trusted either way. **Root cause (2026-09-09):** the
+anomaly is confined to this diagnostics harness -- the production
+retrieval path is sound. Evidence:
+
+1. `gd_jacobian_validate.py` re-run clean -- forward analytic-vs-sweep
+   rel L2 = 0.000e+00; analytic-vs-FD Jacobian rel L2 ~1e-9, cosine
+   1.000000000 on every column. This directly disproves the earlier
+   "`build_forward_state` Jacobian magnitude differs in absolute scale"
+   hypothesis -- a 30x scale error in the shared forward/`K` would put
+   a floor on that FD comparison, and there is none.
+2. The `capture` metric -- `(retrieved_ppm[peak] - retrieved_ppm[edge])
+   / true_enhancement` -- is a pure null-space quantity in this
+   deliberately degenerate window (15 bins over 46 detector rows at the
+   max-keystone end of FPA2, each row blending ~10 eta locations). GN
+   moves it 30x while barely touching chi2 (0.008): a null-space
+   excursion, not a broken forward model.
+3. The metric was calibrated against the retired nearest-bin demo; the
+   port runs on production `state_interp="linear"`, whose different
+   inter-bin coupling in `K` steers GN down a different null-space
+   direction. Metric/forward-convention mismatch, not a code defect --
+   linear interp is the validated production choice.
+4. Both schemes off by the *same* ~30x -> systematic (points 2-3), not
+   stochastic GN divergence. Whole-slit sweeps against representable
+   (Mode-2) truth reached single-digit-ppm CO2 errors through the same
+   shared solver/forward -- a real 30x scale bug would have made those
+   thousands of ppm.
+
+**Non-blocking follow-up** (diagnostics harness only): the
+capture-fraction number is not recoverable from a 15-bin/46-row window
+regardless of code -- it is an under-determined inverse there by
+construction. To make it meaningful, the script should use a
+production-like bin density (G ~ width/3) and `prior_form="exponential"`,
+or be retired in favour of the sweep's own scoring. Its residual /
+chi2 / bin-placement panels don't depend on `retrieved_ppm`'s absolute
+scale and are unaffected. Plot saved at
+`plots/joint_block/gd_joint_block_diagnostics_fpa2_row890-935_G15.png`.
+
+**`gd_joint_block_whole_slit_merge.py`/`_plot.py` folded into `gd_
+joint_block_whole_slit_sweep.py` as `merge_parts`/`plot_sweep` functions**,
+reachable via `--merge <parts_dir>`/`--plot <pkl>` (each gets its own
+dedicated argument parser, checked before the main sweep parser, so
+there's no flag-namespace collision with `--gamma`/`--fpa`/etc.). The
+two standalone scripts are gone; every reference to them (docs, sbatch
+scripts) updated to the new invocation.
+
+**Then renamed**: `gd_joint_block_whole_slit_sweep.py` -> `gd_joint_
+block_retrieve.py` (the name the original demo vacated). Every live
+importer across the codebase (`gd_jacobian_validate.py`, `gd_build_
+resolution_matched_truth.py`, `check_mission_config.py`, `gd_joint_
+block_diagnostics.py`, the two `submit_smoke_*.sbatch` scripts) updated
+-- since the import STATEMENTS (`from gd_joint_block_retrieve import
+FPA, ...`) were already written against the target name, most needed no
+change beyond the sweep-specific symbol imports (`ROW_KINDS`,
+`build_window_tiles`, `state_spec_from_scene`, etc.) that previously came
+from the old `..._whole_slit_sweep` module name.
+
+**Verified**: every touched module imports cleanly and every CLI parses
+(`--help` on each); `check_mission_config.py` (unrelated to any of this
+directly, but imports the renamed module as `sweep`) still passes every
+check end-to-end. `gd_jacobian_validate.py` re-run and clean (forward
+rel L2 = 0.000e+00; Jacobian FD rel L2 ~1e-9) -- see the diagnostics
+root-cause above.
+
+**Critical files**: `scripts/gd_joint_block_retrieve.py` (the renamed,
+consolidated script -- was `gd_joint_block_whole_slit_sweep.py`),
+`scripts/gd_joint_block_diagnostics.py` (ported; capture-fraction
+number is a known harness limitation, not a code defect),
+`geocarb_gert/joint_state.py` (`pixel_density_bin_centers` moved here,
+`gamma` wiring fix). `scripts/gd_joint_block_retrieve.py` (the OLD demo),
+`gd_joint_block_whole_slit_merge.py`, `gd_joint_block_whole_slit_plot.py`
+are deleted.

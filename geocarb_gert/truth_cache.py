@@ -1,5 +1,5 @@
 """Cache for the deterministic (noise-free) rendered truth detector image
-that ``scripts/gd_test.py::_band_setup`` produces -- "having an observation
+that ``scripts/gd_per_row_retrieve.py::_band_setup`` produces -- "having an observation
 saved on disk" (user request, 2026-08-20), so a config-matrix sweep that
 varies only retrieval-side knobs (``g_ratio``, ``anchor_density``, free
 rows, ...) doesn't re-render the same scene from scratch for every config.
@@ -13,7 +13,7 @@ Does **not** cache ``radiance`` (an unpicklable closure over
 function's implementation) or ``noise_arr`` (a random per-call
 realization, only meaningful under ``noise=True``, which no cached caller
 uses). Every current consumer of this cache
-(``gd_joint_block_whole_slit_sweep.py``) only reads ``A``/``wn_hires``/
+(``gd_joint_block_retrieve.py``) only reads ``A``/``wn_hires``/
 ``ils`` from the returned dict; a future caller that needs ``radiance``
 must bypass the cache -- a bare ``KeyError`` on the returned dict makes
 that failure loud rather than silently serving a wrong/incomplete band.

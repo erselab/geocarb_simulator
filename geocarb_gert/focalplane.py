@@ -53,7 +53,7 @@ Terminology note (2026-08-13): "scene," in the physical sense, means the true
 :func:`geocarb_gert.along_slit_scene.atmosphere_at`). Radiance is a *derived*
 quantity, ``radiance(η) = RT(state(η))``, computed by running that state
 through ``gert.forward_model.ForwardModel`` (e.g. the ``spectrum_for`` pattern
-in ``scripts/gd_joint_block_retrieve.py`` and ``scripts/gd_test.py``'s own
+in ``scripts/gd_joint_block_retrieve.py`` and ``scripts/gd_per_row_retrieve.py``'s own
 ``_band_setup``). The ``η ↔ x_km`` mapping is a fixed bijection
 (``x_km = η · SLIT_HALF_KM``), so state can equivalently be indexed by either.
 

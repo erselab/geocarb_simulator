@@ -44,7 +44,7 @@ A second, independent benefit: under pure sigma, scaling every level by
 1.5e-11 Pa, against 0.1 Pa for Laprise). That makes `gert`'s own
 ``StateVector`` ``p_scale`` element the exactly-correct transform for this
 scene too -- relevant to the band-stress-test pipelines in
-`scripts/gd_test.py`, which float ``p_scale`` and until now carried the same
+`scripts/gd_per_row_retrieve.py`, which float ``p_scale`` and until now carried the same
 ~1e-3 mismatch.
 
 What changes numerically

@@ -25,7 +25,7 @@ from geocarb_gert.along_slit_scene import SLIT_HALF_KM  # noqa: E402
 from geocarb_gert.joint_state import DEFAULT_CORR_LENGTH_ETA  # noqa: E402
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
-import gd_joint_block_whole_slit_sweep as sweep  # noqa: E402
+import gd_joint_block_retrieve as sweep  # noqa: E402
 from gd_joint_block_retrieve import FPA  # noqa: E402
 
 _FAILURES = []

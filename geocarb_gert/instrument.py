@@ -17,7 +17,7 @@ from .mission_config import GeoCarbInstrumentConfig as _GeoCarbInstrumentConfig
 # Sourced from input/geocarb_instrument.yml's bands: block at import time
 # (Phase B of the config-consolidation plan) -- was a typed-inline literal
 # list. Kept as a module constant since it's imported bare in several
-# places (e.g. scripts/gd_test.py's GEOCARB_BANDS[fpa]); a non-default
+# places (e.g. scripts/gd_per_row_retrieve.py's GEOCARB_BANDS[fpa]); a non-default
 # instrument config must go through GeoCarbInstrumentConfig.bands directly.
 GEOCARB_BANDS = _GeoCarbInstrumentConfig.from_yaml().bands
 

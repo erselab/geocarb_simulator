@@ -619,6 +619,30 @@ def combined_information_weighted_bin_centers(eta_lo: float, eta_hi: float, G: i
     return information_weighted_bin_centers(eta_lo, eta_hi, G, combined, n_grid=n_grid)
 
 
+def pixel_density_bin_centers(eta_flat, G):
+    """Bin centers placed at evenly-spaced quantiles of the ACTUAL
+    per-pixel eta distribution in a window (`eta_flat` = every real
+    (row, col) pixel's own true eta, not a per-row proxy) -- so bin
+    density (bins per unit eta) scales with the ACTUAL density of real
+    pixels in eta, which is higher wherever keystone is large (more rows'
+    column ranges overlap a given eta interval there), instead of being
+    constant across the window. Supersedes an earlier version that used
+    `rows_crossed` as an indirect per-row density proxy, routed through
+    each row's own center-column eta -- that required an extra floor to
+    handle a near-null row's real internal wiggle (`rows_crossed`'s
+    endpoint-difference definition reads ~0 there despite real spread),
+    and only approximated what's already directly available here:
+    `np.quantile` on the real per-pixel data, no proxy or floor needed.
+
+    Originally developed in `scripts/gd_joint_block_diagnostics.py`
+    (2026-08-xx, comparing this against a uniform `np.linspace` grid);
+    moved here (2026-09-09) once `gd_joint_block_retrieve.py` adopted it
+    as its own default bin placement -- diagnostics.py's own comparison
+    now imports it from here too, alongside `state_spec_from_scene`,
+    avoiding a script-to-script import cycle."""
+    return np.quantile(eta_flat, np.linspace(0.0, 1.0, G))
+
+
 def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                           sigmas=None, corr_length=None, kinds=None,
                           prior_form="exponential", gamma=3.0,
@@ -665,7 +689,7 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
     density` itself is now IGNORED unless the caller uses it to build that
     override. This is a real, deliberate behaviour change for any caller
     that frees a surface row and does NOT pass `surface_positions`
-    (`scripts/gd_joint_block_whole_slit_sweep.py`'s own production path
+    (`scripts/gd_joint_block_retrieve.py`'s own production path
     included) -- previously-banked results with a free albedo row
     (`docs/PROJECT_STATUS.md` Sec.7) used the old separate-grid behaviour
     and are unaffected (already saved), but a fresh rerun of the same
@@ -709,7 +733,7 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
     `x_km`, so every bin gets the SAME prior -- the correct state-side
     counterpart to a truth scene whose composition genuinely does not vary
     along the slit (`--uniform` / `--barcode` on
-    `gd_joint_block_whole_slit_sweep.py`).
+    `gd_joint_block_retrieve.py`).
 
     Found 2026-08-19: before this parameter existed, nothing in this
     function read `uniform` at all -- the sweep script's own `--uniform`
@@ -1170,7 +1194,7 @@ def render_at_anchors(fpa, rows_win, anchor_etas, atm_params, surf_params,
     spectrum : callable
         ``spectrum(atm_p: dict, surf_p: dict) -> hi-res radiance`` for one
         anchor's own physical state (typically
-        :func:`gd_joint_block_whole_slit_sweep._make_state_spectrum`'s
+        :func:`gd_joint_block_retrieve._make_state_spectrum`'s
         return value) -- called with one argument when `surf_params` is
         empty, matching `build_forward_state`.
     n_workers : int, optional

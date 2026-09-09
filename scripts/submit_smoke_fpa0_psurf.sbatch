@@ -27,7 +27,7 @@ export MKL_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
-"${PYTHON}" scripts/gd_joint_block_whole_slit_sweep.py \
+"${PYTHON}" scripts/gd_joint_block_retrieve.py \
     --fpa 0 --free p_surface_hpa --task-id 1 --n-tasks 2 \
     --hires-only --jacobian analytic --anchor-workers "${SLURM_CPUS_PER_TASK}" \
     --out scratch_work/smoke_mid_window_fpa0_psurf.pkl

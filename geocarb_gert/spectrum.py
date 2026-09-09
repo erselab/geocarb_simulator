@@ -8,7 +8,7 @@ their own -- see `docs/PROJECT_STATUS.md` Sec.12 for the full inventory.
 Six of those sites were near-byte-for-byte duplicates of the same ~15-line
 aerosol-kwarg-building block, independently pasted in as the aerosol rows
 (`tau_aerosol`/`height_aerosol`) were added -- which is exactly how a real
-bug (the truth-rendering path in `gd_test.py::_band_setup` never threading
+bug (the truth-rendering path in `gd_per_row_retrieve.py::_band_setup` never threading
 aerosol through at all) hid for so long: threading a new physical
 capability through the model meant remembering to touch every single site,
 and one was missed.
