@@ -2,8 +2,13 @@
 
 Replaces `gauss_newton_state`'s finite differences with derivatives assembled
 from `gert`'s own per-layer analytic arrays, composed with this package's
-detector operator. **`gert` itself is not modified** -- everything here reads
-what `ForwardModel.run(jacobians=True)` already returns.
+detector operator. Everything here reads what `ForwardModel.run(jacobians=
+True)` already returns. **`gert` itself was additive-only modified once**
+(2026-09-09): `ForwardResult` gained `airmass_hires`/`tau_abv_hires`/
+`I_scatter_hires` (already-computed `SingleScatterSolver` internals that had
+nowhere to go), specifically so `height_aerosol_dI_dparam` below could
+become a true analytic composition instead of an RT-level finite
+difference -- see that function's docstring.
 
 Why bother, given it is barely faster
 -------------------------------------
@@ -65,6 +70,14 @@ t_offset_k         atmosphere   gert `dtau_mol_dT_lay_hires` x `K_mol_lay_hires`
                                 altitude/VMR feedback) -- exact, like albedo
 albedo             surface      gert `K_albedo_hires` -- exact, nothing to chain
 albedo_slope       surface      gert `K_slope_hires`  -- exact (spectral slope)
+tau_aerosol        surface      gert `K_tau_aer_hires` -- exact, nothing to chain
+height_aerosol     surface      analytic composition through `tau_abv`, using
+                                gert `I_scatter_hires`/`airmass_hires`
+                                (2026-09-09) -- zero extra RT calls, but
+                                genuinely non-smooth (hard pressure-layer
+                                mask), see the function's own docstring;
+                                `height_aerosol_dI_dparam_fd` kept as an
+                                RT-level cross-check
 dispersion         instrument   derivative built (`_diagonal_ils_convolve_dnu`),
                                 but the forward model does not yet APPLY a
                                 dispersion perturbation, so there is no row to
@@ -380,40 +393,96 @@ def t_offset_dI_dparam(res, window: int = 0):
     return out
 
 
-def height_aerosol_dI_dparam(absco, wide_inst, geo, solar, atm, alb, slope,
-                             tau_aer, height_aerosol_val, h_rel: float = 1e-2):
-    """``dI_hires/d(height_aerosol)`` -- a genuine RT-level finite
-    difference, NOT a chain rule through `K_aer_lay_hires` (found not to
-    work here -- see below).
+def height_aerosol_dI_dparam(res, atm, height_aerosol_val, window: int = 0,
+                             h_rel: float = 1e-2, thickness_aerosol=None):
+    """``dI_hires/d(height_aerosol)`` -- analytic composition through
+    `tau_abv`, using `ForwardResult.I_scatter_hires`/`airmass_hires`
+    (2026-09-09, `gert` now exposes both). Costs ZERO extra RT calls --
+    a real fix, not just a cheaper approximation, superseding this
+    function's earlier RT-level-finite-difference form (kept below as
+    `height_aerosol_dI_dparam_fd` for cross-checking).
 
-    **Why this row doesn't get a cheap analytic composition like every
-    other row in this module.** `SingleScatterSolver`'s own single-
-    scatter term is `I_scatter = A(nu) * exp(-m * tau_abv(nu))`, where
-    `tau_abv` is the gas+Rayleigh optical depth ABOVE the aerosol layer
-    (`rt_solver.py`'s own docstring) -- THIS is the term that genuinely
-    depends on `height_aerosol` (a higher aerosol layer has more gas
-    above it to attenuate the scattered light on the way up). `K_aer_lay_
-    hires` (`dI/d(tau_aer_lay[l])`) does NOT capture this -- checked
-    directly (2026-09-08): in a real single-window solve, `K_aer_lay[l,
-    w]` is IDENTICAL across every layer l (the SS model doesn't
-    distinguish which layer the scattering happens at). Combined with
+    **The chain rule.** `SingleScatterSolver`'s single-scatter term is
+    `I_scatter(nu) = A(nu) * exp(-m * tau_abv(nu))`, so
+    `d(I_scatter)/d(tau_abv) = -m * I_scatter` exactly -- no
+    approximation, straight from the RT formula (`rt_solver.py`'s own
+    docstring), using `res.airmass_hires[window]`/`res.I_scatter_hires
+    [window]` directly instead of reconstructing them from `I_hires`.
+
+    `tau_abv = tau_mol_above + tau_ray_above` is a sum, over layers with
+    `atm.p_layers < height_aerosol`, of PER-LAYER optical depths that do
+    NOT themselves depend on `height_aerosol` -- only the mask does. So
+    `tau_abv`'s own derivative can be finite-differenced with NO RT at
+    all: just re-sum the already-computed `res.tau_gas_layer_hires`/
+    `res.tau_ray_lay_hires` (populated by the SAME `jacobians=True` call
+    already made for the nominal state) under the mask evaluated at
+    `height +/- h`. This mirrors `p_surface_dI_dparam`'s own
+    `dT_lay`/`dvmr_lay` pattern: cheap, algebra-only, no RT.
+
+    **The non-smoothness caveat is UNCHANGED.** `above_mask = atm.
+    p_layers < height_aerosol` (`forward_model.py`) is still a hard
+    boolean threshold -- this function computes the true local
+    derivative of that (still discontinuous) function, which removes
+    the "which FD step size am I even sampling" ambiguity the old
+    RT-level FD had, but does not smooth the underlying mask (a
+    separate, larger, deliberately out-of-scope change -- see
+    `docs/PROJECT_STATUS.md` Sec.11's accepted caveat).
+
+    Why `K_aer_lay_hires`-based chain rule alone still doesn't work: see
+    `height_aerosol_dI_dparam_fd`'s docstring below (unchanged finding).
+    """
+    tau_gas_layer = res.tau_gas_layer_hires[window] if res.tau_gas_layer_hires else None
+    tau_ray_lay = res.tau_ray_lay_hires[window] if res.tau_ray_lay_hires else None
+    I_scatter = res.I_scatter_hires[window] if res.I_scatter_hires is not None else None
+    m = res.airmass_hires[window] if res.airmass_hires is not None else None
+    n_hires = np.shape(res.I_hires[window])[0]
+    if not tau_gas_layer or tau_ray_lay is None or I_scatter is None or m is None:
+        return np.zeros(n_hires)
+
+    p_layers = np.asarray(atm.p_layers, dtype=float)
+    tau_ray_lay = np.asarray(tau_ray_lay, dtype=float)
+    sigma = max(float(thickness_aerosol), 100.0) if thickness_aerosol is not None else 1.0e4
+    h = h_rel * sigma
+
+    def tau_abv_at(height):
+        above_mask = p_layers < height
+        out = np.zeros(n_hires)
+        for tau_lay_wn in tau_gas_layer.values():          # (n_wn, n_lay)
+            out += tau_lay_wn[:, above_mask].sum(axis=1)
+        out += float(tau_ray_lay[above_mask].sum())
+        return out
+
+    dtau_abv_dheight = (tau_abv_at(height_aerosol_val + h)
+                        - tau_abv_at(height_aerosol_val - h)) / (2.0 * h)
+    return -m * I_scatter * dtau_abv_dheight
+
+
+def height_aerosol_dI_dparam_fd(absco, wide_inst, geo, solar, atm, alb, slope,
+                                tau_aer, height_aerosol_val, h_rel: float = 1e-2):
+    """``dI_hires/d(height_aerosol)`` -- a genuine RT-level finite
+    difference. Superseded by `height_aerosol_dI_dparam` above (2026-09-09,
+    `gert` now exposes `I_scatter_hires`/`airmass_hires`); kept here only
+    as a cross-check reference for the analytic version.
+
+    **Why this row didn't get a cheap analytic composition originally.**
+    `SingleScatterSolver`'s own single-scatter term is
+    `I_scatter = A(nu) * exp(-m * tau_abv(nu))`, where `tau_abv` is the
+    gas+Rayleigh optical depth ABOVE the aerosol layer (`rt_solver.py`'s
+    own docstring) -- THIS is the term that genuinely depends on
+    `height_aerosol` (a higher aerosol layer has more gas above it to
+    attenuate the scattered light on the way up). `K_aer_lay_hires`
+    (`dI/d(tau_aer_lay[l])`) does NOT capture this -- checked directly
+    (2026-09-08): in a real single-window solve, `K_aer_lay[l, w]` is
+    IDENTICAL across every layer l (the SS model doesn't distinguish
+    which layer the scattering happens at). Combined with
     `_aer_class_layer_arrays`'s own `aer_frac` being normalized (sums to
     1 always, so `sum_l d(aer_frac[l])/d(height) = 0` exactly), the
     `K_aer_lay`-chain-rule composition is mathematically forced to ~0
     (measured: ~1e-19, floating-point noise) regardless of the real
-    physical sensitivity through `tau_abv` -- a real, not a bug.
-
-    `I_scatter`/`tau_abv`/the airmass factor `m` are computed INSIDE
-    `SingleScatterSolver.solve` and never stored on `ForwardResult`, so
-    there is no cheap, algebra-only quantity to finite-difference the way
-    `p_surface_dI_dparam`'s `dT_lay`/`dvmr_lay` do (pure profile-shape
-    functions, no RT) -- reconstructing `I_scatter`/`tau_abv`/`m` from
-    stored fields alone was attempted and abandoned as more fragile than
-    just re-running the RT twice. This function costs 2 extra full RT
-    calls (unlike every other row's Jacobian, which reuses the SAME
-    `jacobians=True` RT call already made for the nominal state) --
-    a real, accepted cost tradeoff for correctness over speed on this one
-    row specifically.
+    physical sensitivity through `tau_abv` -- a real, not a bug. Before
+    `gert` exposed `I_scatter_hires`/`airmass_hires`/`tau_abv_hires`,
+    there was no cheap, algebra-only quantity to finite-difference this
+    way, so this fell back to 2 extra full RT calls.
     """
     from gert.forward_model import ForwardModel
     from gert.rt_solver import SingleScatterSolver
@@ -442,63 +511,22 @@ def height_aerosol_dI_dparam(absco, wide_inst, geo, solar, atm, alb, slope,
 def make_spectrum_jac(absco, wide_inst, geo, solar, albedo):
     """``spectrum_jac(params, rows) -> (S_hires, {row: dS/d(param)})``.
 
-    The analytic counterpart of the sweep's own `_make_state_spectrum`, and
-    deliberately built the same way -- straight from
-    `along_slit_scene.atmosphere_from_params`, not `StateVector.gas_scaling`,
-    so no quantity is privileged. The only difference is
-    ``SingleScatterSolver(jacobians=True)`` and ``run(jacobians=True)``, which
-    is what populates the per-layer arrays :func:`gas_dI_dparam` reads.
+    Thin wrapper around `geocarb_gert.spectrum.spectrum_and_jacobian`
+    (2026-09-09 consolidation -- see that module's docstring), kept under
+    this name/signature for any caller still using it directly. The only
+    thing this wrapper does that `spectrum_and_jacobian` doesn't is
+    resolve the `albedo` fallback -- `(surface or {}).get("albedo",
+    albedo)` -- since `spectrum_and_jacobian` deliberately has no
+    module-scalar fallback of its own (see its docstring: albedo
+    resolution is the caller's responsibility).
     """
-    from gert.forward_model import ForwardModel
-    from gert.rt_solver import SingleScatterSolver
-
-    from . import along_slit_scene as als
+    from .spectrum import spectrum_and_jacobian
 
     def spectrum_jac(params: dict, rows, surface: dict | None = None):
-        atm = als.atmosphere_from_params(**params)
-        # a free albedo row overrides the fixed scalar this factory was built
-        # with; without one, behaviour is identical to `_make_state_spectrum`
-        alb = float((surface or {}).get("albedo", albedo))
-        slope = float((surface or {}).get("albedo_slope", 0.0))
-        # tau_aerosol/height_aerosol (2026-09-08) -- None when neither row is
-        # present, matching `_make_state_spectrum`'s own `.get(...)` default
-        # exactly (gert.ForwardModel.run treats `tau_aerosol=None` as
-        # "aerosol term omitted") -- zero behavior change by default.
-        tau_aer = (surface or {}).get("tau_aerosol")
-        height_aer = (surface or {}).get("height_aerosol")
-        n_wn = len(wide_inst.windows[0].wn_hires)
-        p_aer_val = als.aerosol_phase_hg(als.AEROSOL_G, np.cos(geo.scattering_angle))
-        fm = ForwardModel(atm, absco, wide_inst, geo,
-                          solver=SingleScatterSolver(jacobians=True),
-                          solar_spectrum=solar)
-        res = fm.run(albedo=np.array([alb]), albedo_slope=np.array([slope]),
-                     tau_aerosol=tau_aer, height_aerosol=height_aer,
-                     aerosol_profile_shape="gaussian",
-                     thickness_aerosol=als.AEROSOL_THICKNESS_PA,
-                     ssa_aerosol=[np.full(n_wn, als.AEROSOL_SSA)],
-                     g_aerosol=[als.AEROSOL_G],
-                     qext_aerosol=[np.full(n_wn, als.AEROSOL_QEXT_NORM)],
-                     P_aerosol=[np.full(n_wn, p_aer_val)],
-                     jacobians=True)
-        S = np.asarray(res.I_hires[0], dtype=float)
-        d = {}
-        for row in rows:
-            if row == "height_aerosol":
-                d[row] = height_aerosol_dI_dparam(absco, wide_inst, geo, solar, atm,
-                                                  alb, slope, tau_aer, float(height_aer))
-            elif row in SURFACE_ROW_JACOBIAN:
-                d[row] = surface_dI_dparam(res, row)
-            elif row == "p_surface_hpa":
-                d[row] = p_surface_dI_dparam(res, params, absco=absco, wide_inst=wide_inst,
-                                             geo=geo, solar=solar, alb=alb, slope=slope,
-                                             tau_aer=tau_aer, height_aer=height_aer)
-            elif row == "t_offset_k":
-                d[row] = t_offset_dI_dparam(res)
-            elif row in GAS_ROW_MOLECULE:
-                d[row] = gas_dI_dparam(res, GAS_ROW_MOLECULE[row], params[row])
-            else:
-                raise NotImplementedError(f"no analytic derivative for row {row!r}")
-        return S, d
+        surface = dict(surface or {})
+        surface["albedo"] = float(surface.get("albedo", albedo))
+        return spectrum_and_jacobian(params, rows, absco, wide_inst, geo, solar,
+                                     surface=surface)
 
     return spectrum_jac
 

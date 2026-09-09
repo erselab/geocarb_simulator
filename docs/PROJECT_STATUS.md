@@ -1127,3 +1127,95 @@ future) must be threaded through EVERY one of them, with no single
 choke point that guarantees this by construction.** Worth a real
 refactor at some point (one shared spectrum-builder, not three), flagged
 here rather than attempted today.
+
+## 12. Spectrum-simulation consolidation + `gert` ForwardResult additions (2026-09-09)
+
+Direct follow-through on Sec.11's closing flag. Inventory (grep + Explore
+agent) found **9** independent `gert.ForwardModel(...)` + `.run(...)` call
+sites, 6 of them near-byte-for-byte duplicates of the same ~15-line
+aerosol-kwarg block -- exactly the pattern behind Sec.11's bugs 1, 3, 4.
+
+**New module: `geocarb_gert/spectrum.py`** -- `simulate_spectrum(atm_params,
+surface, absco, wide_inst, geo, solar, jacobians=False, aerosol_type=
+"smoke")` (forward-only) and `spectrum_and_jacobian(...)` (analytic
+Jacobian, relocated from `jacobians.make_spectrum_jac`, which is now a
+thin wrapper). `surface` keeps the existing `{"albedo": ..., "tau_aerosol":
+..., "height_aerosol": ...}` convention every site already used; albedo
+fallback resolution stays the CALLER's job (documented in the module),
+since `simulate_spectrum` has no scene-specific fallback to fall back to.
+New `geocarb_gert/aerosol_defaults.py` wraps `gert.aerosol_properties.
+get_aerosol_scalars` (band index 1, this project's single-window
+convention) instead of re-deriving `ssa`/`g`/`qext_norm` per call site;
+`aerosol_type="smoke"` reproduces the Sec.11 constants exactly.
+
+**Migrated** (each verified bit-for-bit against its pre-migration output
+before being left in place): `jacobians.make_spectrum_jac` (now delegates),
+`gd_jacobian_validate.py`'s FD-reference closure, `gd_joint_block_
+whole_slit_sweep.py`'s `_make_state_spectrum`, and `gd_test.py::_band_
+setup`'s truth-rendering closure -- the highest-value target, since this
+is the one bug 4 found silently omitting aerosol for so long. Re-running
+`gd_jacobian_validate.py --free co2_ppm,tau_aerosol,height_aerosol,
+p_surface_hpa` end-to-end after the migration: **"forward agreement
+(analytic path vs sweep path): rel L2 0.000e+00 OK"** -- no regression.
+
+**Explicitly not migrated**: `gd_joint_block_retrieve.py`'s `spectrum_for`
+builds its atmosphere via `StateVector.gas_scaling().apply()`, not
+`als.atmosphere_from_params(**atm_params)` -- discovered during
+implementation that this doesn't fit `simulate_spectrum`'s `atm_params`
+dict contract without a broader interface change, so it was left alone
+rather than forced. `gd_test.py::_joint_retrieve`'s multi-band `fm` (handed
+to `GERTRetrieval`, never bare `.run()`), `along_slit_scene._lookup_sample`
+(deprecated, archive-only caller), and `scene.py::hires_spectra_for`
+(doesn't build its own atmosphere) stay out of scope for the same reasons
+identified during planning -- different object shapes, not oversights.
+
+**`gert` changes** (additive, own repo, user-owned): `RTResult` gained
+`I_scatter`/`tau_abv`/`m`; `ForwardResult` gained `airmass_hires`/
+`tau_abv_hires`/`I_scatter_hires` (always populated, not gated on
+`jacobians=True` -- cheap, already computed every call). Verified
+`I_hires == I_direct + I_scatter_hires` to the Beer-Lambert identity
+(rel L2 3.5e-17). This let `height_aerosol_dI_dparam` become a true
+analytic composition (`d(I_scatter)/d(tau_abv) = -m*I_scatter`, `d(tau_
+abv)/d(height)` from a cheap algebra-only re-mask of already-computed
+per-layer optical depths -- **zero extra RT calls**, down from 2 full RT
+calls) -- cross-checked against the old RT-FD version
+(`height_aerosol_dI_dparam_fd`, kept for reference): cosine 0.998-0.9996,
+magnitude differing 5-11% wherever the h-window straddled a real layer
+crossing, consistent with (not worse than) Sec.11's already-documented
+non-smoothness caveat, which is UNCHANGED by this -- `above_mask` is
+still a hard boolean threshold; only the FD-step-size ambiguity is gone.
+`p_surface_dI_dparam`'s aerosol branch was **not** converted to analytic
+composition -- doing so correctly needs re-evaluating ABSCO optical
+depths at a perturbed pressure (not just re-masking already-computed
+per-layer arrays, `height_aerosol`'s simpler case), assessed as a
+separate, riskier follow-up rather than attempted under this pass.
+
+**Not done / open**: the full whole-slit smoke test (Sec.11's own
+`resid_hires_rms` regression check) was not re-run end-to-end after this
+migration -- cost (500-1500+s per run) vs. the strength of the equivalence
+evidence already gathered (bit-for-bit `simulate_spectrum`/`spectrum_and_
+jacobian` matches, plus the live `gd_jacobian_validate.py` forward-agreement
+check at 0.000e+00) made it a reasonable line to stop at for this pass;
+running it is the natural next verification step before trusting any new
+aerosol retrieval result. Resolving Sec.11's own remaining convergence gap
+is still a separate, open follow-up, unaffected by this consolidation.
+
+### Retired code, once the consolidation made it visibly dead
+
+- `along_slit_scene.build_lookup_radiance`/`_lookup_sample`/`_G_LOOKUP`
+  (~150 lines) -- the old two-sample spectral-blend truth renderer,
+  already superseded before this session by `gd_test.py::_band_setup`'s
+  own per-anchor rendering; confirmed no live caller (only `archive/`
+  scripts). Not something today's consolidation newly obsoleted, just a
+  dead-code opportunity in the same neighborhood, swept while here.
+  Its now-dead-with-it imports (`multiprocessing`, `warnings`,
+  `gd_render.available_cpus`) went too.
+- `gd_joint_block_whole_slit_sweep.py`'s top-level `ForwardModel`/
+  `SingleScatterSolver` imports -- dead once `_make_state_spectrum`
+  migrated to `simulate_spectrum`.
+- **Kept, deliberately**: `jacobians.height_aerosol_dI_dparam_fd` (the
+  superseded RT-FD version) -- cheap, and a ready-made cross-check if the
+  analytic version is ever suspected of drifting.
+- **Not retired**: `gd_test.py`'s top-level `ForwardModel`/
+  `SingleScatterSolver` imports stay -- still used by `_joint_retrieve`'s
+  own multi-band `fm` (call site #4, out of scope for migration).

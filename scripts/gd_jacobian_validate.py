@@ -128,37 +128,21 @@ def main() -> int:
     t_ana = time.time() - t0
     print(f"analytic: y {y_ana.shape}, K {K_ana.shape}  ({t_ana:.1f}s)")
 
-    # finite-difference reference, through the sweep's own forward model
+    # finite-difference reference, through the shared simulate_spectrum
+    # (2026-09-09 consolidation -- geocarb_gert.spectrum). Previously this
+    # was its own independent inline ForwardModel/fm.run duplicate, which
+    # is exactly the pattern that let this "FD reference" silently omit
+    # aerosol physics the analytic path DID include, breaking even
+    # co2_ppm's own forward agreement the first time it drifted out of
+    # sync with `_make_state_spectrum` -- now impossible, both go through
+    # the same function.
     def make_spectrum():
-        from gert.forward_model import ForwardModel
-        from gert.rt_solver import SingleScatterSolver
+        from geocarb_gert.spectrum import simulate_spectrum
 
         def spectrum(params: dict, surface: dict | None = None):
-            atm = als.atmosphere_from_params(**params)
-            alb = float((surface or {}).get("albedo", albedo))
-            slope = float((surface or {}).get("albedo_slope", 0.0))
-            # tau_aerosol/height_aerosol (2026-09-08) -- must match
-            # _make_state_spectrum's own threading exactly, or this
-            # "FD reference" silently omits aerosol physics the analytic
-            # path (spectrum_jac) DOES include whenever either row is
-            # free/frozen -- caught directly (co2_ppm's own forward
-            # agreement broke, not just the aerosol rows', the first time
-            # this drifted out of sync).
-            tau_aer = (surface or {}).get("tau_aerosol")
-            height_aer = (surface or {}).get("height_aerosol")
-            n_wn = len(wide_inst.windows[0].wn_hires)
-            p_aer_val = als.aerosol_phase_hg(als.AEROSOL_G, np.cos(geo.scattering_angle))
-            fm = ForwardModel(atm, absco, wide_inst, geo,
-                              solver=SingleScatterSolver(), solar_spectrum=solar)
-            res = fm.run(albedo=np.array([alb]), albedo_slope=np.array([slope]),
-                         tau_aerosol=tau_aer, height_aerosol=height_aer,
-                         aerosol_profile_shape="gaussian",
-                         thickness_aerosol=als.AEROSOL_THICKNESS_PA,
-                         ssa_aerosol=[np.full(n_wn, als.AEROSOL_SSA)],
-                         g_aerosol=[als.AEROSOL_G],
-                         qext_aerosol=[np.full(n_wn, als.AEROSOL_QEXT_NORM)],
-                         P_aerosol=[np.full(n_wn, p_aer_val)])
-            return np.asarray(res.I_hires[0], dtype=float)
+            surface = dict(surface or {})
+            surface["albedo"] = float(surface.get("albedo", albedo))
+            return simulate_spectrum(params, surface, absco, wide_inst, geo, solar).I_hires
         return spectrum
 
     forward = build_forward_state(FPA, rows_win, anchor_etas, spec, make_spectrum(),

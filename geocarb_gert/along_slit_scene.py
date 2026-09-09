@@ -9,11 +9,17 @@ keystone/smile row-crossing confuses a retrieval when the along-slit
 variability is geophysical, not just radiometric.
 
 Since 2026-08-17 it can also vary surface albedo along the slit at the same
-time (:func:`albedo_at`, enabled with ``build_lookup_radiance(...,
-vary_albedo=True)``), giving a scene where composition, surface pressure and
+time (:func:`albedo_at`, enabled via ``scripts/gd_test.py``'s own
+``--vary-albedo``), giving a scene where composition, surface pressure and
 reflectance all vary together -- the realistic case, and the one needed
 before any albedo-induced bias can be measured. It is opt-in, and OFF by
 default, so every result produced before that date reproduces bit-for-bit.
+
+(The two-sample spectral-blend truth renderer that originally lived at the
+bottom of this file, ``build_lookup_radiance``/``_lookup_sample``/
+``_G_LOOKUP``, was retired 2026-09-09 -- dead in the live tree since
+``scripts/gd_test.py::_band_setup``'s own per-anchor rendering superseded
+it; only ``archive/`` scripts still called it.)
 
 Design (see ``scripts/gd_along_slit_atm_profiles.py`` for the plots this was
 approved from): baselines from :func:`geocarb_gert.scene.reference_atmosphere`
@@ -37,8 +43,6 @@ rather than the two merely being close).
 """
 from __future__ import annotations
 
-import multiprocessing as mp
-import warnings
 from functools import lru_cache
 from typing import Callable
 
@@ -50,7 +54,6 @@ from .levels import sigma_levels
 from model_sampler import pressure_to_alt_std_atm
 
 from .scene import _MW_RATIO, _std_temperature, _WELL_MIXED
-from .gd_render import available_cpus
 from .mission_config import GeoCarbInstrumentConfig as _GeoCarbInstrumentConfig
 
 #: Sourced from input/geocarb_instrument.yml's geometry.slit_length_km at
@@ -195,10 +198,10 @@ def _correlated_field(seed, corr_km=None, cov=None, oversample=5.0):
     `corr_km`, which would make the requested coefficient of variation
     silently wrong.
 
-    Seeded (not drawn fresh per call) so every process (including
-    `build_lookup_radiance`'s forked pool workers) sees the identical
-    field and the scene stays reproducible; callers `lru_cache` this
-    themselves since the grid itself, not just the seed, determines cost.
+    Seeded (not drawn fresh per call) so every process (including any
+    forked `multiprocessing.Pool` worker) sees the identical field and
+    the scene stays reproducible; callers `lru_cache` this themselves
+    since the grid itself, not just the seed, determines cost.
     """
     corr_km = ALBEDO_CORR_KM if corr_km is None else corr_km
     cov = ALBEDO_COV if cov is None else cov
@@ -219,8 +222,8 @@ def _correlated_field(seed, corr_km=None, cov=None, oversample=5.0):
 def _albedo_fine_field():
     """The true fine-scale albedo perturbation field -- see
     `_correlated_field`. Seeded and `lru_cache`d so the scene is
-    reproducible across processes (including `build_lookup_radiance`'s
-    forked pool workers)."""
+    reproducible across processes (including any forked
+    `multiprocessing.Pool` worker)."""
     return _correlated_field(ALBEDO_FINE_SEED)
 
 
@@ -799,8 +802,8 @@ def resolution_matched_fields(x_anchor_km, fields=None) -> dict:
     a version of the truth with literally ZERO structure below that
     anchor spacing, exposed as reusable callables in the same shape
     :data:`STATE_FIELDS`/:data:`PRIOR_FIELD_SETS` entries already use (so
-    it drops into any ``fields=`` parameter, including :func:`atmosphere_at`
-    /:func:`build_lookup_radiance`, unchanged).
+    it drops into any ``fields=`` parameter, including :func:`atmosphere_at`,
+    unchanged).
 
     2026-08-29 (user): built so a truth IMAGE can be rendered from a scene
     the anchor grid at a given ``anchor_density`` can, in principle,
@@ -847,9 +850,9 @@ def build_scene_fields(uniform: bool = False, barcode: bool = False,
     (``{band_label: fn(x_km)}``, matching :data:`SURFACE_FIELDS`/
     :func:`resolution_matched_albedo_fn`'s own convention -- NOT
     `state_spec_from_scene`'s `{"albedo": fn(x_km, label)}`, since this
-    feeds straight into `build_lookup_radiance`/the anchor-rendering
-    path, not a `StateSpec`), fed into ONE rendering mechanism -- barcode
-    stops being a separate code path.
+    feeds straight into the anchor-rendering path (`gd_test.py::
+    _band_setup`), not a `StateSpec`), fed into ONE rendering mechanism --
+    barcode stops being a separate code path.
 
     Real behavioural fix, not just a refactor: today's ``--barcode``
     computes ONE spectrum at the center atmosphere/albedo and multiplies
@@ -995,157 +998,3 @@ def atmosphere_from_params(co2_ppm: float, ch4_ppb: float, co_ppb: float,
     q = w / (1.0 + w)
     return AtmosphericProfile(p_levels=p, T_levels=T, q_levels=q, gases=gases)
 
-
-# -- globals populated in build_lookup_radiance() before the Pool is forked --
-_G_LOOKUP = {}
-
-
-def _lookup_sample(i: int):
-    g = _G_LOOKUP
-    x_km = g["x_samples_km"][i]
-    atm = atmosphere_at(x_km, g["h2o_scale_height_km"], fields=g.get("fields"))
-    fm = g["fm_cls"](atm, g["absco"], g["inst"], g["geo"],
-                     solver=g["solver_cls"](), solar_spectrum=g["solar"])
-    # Albedo is applied INSIDE the forward run (not multiplied onto the
-    # spectrum afterwards), so a per-sample albedo genuinely re-runs the RT
-    # at that reflectance rather than rescaling one shared spectrum.
-    surface_fields = g.get("surface_fields")
-    if surface_fields is not None:
-        # Resolution-matched (or otherwise custom) per-band albedo, same
-        # list shape [one value per band_labels entry] the raw albedo_at
-        # call below already produces -- see resolution_matched_albedo_fn.
-        albedo = [float(surface_fields[lab](x_km)) for lab in g["band_labels"]]
-    elif g["vary_albedo"]:
-        albedo = list(albedo_at(x_km, g["band_labels"]))
-    else:
-        albedo = g["albedo"]
-    res = fm.run(albedo=albedo, albedo_slope=[0.0] * len(albedo))
-    return i, res.I_hires[0]
-
-
-def build_lookup_radiance(
-    absco, inst, geo, solar, albedo,
-    n_samples: int = 400,
-    h2o_scale_height_km: float = 2.0,
-    n_workers: int | None = None,
-    uniform: bool = False,
-    vary_albedo: bool = False,
-    fields=None,
-    surface_fields=None,
-) -> tuple[np.ndarray, Callable]:
-    """Precompute hi-res spectra at ``n_samples`` along-slit positions and
-    return ``(wn_hires, radiance)`` where ``radiance(eta) -> spectrum`` does
-    linear interpolation between the two nearest precomputed samples.
-
-    The along-slit hot spots are ~10 km wide; with the default
-    ``n_samples=400`` over the 2800 km slit, sample spacing is 7 km --
-    roughly 3 samples across each hot spot's FWHM, resolving it without
-    excessive forward-model cost. Increase ``n_samples`` for finer features.
-
-    Each sample needs its own ``ForwardModel`` (a fresh one per sample
-    atmosphere) -- embarrassingly parallel like ``gd_render.image()``, same
-    fork + copy-on-write pattern so ``absco``/``solar`` aren't duplicated
-    per worker.
-
-    ``uniform=True`` collapses this to a single sample at the slit centre
-    (x_km=0, matching the retrieval's prior atmosphere exactly): every row
-    then sees the identical truth spectrum, so ``radiance(eta)`` is constant
-    along the slit regardless of ``eta``. This isolates pure geometric-
-    distortion bias (keystone/smile/PSF/rectification-interpolation) from
-    composition/pressure-tracking bias, for direct comparison against a
-    ``uniform=False`` run of the same band and against the older, uniform-
-    composition dense-sweep design (``gd_dense_sweep.py``). Added
-    2026-07-24 for the FPA2 with/without along-slit-variation comparison.
-
-    ``fields``/``surface_fields`` (2026-08-29, both default ``None`` ->
-    today's exact behaviour: raw :data:`STATE_FIELDS` and ``albedo_at``)
-    let a caller render the TRUTH itself from custom field functions --
-    e.g. :func:`resolution_matched_fields`/:func:`resolution_matched_
-    albedo_fn`, so the rendered image reflects a deliberately band-limited
-    scene rather than the full continuous truth. ``surface_fields`` is
-    ``{band_label: fn(x_km) -> albedo}``, one entry per ``inst.windows``
-    label; only consulted when ``vary_albedo=True`` (same as ``albedo_at``
-    itself).
-
-    .. deprecated:: 2026-09-04
-        This two-sample linear spectral blend was confirmed (2026-09-02)
-        to be the dominant source of the representability-gap artifacts
-        an entire investigation chased before tracing it here -- see
-        docs/PROJECT_STATUS.md Sec.13.1. New code should use
-        :func:`geocarb_gert.joint_state.render_at_anchors` +
-        :func:`geocarb_gert.focalplane.footprint_average_scene` instead
-        (real per-anchor RT, exact sub-pixel footprint integration, never
-        an interpolated stand-in). Kept for the several older scripts
-        that still call it directly (``gd_toy_native_row_demo.py``,
-        ``gd_reversed_scene_check.py``, and others) -- not removed, since
-        migrating those is a separate, larger task.
-    """
-    warnings.warn(
-        "build_lookup_radiance uses a two-sample linear spectral blend, "
-        "confirmed to be the dominant source of representability-gap "
-        "artifacts in prior investigations (docs/PROJECT_STATUS.md "
-        "Sec.13.1). New code should use "
-        "geocarb_gert.joint_state.render_at_anchors + "
-        "geocarb_gert.focalplane.footprint_average_scene instead.",
-        DeprecationWarning, stacklevel=2)
-    from gert.forward_model import ForwardModel
-    from gert.rt_solver import SingleScatterSolver
-
-    if vary_albedo and uniform:
-        # `uniform` collapses to a single sample at x_km=0, so albedo would
-        # be frozen at whatever value happens to sit at the slit centre --
-        # silently NOT a varying-albedo scene. Refuse rather than mislead.
-        raise ValueError("vary_albedo=True is meaningless with uniform=True "
-                         "(uniform collapses the scene to one sample at x_km=0)")
-
-    if uniform:
-        x_samples_km = np.zeros(1)
-        n_samples = 1
-    else:
-        x_samples_km = np.linspace(-SLIT_HALF_KM, SLIT_HALF_KM, n_samples)
-
-    if n_workers is None:
-        n_workers = available_cpus()
-    if mp.current_process().daemon:
-        n_workers = 1
-
-    _G_LOOKUP.update(dict(x_samples_km=x_samples_km, absco=absco, inst=inst, geo=geo,
-                          solar=solar, albedo=list(albedo), h2o_scale_height_km=h2o_scale_height_km,
-                          fm_cls=ForwardModel, solver_cls=SingleScatterSolver,
-                          vary_albedo=bool(vary_albedo),
-                          band_labels=[w.label for w in inst.windows],
-                          fields=fields, surface_fields=surface_fields))
-
-    # one throwaway call to get wn_hires (identical for every sample -- a
-    # property of the Instrument/SpectralWindow, not the atmosphere)
-    _, spec0 = _lookup_sample(0)
-    n_hires = len(spec0)
-    spectra = np.empty((n_samples, n_hires), dtype=float)
-    spectra[0] = spec0
-
-    remaining = range(1, n_samples)
-    if n_workers <= 1:
-        for i in remaining:
-            _, spec = _lookup_sample(i)
-            spectra[i] = spec
-    else:
-        ctx = mp.get_context("fork")
-        with ctx.Pool(n_workers) as pool:
-            for i, spec in pool.imap_unordered(_lookup_sample, remaining, chunksize=4):
-                spectra[i] = spec
-
-    wn_hires = inst.windows[0].wn_hires   # atmosphere-independent; no extra forward call needed
-
-    def radiance(eta):
-        eta = np.atleast_1d(np.asarray(eta, dtype=float))
-        if n_samples == 1:   # uniform=True -- single sample, no interpolation needed
-            return np.broadcast_to(spectra[0], (len(eta), spectra.shape[1]))
-        x_km = eta * SLIT_HALF_KM
-        idx_hi = np.clip(np.searchsorted(x_samples_km, x_km), 1, n_samples - 1)
-        idx_lo = idx_hi - 1
-        x_lo, x_hi = x_samples_km[idx_lo], x_samples_km[idx_hi]
-        w_hi = np.clip((x_km - x_lo) / (x_hi - x_lo), 0.0, 1.0)
-        w_lo = 1.0 - w_hi
-        return w_lo[:, None] * spectra[idx_lo] + w_hi[:, None] * spectra[idx_hi]
-
-    return wn_hires, radiance

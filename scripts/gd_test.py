@@ -110,6 +110,7 @@ from geocarb_gert import (RADIOMETRIC_SPEC_BY_FPA, geocarb_noise_model,
 from geocarb_gert.cross_band import fpas_tag, nearest_row_pairing_multi, real_s_of_row
 from geocarb_gert.gd_polynomials import real_wavenumber_range, xy_to_wavelength_slit
 from geocarb_gert.gd_render import available_cpus, s_max, _diagonal_ils_convolve
+from geocarb_gert.spectrum import simulate_spectrum
 
 import gert
 from gert.forward_model import ForwardModel
@@ -182,34 +183,20 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
         vary_albedo=vary_albedo, barcode_bars=barcode_bars, band_labels=[label],
         constant_albedo=albedo, fields=fields, surface_fields=surface_fields)
 
-    n_wn_hires = len(wide_win.wn_hires)
-    p_aer_val = als.aerosol_phase_hg(als.AEROSOL_G, np.cos(geo.scattering_angle))
-
     def spectrum(atm_p, surf_p=None):
-        atm = als.atmosphere_from_params(**atm_p)
-        fm = ForwardModel(atm, absco, wide_inst, geo, solver=SingleScatterSolver(),
-                          solar_spectrum=solar)
-        px_albedo = surf_p.get("albedo", albedo) if surf_p else albedo
-        # tau_aerosol/height_aerosol (2026-09-08) -- None when neither row
-        # is present, matching every other spectrum-builder's own `.get(
-        # ...)` default (gert.ForwardModel.run treats `tau_aerosol=None`
-        # as "aerosol term omitted") -- zero behavior change by default.
-        # Found and fixed after tracing a joint retrieval's own failure to
-        # converge back to THIS function -- the actual truth-rendering
-        # path for --prior-fields exact (and every standard, non-"dense
-        # truth" run) -- never threading aerosol through at all, a real
-        # truth-vs-model physics mismatch, not a Jacobian precision issue.
-        px_tau_aer = surf_p.get("tau_aerosol") if surf_p else None
-        px_height_aer = surf_p.get("height_aerosol") if surf_p else None
-        res = fm.run(albedo=np.array([px_albedo]), albedo_slope=np.zeros(1),
-                     tau_aerosol=px_tau_aer, height_aerosol=px_height_aer,
-                     aerosol_profile_shape="gaussian",
-                     thickness_aerosol=als.AEROSOL_THICKNESS_PA,
-                     ssa_aerosol=[np.full(n_wn_hires, als.AEROSOL_SSA)],
-                     g_aerosol=[als.AEROSOL_G],
-                     qext_aerosol=[np.full(n_wn_hires, als.AEROSOL_QEXT_NORM)],
-                     P_aerosol=[np.full(n_wn_hires, p_aer_val)])
-        return np.asarray(res.I_hires[0], dtype=float)
+        # 2026-09-09 consolidation (geocarb_gert.spectrum) -- this closure
+        # is the truth-rendering path (--prior-fields exact and every
+        # standard, non-"dense truth" run). It used to be its own THIRD
+        # independent inline ForwardModel/fm.run duplicate that never
+        # threaded aerosol through at all -- a genuine truth-vs-model
+        # physics mismatch (see docs/PROJECT_STATUS.md Sec.11's "Bug 4"),
+        # found by tracing a joint retrieval's own failure to converge
+        # back to exactly this function. Now goes through the same
+        # simulate_spectrum every other spectrum-builder uses, so a future
+        # physics addition can't be silently missed from just this site.
+        sfc = dict(surf_p or {})
+        sfc["albedo"] = sfc.get("albedo", albedo)
+        return simulate_spectrum(atm_p, sfc, absco, wide_inst, geo, solar).I_hires
 
     # Whole-slit anchor grid, uniform `dx_km` spacing -- `uniform`/`barcode`
     # collapse the ATMOSPHERE to one constant value via build_scene_fields

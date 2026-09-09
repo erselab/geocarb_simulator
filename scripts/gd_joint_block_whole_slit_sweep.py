@@ -59,8 +59,7 @@ import gert  # noqa: E402
 from geocarb_gert import along_slit_scene as als, sample_geometries  # noqa: E402
 from geocarb_gert.joint_state import (build_forward_state, gauss_newton_state,  # noqa: E402
                                       state_spec_from_scene, default_pad_for_psf)
-from gert.forward_model import ForwardModel  # noqa: E402
-from gert.rt_solver import SingleScatterSolver  # noqa: E402
+from geocarb_gert.spectrum import simulate_spectrum  # noqa: E402
 from geocarb_gert.gd_polynomials import rows_crossed  # noqa: E402
 from geocarb_gert.gd_render import available_cpus  # noqa: E402
 from geocarb_gert import jacobians as jac  # noqa: E402
@@ -195,27 +194,13 @@ def _make_state_spectrum(absco, wide_inst, geo, solar, albedo):
     the same guarantee `t_offset_k=0.0`'s own default gave.
     """
     def spectrum(params: dict, surface: dict | None = None):
-        atm = als.atmosphere_from_params(**params)
-        fm = ForwardModel(atm, absco, wide_inst, geo, solver=SingleScatterSolver(),
-                          solar_spectrum=solar)
+        # 2026-09-09 consolidation (geocarb_gert.spectrum) -- was its own
+        # independent inline ForwardModel/fm.run duplicate; see that
+        # module's docstring for why that pattern was a real liability.
         px_albedo = surface["albedo"] if surface is not None else albedo
-        px_tau_aer = surface.get("tau_aerosol") if surface is not None else None
-        px_height_aer = surface.get("height_aerosol") if surface is not None else None
-        n_wn = len(wide_inst.windows[0].wn_hires)
-        # P_aerosol (2026-09-08): the Henyey-Greenstein phase function at
-        # this geometry's own real scattering angle -- REQUIRED, not
-        # optional, for I_scatter to be nonzero at all (see `als.
-        # aerosol_phase_hg`'s own docstring on the bug this fixes).
-        p_aer_val = als.aerosol_phase_hg(als.AEROSOL_G, np.cos(geo.scattering_angle))
-        res = fm.run(albedo=np.array([px_albedo]), albedo_slope=np.zeros(1),
-                     tau_aerosol=px_tau_aer, height_aerosol=px_height_aer,
-                     aerosol_profile_shape="gaussian",
-                     thickness_aerosol=als.AEROSOL_THICKNESS_PA,
-                     ssa_aerosol=[np.full(n_wn, als.AEROSOL_SSA)],
-                     g_aerosol=[als.AEROSOL_G],
-                     qext_aerosol=[np.full(n_wn, als.AEROSOL_QEXT_NORM)],
-                     P_aerosol=[np.full(n_wn, p_aer_val)])
-        return np.asarray(res.I_hires[0], dtype=float)
+        sfc = dict(surface or {})
+        sfc["albedo"] = px_albedo
+        return simulate_spectrum(params, sfc, absco, wide_inst, geo, solar).I_hires
     return spectrum
 
 
