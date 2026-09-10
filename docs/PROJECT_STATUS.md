@@ -1364,3 +1364,107 @@ number is a known harness limitation, not a code defect),
 `gamma` wiring fix). `scripts/gd_joint_block_retrieve.py` (the OLD demo),
 `gd_joint_block_whole_slit_merge.py`, `gd_joint_block_whole_slit_plot.py`
 are deleted.
+
+## 14. Aerosol still does not converge -- Sec.12's consolidation did not fix it, and the regression is broader than Sec.11 knew (2026-09-09)
+
+Re-ran Sec.11's own single-window aerosol smoke test (rows 189-197, the
+low-keystone fast subset Sec.10's `t_offset_k` smoke reached ~1e-5 on),
+fully representable (`--prior-fields exact`), now that Sec.12 folded the
+three hand-duplicated spectrum-builders into `geocarb_gert.spectrum` --
+the exact root-cause refactor Sec.11's closing flag called for. It did
+**not** close the gap. Config `--free co2_ppm,p_surface_hpa,tau_aerosol,
+height_aerosol --vary-albedo`: `resid_hires_rms = 0.166` (Sec.11 left it
+at 0.101; slightly worse now), vs the ~1e-5 every representable non-
+aerosol solve reaches. `--no-truth-cache` gives a bit-identical result,
+so the stale-truth-cache confound (Sec.11's own worked-around hazard) is
+ruled out -- the cached truth was fine.
+
+**Bisection (all rows 189-197, fully representable, `--jacobian
+analytic` unless noted):**
+
+| free rows | `resid_hires_rms` | co2 error |
+|---|---|---|
+| `co2_ppm` | 0.557 | **+110 ppm** |
+| `co2_ppm, p_surface_hpa` | 0.532 | +50 ppm, p_surf +60 hPa |
+| `+ tau_aerosol` (free) | 0.166 | +3 ppm |
+| `+ height_aerosol` (free) | 0.166 | +3 ppm (height: zero AVK sensitivity) |
+| `co2_ppm` + aerosol FROZEN at exact truth (`--vary-albedo`) | 0.229 | garbage (+48/-32/+85 ppm) |
+| same, `--jacobian fd` | 0.229 | **bit-identical to analytic** |
+| `co2_ppm`, **aerosol removed from `SURFACE_FIELDS`** | **2.0e-5** | **exactly 0** |
+| `co2_ppm, p_surface_hpa`, aerosol removed | **1.7e-5** | ~0.003 ppm / 0.005 hPa |
+
+**What this establishes:**
+
+1. **The pre-aerosol machinery is perfect.** Delete the two aerosol
+   entries from `along_slit_scene.SURFACE_FIELDS` and co2 / co2+p_surface
+   snap to ~1e-5 with zero state error. Tiling, `--row-min/--row-max`
+   single-window path, pixel-density bin placement, anchor grid,
+   footprint integration, the analytic Jacobians for co2/p_surface --
+   all sound.
+
+2. **The regression is broader than "aerosol won't converge in a joint
+   retrieval" (Sec.11's framing).** Sec.11 added `tau_aerosol`/`height_
+   aerosol` to `SURFACE_FIELDS`, and `gd_per_row_retrieve.py::_band_
+   setup` now *always* renders the truth image with background aerosol
+   (AOD 0.05 everywhere, + a haze feature elsewhere) -- `_aer_fields =
+   surface_fields if surface_fields is not None else als.SURFACE_FIELDS`,
+   and the non-resolution-matched truth path passes `surface_fields=
+   None`. But the retrieval forward only carries aerosol when a surface
+   row exists (needs `--vary-albedo` or an aerosol/`albedo` row in
+   `--free`). So **every representable retrieval that does not explicitly
+   free an aerosol row is now scored against a truth containing 0.05 AOD
+   its own forward model omits** -- co2 absorbs the missing optical depth
+   (+110 ppm). The `_band_setup` comment claiming `surface_fields=None`
+   "reproduces prior behavior exactly" is wrong: `None` falls back to
+   `als.SURFACE_FIELDS`, which now contains the aerosol entries.
+
+3. **Even with aerosol present and frozen at exact truth, the forward
+   model does not reproduce the truth** (row 5: `resid 0.229`, co2
+   garbage). Freeing `tau_aerosol` lets GN move it to 0.07/0.03/0.09
+   (true value 0.05) to partially compensate -- the aerosol contribution
+   has a different *shape*, not just amplitude, between the truth-render
+   path and the retrieval-forward path.
+
+4. **Not the Jacobian.** `--jacobian fd` gives a bit-identical bad result
+   to `--jacobian analytic` (row 6). GN is converging correctly to a
+   wrong minimum; the forward model itself is inconsistent.
+
+5. **Not instrument/grid/plumbing.** `_band_setup` and `band_basics`
+   build byte-identical `wide_win`/`wide_inst` (same `real_wavenumber_
+   range`, `hires_spacing=0.01`, `channels_per_fwhm=3`, ILS fwhm), so
+   `n_wn` and the `_build_aerosol_kwargs` flat arrays match. Both
+   `render_at_anchors` (truth) and `build_forward_state` (retrieval)
+   slice per-anchor *scalars* into the same `simulate_spectrum` ->
+   `_build_aerosol_kwargs` -> `fm.run` path.
+
+**Leading remaining hypothesis** (not yet confirmed): `height_aerosol`
+(Pa) landing in different model layers between the two paths through the
+hard aerosol-layer-boundary threshold Sec.11 bug 3 documented -- the
+retrieval interpolates a G=3 frozen `height_aerosol` row linearly onto
+anchors while the truth evaluates the continuous field, and if that
+threshold sits between the window's true height range and the
+interpolated one, the aerosol layer placement (and thus `tau_abv`, and
+thus the whole `I_direct`/`I_scatter` split) jumps discontinuously. That
+`height_aerosol` shows exactly zero AVK sensitivity in every run
+(rows 4) is consistent: its forward response is a step, so its local
+gradient is genuinely zero almost everywhere.
+
+**Next step**: a direct single-spectrum A/B -- `_band_setup`'s own
+`spectrum` closure vs `_make_state_spectrum`'s, called at one identical
+aerosol state (same `atm_params`, same `tau_aerosol=0.05`, same
+`height_aerosol`) -- and bisect where `I_hires` diverges. This is the
+"aerosol converges in a real joint retrieval" follow-up Sec.11
+explicitly scoped as its own task; it needs interactive iteration on the
+RT internals, not another sweep.
+
+**Immediate mitigation, independent of the root cause**: bump
+`truth_cache.TRUTH_CACHE_VERSION` (Sec.11's bug 4 + Sec.12 both touched
+the deterministic truth-render path without bumping it), and decide
+whether background aerosol should be a *frozen nuisance row always
+present in the forward* (like `p_surface`/`t_offset_k`) rather than one
+that only exists when explicitly freed -- the latter is what makes every
+non-aerosol representable retrieval silently biased today.
+
+**Repro**: `scripts/submit_smoke_fpa2_aerosol.sbatch` (checked in).
+Bisection runs used `--row-min 189 --row-max 197 --prior-fields exact
+--hires-only` with the `--free` sets above.

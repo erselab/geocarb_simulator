@@ -328,11 +328,25 @@ diagnostic run") FPA2 retrieval should look like, and why:
    penalty also shrink at wide windows, or is it genuinely
    location-driven).
 7. **Aerosol (`tau_aerosol`, `height_aerosol`) added as retrievable
-   state -- NOT YET converging in a real joint retrieval, root cause
-   partially found** (`PROJECT_STATUS.md` Sec.11, 2026-09-08) --
+   state -- STILL NOT converging; Sec.12's spectrum-builder
+   consolidation did not fix it, and the regression is broader than
+   Sec.11 knew** (`PROJECT_STATUS.md` Sec.11 + Sec.14, 2026-09-09) --
    infrastructure prerequisite for coupling FPA0 with FPA2/FPA3 (user's
    own stated next goal: "get a column average that is responsive to
-   aerosols and surface pressure errors"). `tau_aerosol`'s analytic
+   aerosols and surface pressure errors"). Sec.14: the pre-aerosol
+   machinery is perfect (co2 / co2+p_surface hit ~1e-5 with zero state
+   error once aerosol is removed from `SURFACE_FIELDS`), but the truth
+   image now *always* carries background AOD 0.05 while the retrieval
+   forward omits aerosol unless a surface row forces it in -- so every
+   representable retrieval that doesn't free an aerosol row is silently
+   co2-biased by ~110 ppm. And even with aerosol frozen at exact truth
+   in the forward, it does not reproduce the truth (a shape difference in
+   the aerosol contribution between the two paths, not amplitude; not the
+   Jacobian -- `--jacobian fd` is bit-identical to analytic). Leading
+   hypothesis: `height_aerosol` crossing the hard aerosol-layer-boundary
+   threshold differently between the interpolated frozen row and the
+   continuous truth field. Next step is a direct single-spectrum A/B
+   bisection of the two `simulate_spectrum` closures. `tau_aerosol`'s analytic
    Jacobian is fully validated in isolation (reuses the existing
    `SURFACE_ROW_JACOBIAN` machinery unchanged). `height_aerosol` needed
    a genuine RT-level finite difference instead and surfaced a real,
