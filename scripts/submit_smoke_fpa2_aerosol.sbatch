@@ -37,7 +37,7 @@ export NUMEXPR_NUM_THREADS=1
 
 "${PYTHON}" scripts/gd_joint_block_retrieve.py \
     --fpa 2 --free co2_ppm,p_surface_hpa,tau_aerosol,height_aerosol \
-    --vary-albedo --prior-fields exact \
+    --vary-albedo --aerosol --prior-fields exact \
     --row-min 189 --row-max 197 \
     --hires-only --jacobian analytic --anchor-workers "${SLURM_CPUS_PER_TASK}" \
     --out scratch_work/smoke_aerosol_fpa2.pkl

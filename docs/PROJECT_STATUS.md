@@ -1457,14 +1457,40 @@ aerosol state (same `atm_params`, same `tau_aerosol=0.05`, same
 explicitly scoped as its own task; it needs interactive iteration on the
 RT internals, not another sweep.
 
-**Immediate mitigation, independent of the root cause**: bump
-`truth_cache.TRUTH_CACHE_VERSION` (Sec.11's bug 4 + Sec.12 both touched
-the deterministic truth-render path without bumping it), and decide
-whether background aerosol should be a *frozen nuisance row always
-present in the forward* (like `p_surface`/`t_offset_k`) rather than one
-that only exists when explicitly freed -- the latter is what makes every
-non-aerosol representable retrieval silently biased today.
+**Mitigation shipped (2026-09-09, same day)** -- aerosol is now OPT-IN,
+so every other config is genuinely aerosol-free again while the
+convergence bug is chased:
 
-**Repro**: `scripts/submit_smoke_fpa2_aerosol.sbatch` (checked in).
-Bisection runs used `--row-min 189 --row-max 197 --prior-fields exact
+- `gd_per_row_retrieve.py::_band_setup`/`_band_setup_cached` take a
+  `with_aerosol` flag (default `False`); the `SURFACE_FIELDS` aerosol
+  pull is gated on it. `with_aerosol` is folded into the truth-cache key.
+- `gd_joint_block_retrieve.py` gains `--aerosol` (implied when
+  `tau_aerosol`/`height_aerosol` is in `--free`). Off: both the truth
+  render and the retrieval forward are aerosol-free, and the aerosol rows
+  are stripped from the retrieval-side surface registry. On: `band_label`
+  is forced so the frozen aerosol rows reach the forward model, matching
+  the truth. Blocked with `--resolution-matched-*` (that truth builder
+  has no aerosol fields).
+- `TRUTH_CACHE_VERSION` 2 -> 3: every v2 entry was rendered WITH
+  background aerosol and must be invalidated; also clears the
+  Sec.11-bug-4 + Sec.12 stale-render hazard (both touched the render path
+  without a bump).
+
+Verified on rows 189-197, `--prior-fields exact`, `--jacobian analytic`:
+
+| config | `resid_hires_rms` | co2 error |
+|---|---|---|
+| `--free co2_ppm` (default, no aerosol) | **2.0e-5** | **0** |
+| `--free co2_ppm,p_surface_hpa` (default) | **1.7e-5** | ~0.003 ppm / 0.005 hPa |
+| `--free co2_ppm --aerosol --vary-albedo` | 0.229 | garbage (bug, now flag-gated) |
+| full aerosol smoke `--aerosol` | 0.166 | +3 ppm (bug, unchanged) |
+
+The still-open question the A/B bisection must answer: with the root
+cause understood, should background aerosol eventually become a *frozen
+nuisance row always present* (like `p_surface`/`t_offset_k`), or stay
+opt-in? Deferred until the forward-model inconsistency is fixed.
+
+**Repro**: `scripts/submit_smoke_fpa2_aerosol.sbatch` (checked in, now
+passes `--aerosol`). Bisection runs used `--row-min 189 --row-max 197
+--prior-fields exact
 --hires-only` with the `--free` sets above.

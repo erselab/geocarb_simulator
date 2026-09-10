@@ -142,7 +142,7 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
                 n_workers, uniform: bool, barcode: bool, barcode_bars: int,
                 noise: bool, noise_seed: int, realistic_barcode: bool = False,
                 vary_albedo: bool = False, fields=None, surface_fields=None,
-                dx_km: float = 0.5):
+                dx_km: float = 0.5, with_aerosol: bool = False):
     """Render one band's raw detector image plus everything needed for all
     three pipelines: `A` (native/rectified source), `wn_hires`/`radiance`
     (undistorted source, and the barcode/lookup truth), the nominal per-band
@@ -209,16 +209,23 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
 
     atm_names = list(fields_resolved.keys())
     atm_params = {n: np.asarray(fields_resolved[n](anchor_x_km), dtype=float) for n in atm_names}
-    # tau_aerosol/height_aerosol (2026-09-08) -- pulled from the RAW
-    # (row-name-keyed, matching als.SURFACE_FIELDS's own convention)
-    # `surface_fields` parameter, NOT `surface_fields_resolved` (band-
-    # label-keyed, `build_scene_fields`'s own albedo-specific reshaping --
-    # aerosol needs no per-band/uniform/barcode resolution, so this
-    # bypasses that layer entirely). `None` (every existing caller that
-    # never asked for aerosol) reproduces prior behavior exactly.
+    # tau_aerosol/height_aerosol -- OPT-IN via `with_aerosol` (2026-09-09,
+    # Sec.14 follow-up). Sec.11 added these to `als.SURFACE_FIELDS` and this
+    # block pulled them in unconditionally whenever `surface_fields is None`
+    # (i.e. every plain realistic/uniform/barcode render), so the truth
+    # image always carried background AOD 0.05 while the retrieval forward
+    # omitted aerosol unless a surface row forced it in -- a silent
+    # truth-vs-model mismatch biasing every non-aerosol representable
+    # retrieval (co2 +110 ppm, PROJECT_STATUS Sec.14). `with_aerosol=False`
+    # (default) is now genuinely aerosol-free, restoring pre-Sec.11
+    # behavior; callers that want background aerosol pass `with_aerosol=
+    # True` (row-name-keyed fns from `surface_fields`, or `als.SURFACE_
+    # FIELDS` when not given -- matching that dict's `fn(x_km, label)`
+    # convention, NOT `surface_fields_resolved`'s band-label-keyed one).
     _aer_fields = surface_fields if surface_fields is not None else als.SURFACE_FIELDS
-    _aer_extra = {n: np.asarray(_aer_fields[n](anchor_x_km, label), dtype=float)
-                 for n in ("tau_aerosol", "height_aerosol") if n in _aer_fields}
+    _aer_extra = ({n: np.asarray(_aer_fields[n](anchor_x_km, label), dtype=float)
+                  for n in ("tau_aerosol", "height_aerosol") if n in _aer_fields}
+                 if with_aerosol else {})
     if surface_fields_resolved is not None:
         surf_params = {"albedo": np.asarray(surface_fields_resolved[label](anchor_x_km), dtype=float),
                        **_aer_extra}
@@ -293,7 +300,8 @@ def _band_setup_cached(fpa: int, atm_center, absco, geo, solar, snr: float, n_lo
                        n_workers, uniform: bool, barcode: bool, barcode_bars: int,
                        noise: bool, noise_seed: int, realistic_barcode: bool = False,
                        vary_albedo: bool = False, use_cache: bool = True,
-                       fields=None, surface_fields=None, resolution_tag: str | None = None):
+                       fields=None, surface_fields=None, resolution_tag: str | None = None,
+                       with_aerosol: bool = False):
     """Cache-aware wrapper around :func:`_band_setup` for the deterministic
     (``noise=False``) case -- "having an observation saved on disk" so a
     config-matrix sweep that only varies retrieval-side knobs (g_ratio,
@@ -306,6 +314,10 @@ def _band_setup_cached(fpa: int, atm_center, absco, geo, solar, snr: float, n_lo
 
     Bypasses the cache entirely when ``noise=True`` (a fresh random
     realization is the whole point there) or ``use_cache=False``.
+
+    ``with_aerosol`` (default ``False``) forwards to :func:`_band_setup`
+    and is folded into the cache key -- an aerosol-free and an
+    aerosol-bearing render of the same scene are distinct cache entries.
 
     ``fields``/``surface_fields`` (2026-08-29) forward straight to
     :func:`_band_setup` -- e.g. :func:`geocarb_gert.along_slit_scene.
@@ -332,7 +344,8 @@ def _band_setup_cached(fpa: int, atm_center, absco, geo, solar, snr: float, n_lo
     if noise or not use_cache:
         return _band_setup(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples,
                            n_workers, uniform, barcode, barcode_bars, noise, noise_seed,
-                           realistic_barcode, vary_albedo, fields, surface_fields)
+                           realistic_barcode, vary_albedo, fields, surface_fields,
+                           with_aerosol=with_aerosol)
 
     from geocarb_gert import truth_cache
     scene = ("barcode" if barcode else "realistic-barcode" if realistic_barcode
@@ -341,6 +354,7 @@ def _band_setup_cached(fpa: int, atm_center, absco, geo, solar, snr: float, n_lo
         fpa=fpa, scene=scene,
         barcode_bars=barcode_bars if scene in ("barcode", "realistic-barcode") else None,
         n_lookup_samples=n_lookup_samples, vary_albedo=vary_albedo,
+        with_aerosol=with_aerosol,
         spatial_psf_fwhm_px=_GEOCARB_CFG.focal_plane.measured.spatial_psf_fwhm_px,
         gd_csv_path=str(_GEOCARB_CFG.focal_plane.measured.gd_csv_path),
     )
@@ -355,7 +369,8 @@ def _band_setup_cached(fpa: int, atm_center, absco, geo, solar, snr: float, n_lo
     print(f"  truth cache MISS ({key}) -- rendering", flush=True)
     band = _band_setup(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples,
                        n_workers, uniform, barcode, barcode_bars, noise, noise_seed,
-                       realistic_barcode, vary_albedo, fields, surface_fields)
+                       realistic_barcode, vary_albedo, fields, surface_fields,
+                       with_aerosol=with_aerosol)
     cacheable = {k: v for k, v in band.items() if k not in ("radiance", "noise_arr")}
     truth_cache.save(key, cacheable)
     return cacheable

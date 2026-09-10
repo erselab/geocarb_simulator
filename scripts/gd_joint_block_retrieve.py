@@ -416,7 +416,16 @@ def _solve_window(row_lo: int, row_hi: int):
     # defaults to als.SURFACE_FIELDS, exact truth) -- "albedo held fixed at
     # truth" becomes an actual, correctly-wired configuration.
     vary_albedo = _SWEEP.get("vary_albedo", False)
-    band_label = GEOCARB_BANDS[FPA][0] if ("albedo" in free or vary_albedo) else None
+    with_aerosol = _SWEEP.get("with_aerosol", False)
+    # `with_aerosol` also forces a surface row to exist (2026-09-09): the
+    # frozen tau_aerosol/height_aerosol rows must be in the StateSpec for
+    # build_forward_state to thread them into the forward model, or the
+    # retrieval would omit the aerosol the truth render now includes --
+    # the exact mismatch Sec.14 traced. surface_fields (from _SWEEP) still
+    # carries the aerosol fns in this case; it is stripped of them when
+    # --aerosol is off.
+    band_label = (GEOCARB_BANDS[FPA][0]
+                  if ("albedo" in free or vary_albedo or with_aerosol) else None)
     corr_length = _SWEEP.get("corr_length")          # None -> per-row physical defaults
     prior_form = _SWEEP.get("prior_form", "exponential")
     spectrum = _make_state_spectrum(absco, wide_inst, geo, solar, albedo)
@@ -1198,6 +1207,17 @@ def main() -> int:
                          "SURFACE_FIELDS docstring). Safe to pass without freeing albedo too "
                          "(tests whether OTHER rows are robust to unmodeled surface "
                          "heterogeneity) -- only the reverse (free, not rendered) is blocked.")
+    ap.add_argument("--aerosol", action="store_true",
+                    help="render the TRUTH scene with background aerosol (als.SURFACE_FIELDS' "
+                         "tau_aerosol/height_aerosol: AOD 0.05 + a haze feature; a mid-BL "
+                         "layer height + synoptic drift) AND carry a matching frozen "
+                         "tau_aerosol/height_aerosol row in the retrieval state. OFF by "
+                         "default (2026-09-09, Sec.14): without this, both the truth render "
+                         "and the forward model are aerosol-free -- the pre-Sec.11 behaviour. "
+                         "Implied automatically when 'tau_aerosol' or 'height_aerosol' is in "
+                         "--free. NOTE: joint aerosol retrieval does not yet converge "
+                         "(PROJECT_STATUS Sec.14) -- this flag exists to reproduce that, and "
+                         "to keep every OTHER config genuinely aerosol-free.")
     ap.add_argument("--surface-positions", type=str, default="shared",
                     choices=["shared", "anchor"],
                     help="positions the surface (albedo) row lives at, independent of "
@@ -1333,6 +1353,10 @@ def main() -> int:
     if args.sub_bin_anomaly != "none" and "albedo" not in free_check:
         ap.error("--sub-bin-anomaly only has an effect on a free 'albedo' row -- add "
                  "'albedo' to --free, or drop --sub-bin-anomaly.")
+    with_aerosol = (args.aerosol or "tau_aerosol" in free_check
+                    or "height_aerosol" in free_check)
+    if with_aerosol and not args.aerosol:
+        print("NOTE: --aerosol implied (an aerosol row is in --free).", flush=True)
     if args.resolution_matched_anchor_density is not None and args.anchor_density != args.resolution_matched_anchor_density:
         print(f"WARNING: --resolution-matched-anchor-density "
              f"{args.resolution_matched_anchor_density} != --anchor-density "
@@ -1348,6 +1372,11 @@ def main() -> int:
     fpa = fpa_list[0]
     resolution_matched_active = (args.resolution_matched_anchor_density is not None
                                  or args.resolution_matched_g_ratio_bins is not None)
+    if with_aerosol and resolution_matched_active:
+        ap.error("--aerosol is not supported with --resolution-matched-* -- the "
+                 "resolution-matched truth builder (gd_build_resolution_matched_truth.py) "
+                 "has no aerosol fields on its band-limited grid. Run the plain realistic "
+                 "scene, or add aerosol to that builder first.")
     n_lookup_samples = (20000 if resolution_matched_active else
                         args.n_lookup_samples if args.n_lookup_samples is not None
                         else 5600 if args.prior_fields != "exact" else 400)
@@ -1424,7 +1453,8 @@ def main() -> int:
         band = gpr._band_setup_cached(fpa, atm_center, absco, geo, solar, snr, n_lookup_samples, None,
                                       args.uniform, args.barcode, args.barcode_bars, False, 0,
                                       args.realistic_barcode, vary_albedo=args.vary_albedo,
-                                      use_cache=not args.no_truth_cache)
+                                      use_cache=not args.no_truth_cache,
+                                      with_aerosol=with_aerosol)
     wide_win, wide_inst, albedo = band_basics(fpa, atm_center, absco, geo, solar)
     print("done.\n", flush=True)
 
@@ -1472,6 +1502,14 @@ def main() -> int:
         prior_fields_resolved = als.PRIOR_FIELD_SETS[args.prior_fields]
         surface_fields_resolved = als.SURFACE_PRIOR_FIELD_SETS.get(
             args.prior_fields, als.SURFACE_FIELDS)
+    if not with_aerosol:
+        # Drop the aerosol rows from the retrieval-side surface registry too,
+        # so state_spec_from_scene never adds a tau_aerosol/height_aerosol
+        # row -- keeping the retrieval forward aerosol-free to match the
+        # (now also aerosol-free) truth render. With --aerosol they stay,
+        # frozen at their prior/exact value unless also in --free.
+        surface_fields_resolved = {k: v for k, v in surface_fields_resolved.items()
+                                   if k not in ("tau_aerosol", "height_aerosol")}
 
     _SWEEP.update(dict(band=band, absco=absco, wide_inst=wide_inst, geo=geo, solar=solar,
                        albedo=albedo, wn_hires=band["wn_hires"], ils=band["ils"], fpa=fpa,
@@ -1491,7 +1529,7 @@ def main() -> int:
                        frozen_atmosphere_positions_mode=args.frozen_atmosphere_positions,
                        anchor_workers=args.anchor_workers,
                        retrieval_psf_fwhm_px=args.retrieval_psf_fwhm_px,
-                       bin_scheme=args.bin_scheme))
+                       bin_scheme=args.bin_scheme, with_aerosol=with_aerosol))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
     if args.anchor_workers > 1 and n_workers > 1 and args.task_id is None:
@@ -1581,7 +1619,8 @@ def main() -> int:
               "flat_sy_inv": args.flat_sy_inv, "overlap": args.overlap,
               "vary_albedo": args.vary_albedo, "sub_bin_anomaly": args.sub_bin_anomaly,
               "anchor_workers": args.anchor_workers,
-              "retrieval_psf_fwhm_px": args.retrieval_psf_fwhm_px}
+              "retrieval_psf_fwhm_px": args.retrieval_psf_fwhm_px,
+              "with_aerosol": with_aerosol}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
         out_dir = REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{fpa}{suffix}_parts"

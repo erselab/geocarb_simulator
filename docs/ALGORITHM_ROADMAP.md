@@ -346,7 +346,13 @@ diagnostic run") FPA2 retrieval should look like, and why:
    hypothesis: `height_aerosol` crossing the hard aerosol-layer-boundary
    threshold differently between the interpolated frozen row and the
    continuous truth field. Next step is a direct single-spectrum A/B
-   bisection of the two `simulate_spectrum` closures. `tau_aerosol`'s analytic
+   bisection of the two `simulate_spectrum` closures. **Mitigation
+   shipped same day**: aerosol is now opt-in (`--aerosol` on
+   `gd_joint_block_retrieve.py`, `with_aerosol` on `_band_setup`;
+   `TRUTH_CACHE_VERSION` 2->3). Default runs are genuinely aerosol-free
+   again -- co2 / co2+p_surface back to ~1e-5 with zero state error, so
+   the rest of the roadmap (correlation-length study, bias correction,
+   multi-band) is unblocked. `tau_aerosol`'s analytic
    Jacobian is fully validated in isolation (reuses the existing
    `SURFACE_ROW_JACOBIAN` machinery unchanged). `height_aerosol` needed
    a genuine RT-level finite difference instead and surfaced a real,

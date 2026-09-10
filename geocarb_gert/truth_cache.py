@@ -53,10 +53,16 @@ from .paths import REPO_ROOT
 #: along_slit_scene.build_lookup_radiance, the GD polynomial CSV/loader,
 #: focalplane.py's spatial PSF convolution, ...) -- this is the only guard
 #: against silently serving a stale cached render after such a change.
-TRUTH_CACHE_VERSION = 2  # 2026-08-28: ALBEDO_CORR_KM 10km -> 0.5km, ALBEDO_COV's own
+TRUTH_CACHE_VERSION = 3  # 2026-09-09: (a) Sec.11 bug 4 + Sec.12 both changed the
+                         # deterministic truth-render path (aerosol threading, the
+                         # simulate_spectrum consolidation) without bumping this;
+                         # (b) _band_setup's aerosol pull is now opt-in via
+                         # `with_aerosol` (Sec.14 follow-up) -- the default render
+                         # is aerosol-free again, so every version-2 entry (all
+                         # rendered WITH background aerosol) must be invalidated.
+                         # 2026-08-28 (v2): ALBEDO_CORR_KM 10km -> 0.5km, ALBEDO_COV's
                          # renormalization now grid-dependent (along_slit_scene.
-                         # _correlated_field) -- invalidates every truth render with
-                         # vary_albedo=True cached under version 1.
+                         # _correlated_field).
 
 _CACHE_ROOT_ENV = "GEOCARB_TRUTH_CACHE_ROOT"
 
