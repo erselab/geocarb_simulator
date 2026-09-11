@@ -1590,24 +1590,55 @@ def main() -> int:
              f"back to 1 there). Use --task-id/--n-tasks instead to distribute windows as "
              f"separate top-level processes if you want both levels active at once.",
              flush=True)
-    print(f"solving with {n_workers} workers...", flush=True)
+
+    # 2026-09-11 (user: "find the cost driver" for the impprior_ws c3/c4/c5
+    # SLURM-array TIMEOUTs): a single-tile task (the normal --task-id case
+    # -- every array task owns exactly one window) still went through
+    # ctx.Pool(n_workers) below -- Pool() unconditionally pre-forks
+    # n_workers DAEMON processes even with only one job to hand out, and
+    # _worker/_solve_window then ran inside one of them.
+    # anchor_spectra_and_derivs's and linearize's own nested-pool guards
+    # (`if mp.current_process().daemon: n_workers = 1`) silently forced
+    # --anchor-workers down to 1 as a result -- confirmed directly
+    # (mp.current_process().daemon printed True from inside _worker in
+    # this exact configuration). That serialized every anchor RT call and
+    # every Jacobian L()-projection column: measured on the rows 346-362
+    # c4 window that was timing out at 12h, one linearize() call took
+    # 1736s single-threaded vs 16.6s for one forward(); with max_iter=15
+    # outer GN iterations each needing one linearize(), that alone
+    # approaches the wall-clock limit before counting LM retries or a
+    # genuinely hard-to-converge window. The warning above never caught
+    # this because it only fires when `args.task_id is None`, exactly
+    # backwards from where the array sweep lives. Skipping the outer Pool
+    # entirely for the single-tile case lets anchor_workers actually
+    # parallelize the one window a --task-id task owns.
+    single_tile = len(tiles) == 1 and args.task_id is not None
+    if single_tile:
+        print(f"solving 1 window in-process (--anchor-workers {args.anchor_workers} "
+             f"active -- single-tile task, no outer Pool)...", flush=True)
+    else:
+        print(f"solving with {n_workers} workers...", flush=True)
 
     t0 = time.time()
     results = {}
-    ctx = mp.get_context("fork")
-    with ctx.Pool(n_workers) as pool:
-        n_done = 0
-        for r in pool.imap_unordered(_worker, tiles, chunksize=1):
-            key = (r["row_lo"], r["row_hi"])
-            results[key] = r
-            n_done += 1
-            status = "ERROR: " + r["error"] if "error" in r else \
-                     (f"G={r['G']} " + (f"t_coarse={r['t_coarse']:.0f}s "
-                                        if "t_coarse" in r else "")
-                      + f"t_hires={r['t_hires']:.0f}s")
-            elapsed = time.time() - t0
-            print(f"  {n_done}/{len(tiles)} rows {key[0]}-{key[1]}: {status} "
-                 f"({elapsed:.0f}s elapsed)", flush=True)
+    if single_tile:
+        tile_results = [_worker(tiles[0])]
+    else:
+        ctx = mp.get_context("fork")
+        with ctx.Pool(n_workers) as pool:
+            tile_results = list(pool.imap_unordered(_worker, tiles, chunksize=1))
+    n_done = 0
+    for r in tile_results:
+        key = (r["row_lo"], r["row_hi"])
+        results[key] = r
+        n_done += 1
+        status = "ERROR: " + r["error"] if "error" in r else \
+                 (f"G={r['G']} " + (f"t_coarse={r['t_coarse']:.0f}s "
+                                    if "t_coarse" in r else "")
+                  + f"t_hires={r['t_hires']:.0f}s")
+        elapsed = time.time() - t0
+        print(f"  {n_done}/{len(tiles)} rows {key[0]}-{key[1]}: {status} "
+             f"({elapsed:.0f}s elapsed)", flush=True)
 
     n_ok = sum(1 for r in results.values() if "error" not in r)
     print(f"\nall done ({time.time()-t0:.0f}s): {n_ok}/{len(tiles)} windows solved successfully", flush=True)

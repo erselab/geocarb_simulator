@@ -1652,3 +1652,63 @@ ceiling, not a production estimate.
 `submit_rmtruth_ad16.sbatch` + `submit_smoke_rmtruth_ad16{,_anchorpos}.sbatch`,
 `submit_smoke_representable_final.sbatch` (all checked in,
 `scratch_work/smoke_*` / `scratch_work/aero_confound_*` outputs).
+
+## 16. `impprior_ws` whole-slit sweep: c3/c4/c5 TIMEOUTs were a daemon-pool bug, not non-convergence (2026-09-11)
+
+The whole-slit imperfect-prior sweep (`submit_impprior_ws.sbatch`, 58
+windows x configs c1-c5, more free params per config -- see that
+script's header) started hitting 12h TIMEOUTs (co-occurring with OOM
+kills) on c3/c4/c5's wider windows. User: "I think the timeout is due
+to the window sizes" -- true in direction but not the actual mechanism.
+
+**Timing breakdown, isolated:** the completed-window logs (`rows
+X-Y: G=Z t_hires=Ws`) show cost scaling superlinearly with width even
+for c1/c2 (`t ~ G^1.3-1.5` log-log fit) and getting much worse with
+more free rows (c1 mean 100s/bin, c2 154s/bin, c3 349s/bin, c4 288s/bin,
+c5's one sample 1428s/bin) -- consistent with "bigger/more-parameter
+windows cost more," but extrapolating c4's own narrow-window trend to
+the widths that timed out (15-23 rows) only predicts ~2.5-4h, not 12h.
+
+**Root cause, found by reproducing the exact stuck window** (rows
+346-362, c4, `--free co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,
+albedo`) live with `gauss_newton_state`'s `verbose` forced on and timing
+wrapped around `forward()`/`jac.linearize()`: one `forward()` call took
+16.6s, one `jac.linearize()` (the analytic GN Jacobian) took **1736.4s
+-- ~100x**. `max_iter=15` outer GN iterations each need one
+`linearize()`, so that alone approaches the 12h budget before counting
+LM retries.
+
+Why `linearize()` was ~100x `forward()`: confirmed directly (printed
+`mp.current_process().daemon` from inside `_worker`) that **every
+single-tile `--task-id` array task was running its one window inside a
+daemon multiprocessing.Pool worker**. `main()` unconditionally wraps
+`_worker` in `ctx.Pool(n_workers)` (`n_workers = args.n_workers or
+available_cpus()`, i.e. 24 here) even when there is only one tile to
+hand out -- `Pool()` pre-forks `n_workers` daemon processes regardless.
+`anchor_spectra_and_derivs`'s and `linearize`'s own nested-pool guards
+(`if mp.current_process().daemon: n_workers = 1`) then silently forced
+**every** anchor-level RT call and every Jacobian L()-projection column
+(one per free state scalar, `spec.n_free` of them) to run sequentially
+in that one process, regardless of `--anchor-workers`. The existing
+warning for this exact collision (`--anchor-workers has no effect
+here`) only fires `if args.task_id is None` -- exactly backwards from
+where the sweep lives, so it never printed for the jobs that were
+actually affected.
+
+**Fix** (`scripts/gd_joint_block_retrieve.py`, `main()`): when a task
+owns exactly one tile (`len(tiles) == 1 and args.task_id is not None`),
+skip the outer `Pool` and call `_worker` directly in-process, so it is
+never a daemon and `--anchor-workers` can actually parallelize the one
+window the task owns.
+
+**Validated** by rerunning the exact stuck window (rows 346-362, c4,
+`--anchor-workers 24`) against the fixed code: completed in **1008s**
+(previously: no result -- 12h TIMEOUT + OOM kill every attempt), a
+genuine converged solve (`resid_hires_rms=9.4e-4`,
+`chi2_hires_reduced=4.7e-3`, `G_eff=385`), not a stub.
+
+**Follow-up**: resubmit the outstanding c3/c4/c5 `impprior_ws` array
+tasks (everything that TIMEOUT'd or never got past `JobArrayTaskLimit`)
+now that they should finish in minutes rather than hours; audit
+`submit_impprior_ws_prerender_aero.sbatch` and other single-shot
+callers of `gd_joint_block_retrieve.py` for the same pattern.
