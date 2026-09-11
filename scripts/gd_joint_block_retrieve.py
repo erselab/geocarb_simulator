@@ -535,6 +535,17 @@ def _solve_window(row_lo: int, row_hi: int):
     out["anchor_etas"] = anchor_etas
     out["G_eff"] = len(anchor_rows)
     out["resid_hires_rms"] = float(np.sqrt(np.mean(resid_h ** 2)))
+    # chi2 in the retrieval's own noise-weighted metric (Sy_inv_diag is the
+    # per-pixel 1/sigma^2 from the real GeoCarb noise model, computed above).
+    # chi2_reduced normalises by DOF = n_data - n_free; ~1 is a good fit,
+    # >>1 means the forward model can't reproduce the data at the noise
+    # level (an unrepresentable-scene or model-error signature), <<1 means
+    # over-fitting / an over-generous noise model.
+    chi2_h = float(np.sum((resid_h ** 2) * Sy_inv_diag))
+    out["chi2_hires"] = chi2_h
+    out["n_data_hires"] = int(resid_h.size)
+    out["n_free_hires"] = int(np.asarray(x_h).size)
+    out["chi2_hires_reduced"] = chi2_h / max(resid_h.size - np.asarray(x_h).size, 1)
     out["t_hires"] = time.time() - t0
 
     return out
@@ -753,6 +764,7 @@ def plot_sweep(in_path: Path, truth: str = "raw", truth_anchor_density: int = 4,
     # VALUES AT THOSE SAME BIN CENTERS -- no interpolation anywhere.
     per_row = {name: [] for name in row_names}  # each entry: one window's own dict
     resid_c_all, resid_h_all, width_all, G_all, row_mid_all, boundary_rows = [], [], [], [], [], []
+    chi2r_h_all = []  # per-window reduced chi2 (hi-res), when present in the snapshot
 
     for w in windows:
         row_lo, row_hi = w["row_lo"], w["row_hi"]
@@ -773,6 +785,7 @@ def plot_sweep(in_path: Path, truth: str = "raw", truth_anchor_density: int = 4,
         if has_coarse:
             resid_c_all.append(w["resid_coarse_rms"])
         resid_h_all.append(w["resid_hires_rms"])
+        chi2r_h_all.append(w.get("chi2_hires_reduced", np.nan))
         row_mid_all.append(0.5 * (row_lo + row_hi))
         boundary_rows.append(row_lo - 0.5)
     boundary_rows.append(windows[-1]["row_hi"] + 0.5)
@@ -822,9 +835,15 @@ def plot_sweep(in_path: Path, truth: str = "raw", truth_anchor_density: int = 4,
         "xtick.color": "#3a3a3a", "ytick.color": "#3a3a3a", "axes.linewidth": 0.8})
 
     n_rows = len(row_names)
-    n_extra = 2 + (1 if snr_row is not None else 0)
-    height_ratios = [2.2, 1.6] * n_rows + [1.0, 1.0] + ([1.0] if snr_row is not None else [])
-    fig, axes = plt.subplots(2 * n_rows + n_extra, 1, figsize=(13, 3.6 * n_rows + 4 + (1.6 if snr_row is not None else 0)),
+    have_chi2 = bool(np.isfinite(np.asarray(chi2r_h_all, dtype=float)).any())
+    n_extra = 2 + (1 if have_chi2 else 0) + (1 if snr_row is not None else 0)
+    height_ratios = ([2.2, 1.6] * n_rows + [1.0]
+                     + ([1.0] if have_chi2 else [])
+                     + [1.0]
+                     + ([1.0] if snr_row is not None else []))
+    fig, axes = plt.subplots(2 * n_rows + n_extra, 1,
+                             figsize=(13, 3.6 * n_rows + 4 + (1.4 if have_chi2 else 0)
+                                      + (1.6 if snr_row is not None else 0)),
                              sharex=True, gridspec_kw={"height_ratios": height_ratios})
 
     def _boundaries(ax):
@@ -884,7 +903,8 @@ def plot_sweep(in_path: Path, truth: str = "raw", truth_anchor_density: int = 4,
         ax.set_title(f"{name} bias, per window (dashed grey = window boundary)", fontsize=10)
         ax.legend(fontsize=8, loc="upper right")
 
-    ax = axes[2 * n_rows]
+    _pi = 2 * n_rows
+    ax = axes[_pi]
     _boundaries(ax)
     if has_coarse:
         ax.step(row_mid_all, resid_c_all, where="mid", color="tab:orange", lw=1.2, label="coarse")
@@ -894,7 +914,21 @@ def plot_sweep(in_path: Path, truth: str = "raw", truth_anchor_density: int = 4,
     ax.legend(fontsize=8, loc="upper right")
     ax.set_title("per-window residual RMS (fit quality)", fontsize=10.5)
 
-    ax = axes[2 * n_rows + 1]
+    if have_chi2:
+        _pi += 1
+        ax = axes[_pi]
+        _boundaries(ax)
+        ax.axhline(1.0, color="black", lw=0.6, ls=":")
+        ax.step(row_mid_all, chi2r_h_all, where="mid", color="tab:red", lw=1.2)
+        ax.set_yscale("log")
+        ax.set_ylabel("per-window\nreduced $\\chi^2$")
+        _c = np.asarray(chi2r_h_all, dtype=float)
+        _c = _c[np.isfinite(_c)]
+        ax.set_title(f"per-window reduced $\\chi^2$ (=1 dotted; noise-weighted fit quality, "
+                     f"DOF = n_data - n_free)   median={np.median(_c):.3g}", fontsize=10.5)
+
+    _pi += 1
+    ax = axes[_pi]
     _boundaries(ax)
     ax2 = ax.twinx()
     ax.step(row_mid_all, width_all, where="mid", color="0.4", lw=1.2, label="window width [rows]")
@@ -910,7 +944,8 @@ def plot_sweep(in_path: Path, truth: str = "raw", truth_anchor_density: int = 4,
     ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc="upper left")
 
     if snr_row is not None:
-        ax = axes[2 * n_rows + 2]
+        _pi += 1
+        ax = axes[_pi]
         _boundaries(ax)
         ax.step(snr_rows_axis, snr_row, where="mid", color="tab:green", lw=1.2)
         ax.set_yscale("log")
@@ -1372,6 +1407,21 @@ def main() -> int:
     fpa = fpa_list[0]
     resolution_matched_active = (args.resolution_matched_anchor_density is not None
                                  or args.resolution_matched_g_ratio_bins is not None)
+    if resolution_matched_active and not args.vary_albedo:
+        # The resolution-matched truth is ALWAYS rendered with a spatially
+        # varying albedo (`vary_albedo=True` is hardcoded at the
+        # `_band_setup_cached` call below -- `resolution_matched_albedo_fn`
+        # only makes sense as a varying field). Without `--vary-albedo` the
+        # retrieval would carry NO surface row and fall back to a single
+        # constant scalar for the whole window -- a ~0.37 forward residual
+        # against the varying truth, with co2 driven tens of ppm off
+        # (2026-09-10, docs/PROJECT_STATUS.md Sec.15). Force it on rather
+        # than error: a resolution-matched run with a constant-albedo
+        # retrieval is never what the caller wants.
+        print("NOTE: --vary-albedo forced on (--resolution-matched-* always renders a "
+              "varying-albedo truth; a constant-albedo retrieval cannot match it).",
+              flush=True)
+        args.vary_albedo = True
     if with_aerosol and resolution_matched_active:
         ap.error("--aerosol is not supported with --resolution-matched-* -- the "
                  "resolution-matched truth builder (gd_build_resolution_matched_truth.py) "
@@ -1591,6 +1641,20 @@ def main() -> int:
         suffix += "_valb"
     if args.sub_bin_anomaly != "none":
         suffix += f"_anomaly-{args.sub_bin_anomaly}"
+    # 2026-09-10: without these two, a run with frozen rows on the anchor
+    # grid silently shares a _parts directory with the (materially
+    # different) shared-bin-grid run of the same --free set -- the same
+    # naming-collision class flagged in docs/PROJECT_STATUS.md Sec.1/9.
+    if args.surface_positions != "shared":
+        suffix += f"_spos-{args.surface_positions}"
+    if args.frozen_atmosphere_positions != "shared":
+        suffix += f"_fapos-{args.frozen_atmosphere_positions}"
+    if args.resolution_matched_anchor_density is not None:
+        suffix += f"_rmad{args.resolution_matched_anchor_density}"
+    if args.resolution_matched_g_ratio_bins is not None:
+        suffix += f"_rmgr{args.resolution_matched_g_ratio_bins:g}"
+    if with_aerosol:
+        suffix += "_aero"
     if args.retrieval_psf_fwhm_px != 1.5:
         # 2026-09-06 (defocus experiments): without this, two configs that
         # differ ONLY in --retrieval-psf-fwhm-px (e.g. matched vs mismatched

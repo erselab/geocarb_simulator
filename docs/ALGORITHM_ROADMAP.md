@@ -327,13 +327,34 @@ diagnostic run") FPA2 retrieval should look like, and why:
    matched-vs-mismatched comparison (does the keystone-edge mismatch
    penalty also shrink at wide windows, or is it genuinely
    location-driven).
-7. **Aerosol (`tau_aerosol`, `height_aerosol`) added as retrievable
-   state -- STILL NOT converging; Sec.12's spectrum-builder
-   consolidation did not fix it, and the regression is broader than
-   Sec.11 knew** (`PROJECT_STATUS.md` Sec.11 + Sec.14, 2026-09-09) --
-   infrastructure prerequisite for coupling FPA0 with FPA2/FPA3 (user's
-   own stated next goal: "get a column average that is responsive to
-   aerosols and surface pressure errors"). Sec.14: the pre-aerosol
+7. **RESOLVED (`PROJECT_STATUS.md` Sec.15, 2026-09-10): aerosol
+   (`tau_aerosol`, `height_aerosol`) converges cleanly in a
+   representable-truth retrieval -- Sec.11/14's "still not converging"
+   was a frozen-albedo representability confound, not an aerosol bug.**
+   Every aerosol test ran with `--vary-albedo` (forced) and albedo
+   frozen on the G=3 bin grid, against a dense truth carrying
+   `als._albedo_fine_field` (10%, 0.5 km-correlated) -- a ~0.2-0.27
+   unrepresentable residual floor that GN tried to fit by driving
+   `tau_aerosol`->0.32, `co2_ppm` off 47-110 ppm, `albedo`->0.96. With
+   the scene made representable (rm-ad16 truth + every frozen row on the
+   ad16 anchor grid, OR continuous truth + `--sub-bin-anomaly truth` at
+   ad16), free `tau_aerosol` retrieves to 0.054 (truth 0.05), co2 error
+   +0.13 ppm, resid at the 3-4e-3 grid-match floor. Sec.14's leading
+   hypothesis (`height_aerosol` layer-threshold mismatch between truth
+   and forward paths) was wrong; `geocarb_gert.spectrum.simulate_
+   spectrum` / `_build_aerosol_kwargs` / `P_aerosol` are fine. Two real
+   `gd_joint_block_retrieve.py` bugs found and (1 of 2) fixed along the
+   way: `--resolution-matched-*` rendered a varying-albedo truth without
+   forcing `args.vary_albedo` (now forced); `--resolution-matched-g-
+   ratio-bins` at coarse G is not actually representable for a single
+   window (whole-slit bin-center union interleaves neighbour-window
+   knots -- documented, use anchor-density matching instead). Open
+   follow-ups: whether background aerosol becomes an always-present
+   frozen nuisance row (deferred in Sec.14, now unblocked); aerosol
+   against a genuinely dense (non-representable) truth with a proper
+   sub-bin albedo treatment; the FPA0<->FPA2/FPA3 coupling this
+   unblocks. Historical detail from when this was still open:
+   Sec.11 + Sec.14, 2026-09-09. Sec.14: the pre-aerosol
    machinery is perfect (co2 / co2+p_surface hit ~1e-5 with zero state
    error once aerosol is removed from `SURFACE_FIELDS`), but the truth
    image now *always* carries background AOD 0.05 while the retrieval

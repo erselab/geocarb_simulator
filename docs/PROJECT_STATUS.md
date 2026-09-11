@@ -1494,3 +1494,161 @@ opt-in? Deferred until the forward-model inconsistency is fixed.
 passes `--aerosol`). Bisection runs used `--row-min 189 --row-max 197
 --prior-fields exact
 --hires-only` with the `--free` sets above.
+
+## 15. Aerosol non-convergence RESOLVED: it was a frozen-albedo representability confound, not an aerosol bug (2026-09-10)
+
+User asked two things this session: (a) confirm the Sec.14 `--aerosol`
+opt-in mitigation reproduces the pre-aerosol baseline when off, and (b)
+rerun the imperfect-prior "free" experiments with the truth matched to
+the retrieval's resolution. Chasing (b) surfaced the actual cause of
+Sec.14's "aerosol still does not converge."
+
+### (a) Aerosol-off reproduces the pre-aerosol baseline exactly
+
+`submit_smoke_aerosol_onoff_impprior.sbatch` (job 1885853), rows
+189-197, `--prior-fields exact`, HEAD `8c0c91d`:
+
+| config | resid_hires_rms | co2 error | Sec.14 reference |
+|---|---|---|---|
+| `--free co2_ppm` (aerosol off) | 2.00e-5 | exactly 0 | 2.0e-5 / 0 ✓ |
+| `--free co2_ppm,p_surface_hpa` (off) | 1.70e-5 | rms 0.004 ppm / 0.005 hPa | 1.7e-5 ✓ |
+| `--aerosol` on (repro) | 0.166 | +0.36 ppm, tau 0.05->0.066 | 0.166 ✓ (still bad) |
+
+Clean. The `--aerosol` opt-in is a correct mitigation.
+
+### (b) The Sec.14 aerosol bisection was confounded by --vary-albedo
+
+Every "aerosol broken" cell in Sec.14 ran `--vary-albedo` (forced -- an
+aerosol run needs a surface row) with albedo FROZEN on the window's G=3
+bin grid, scored against a dense truth whose albedo carries full
+fine-scale texture. Every "clean" (~1e-5) cell ran CONSTANT albedo.
+So the two groups differ in the albedo grid, not just in aerosol.
+
+Diagnostic `submit_aerosol_confound_diag.sbatch` (job 1885933),
+rows 189-197, `--prior-fields exact`:
+
+| config | aerosol | resid_hires_rms |
+|---|---|---|
+| D1 `--vary-albedo`, frozen 3-bin albedo | none | 0.265 |
+| D2 D1 + `--surface-positions anchor` | none | 0.309 (no better) |
+| D3 aerosol frozen-exact + anchor albedo | yes | 0.267 |
+| D4 aerosol frozen-exact, shared albedo (= Sec.14 D4) | yes | 0.229 |
+| D5 free `tau_aerosol` + anchor albedo | yes | 0.078 |
+
+`--vary-albedo` with a frozen albedo row gives resid ~0.27 with NO
+aerosol at all. Adding aerosol changes nothing.
+
+**Field probe** (window 189-197, 26.6 km span): `als._albedo_fine_field`
+is `ALBEDO_COV=0.10`, `ALBEDO_CORR_KM=0.5` -- a 10%, 0.5 km-correlated
+texture. Albedo swings 0.355->0.574 across the window; the 3 bin centers
+all land near 0.47-0.48; `|dense - 3-knot interp|` rms = 0.047 (~10% of
+the value). No retrieval grid short of ~0.5 km resolves it.
+
+### The mechanism: coarse forward-model anchor grid cannot integrate a sub-grid albedo field, and neither pinning nor an oracle helps below its own spacing
+
+Direct probes (`_make_state_spectrum` / `build_forward_state` /
+`render_at_anchors` at the exact prior, aerosol correctly stripped):
+
+| anchor density | plain frozen 3-knot albedo | + `--sub-bin-anomaly truth` |
+|---|---|---|
+| ad1 (~3 km) | resid(x0) 0.359 | 0.384 (WORSE -- aliasing) |
+| ad16 (~0.19 km) | 0.359 | **0.0041** |
+
+- `interp_to` with the anomaly oracle reconstructs the true albedo at
+  rms EXACTLY 0.0 at every grid -- the mechanism is not buggy. The
+  analytic Jacobian correctly treats the anomaly as an additive
+  constant in state space.
+- But the oracle only places correct values AT the anchor points; the
+  footprint quadrature BETWEEN them is still piecewise-constant at the
+  anchor spacing. When albedo structure (0.5 km) is finer than the
+  anchor spacing (3 km at ad1), the oracle cannot help and slightly
+  hurts (sampling a 0.5 km field at 3 km aliases). At ad16 (0.19 km <
+  0.5 km) it works: resid collapses to the grid-match floor.
+- Plain frozen 3-knot albedo has a ~0.36 residual floor at ANY anchor
+  density -- refining the forward-model grid alone does nothing.
+
+### Two real bugs in gd_joint_block_retrieve.py
+
+1. **`--resolution-matched-*` renders a varying-albedo truth but did not
+   force `args.vary_albedo`.** `vary_albedo=True` is hardcoded at the
+   rm-truth `_band_setup_cached` call, but `_SWEEP["vary_albedo"] =
+   args.vary_albedo` (the CLI flag, unforced). Without an explicit
+   `--vary-albedo`, `band_label` stays `None` -> the retrieval carries NO
+   albedo row and uses one constant scalar for the whole window ->
+   ~0.37 residual vs the varying truth, co2 driven to ~400 ppm. The
+   flag's own `--help` claims "Implies --vary-albedo"; it only implied it
+   for the truth build. **Every A1/A2/C1 resolution-matched run this
+   session was invalid for this reason** until caught (only C2, which
+   passed `--vary-albedo` explicitly, was valid). **Fixed 2026-09-10**:
+   `resolution_matched_active and not args.vary_albedo` now forces it on
+   with a NOTE.
+2. **`--resolution-matched-g-ratio-bins` at coarse G is not actually
+   representable for a single window.** The whole-slit bin-center union
+   (`whole_slit_bin_centers`, 341 points at g_ratio=3) interleaves
+   OTHER windows' bin centers into this window's eta span (keystone --
+   row-disjoint windows are not eta-disjoint), and a G=3 window state
+   cannot reproduce those interleaved knots. That mode was only ever
+   validated at g_ratio=1 (archived Sec.11). `--resolution-matched-
+   anchor-density` has the same issue but far milder (anchors much
+   denser than bins). Not fixed -- documented here; use anchor-density
+   matching, or `--surface-positions anchor` + a per-window truth.
+
+### Configured correctly, everything converges -- including aerosol
+
+`submit_smoke_representable_final.sbatch` (job 1886xxx), rows 189-197,
+`--anchor-density 16 --vary-albedo`.
+
+**Part R** -- rm-ad16 truth, every frozen row on the ad16 anchor grid
+(`--surface-positions anchor --frozen-atmosphere-positions anchor`):
+
+| config | resid | co2 error (true 416.7) | p_surface error |
+|---|---|---|---|
+| exact prior, co2 free | 4.8e-3 | +0.01 ppm | -- |
+| exact prior, co2+p_surface | 4.8e-3 | +0.03 ppm | +0.02 hPa |
+| wrong-level prior (co2 +1%/p_surf -1%), co2+p_surface | 2.5e-2 | prior +4.2 -> **-0.5 ppm**; p_surf prior -10 -> **+2 hPa** | |
+
+4.8e-3 is the grid-match floor (co2 on 3 knots + anchor quadrature).
+The imperfect-prior case is the "watch convergence" result: GN pulls
+co2 and p_surface almost exactly onto truth, small residual prior-pull.
+
+**Part G** -- aerosol re-tested with the albedo gap removed (continuous
+truth, ad16, free albedo + `--sub-bin-anomaly truth`):
+
+| config | resid | co2 error | tau_aerosol (true 0.05) |
+|---|---|---|---|
+| free albedo + oracle, no aerosol | 4.1e-3 | -0.004 ppm | -- |
+| + aerosol FROZEN at truth | 3.6e-3 | -0.004 ppm | 0.05 |
+| + aerosol FREE (tau, height) | 3.2e-3 | +0.13 ppm | **0.054 (err 0.004)** |
+
+**Aerosol converges perfectly once the scene is representable.**
+Compare Sec.14: resid 0.17-0.23, tau -> 0.32, co2 off 47-110 ppm.
+
+### Conclusion
+
+Sec.14's "aerosol still does not converge" and its leading hypothesis
+(`height_aerosol` layer-boundary threshold mismatch between the truth
+and forward paths) were **wrong**. The aerosol forward model
+(`geocarb_gert.spectrum.simulate_spectrum`, `_build_aerosol_kwargs`,
+`P_aerosol`, the `above_mask` threshold) is fine. Every aerosol test
+inherited a ~0.2-0.27 unrepresentable-albedo residual floor via the
+forced `--vary-albedo`, and GN abused `tau_aerosol`/`height_aerosol`/
+`co2_ppm` trying to fit it (tau -> 0.32, albedo -> 0.96 in the worst
+case). The 4 bugs Sec.11 fixed were real but not the blocker.
+
+**ALGORITHM_ROADMAP.md Sec.4 item 7 (aerosol non-convergence) is
+closed.** Aerosol is a working member of the joint state, validated in
+a representable-truth retrieval. Open follow-ups: (1) the g-ratio-bins
+representability gap above; (2) whether background aerosol should become
+a frozen nuisance row always present (like `p_surface`/`t_offset_k`) or
+stay opt-in -- deferred in Sec.14, now unblocked; (3) aerosol has not
+been run against a genuinely non-representable (dense) truth with a
+proper sub-bin albedo treatment -- the representable results here are a
+ceiling, not a production estimate.
+
+**Repro**: `scripts/submit_smoke_aerosol_onoff_impprior.sbatch`,
+`submit_aerosol_confound_diag.sbatch`,
+`submit_aerosol_confound_isolate.sbatch`,
+`submit_rmtruth_gr3_build.sbatch` + `submit_smoke_rmtruth_gr3.sbatch`,
+`submit_rmtruth_ad16.sbatch` + `submit_smoke_rmtruth_ad16{,_anchorpos}.sbatch`,
+`submit_smoke_representable_final.sbatch` (all checked in,
+`scratch_work/smoke_*` / `scratch_work/aero_confound_*` outputs).
