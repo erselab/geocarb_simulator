@@ -16,10 +16,30 @@
 #SBATCH --account=ltmurray_lab
 #SBATCH --partition=atmos
 #SBATCH --array=0-57%12
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=16G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=128G
 #SBATCH --time=12:00:00
 #SBATCH --output=slurm_out/impprior_ws_%x_%A_%a.out
+# 2026-09-11: --anchor-workers used to be a no-op (every --task-id task ran
+# inside a daemon Pool worker, silently forcing anchor-level parallelism to
+# 1 -- see gd_joint_block_retrieve.py's fix and docs/PROJECT_STATUS.md
+# Sec.16). Now that it actually works, --cpus-per-task=8/--mem=16G (sized
+# for the old accidentally-serial behavior) OOM'd on every resubmitted
+# c3/c4/c5 task within ~1 minute -- linearize() creates a fresh
+# multiprocessing.Pool per free-parameter-column batch on EVERY GN
+# iteration (up to 15), and memory climbs with each iteration rather than
+# holding at one fixed footprint (measured: a moderate c3 window still
+# climbing past ~45GB attributable after 30 min, no plateau). Cut to 4
+# workers (still a real speedup over the old serialized baseline).
+# Validated at 64G/4-workers on a moderate c3 window (19 rows, 3 free
+# rows): completed in 2886s, peak ~41.5GB attributable -- but c4 (5 free
+# rows) / c5 (7, +aerosol) and wider windows (up to 45 rows vs this
+# window's 19) scale further on both axes, so --mem is set to 128G here
+# for headroom rather than the validated-but-tight 64G. Root fix (avoid
+# re-forking a growing Pool every GN iteration, and stop passing large
+# per-column Jacobian fields through pool.map's pickling instead of the
+# fork-inherited-global pattern anchor_spectra_and_derivs already uses)
+# is still open -- this is an operational mitigation, not that fix.
 
 set -euo pipefail
 module load git/2.50.1
