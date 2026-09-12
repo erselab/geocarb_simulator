@@ -615,18 +615,30 @@ def _g_anomaly_sensitivity(p: ParamSpec, scene_etas, W, state_interp):
 _LINEARIZE_L_G: dict = {}
 
 
-def _L_worker(job):
+def _L_worker(idx):
     """Module-level (picklable, fork-inherited) counterpart of
     `linearize`'s own local `L(field)` closure -- the detector-operator
     half of `linearize`'s cost, parallelized across every K/K_g column at
-    once (2026-09-02, user). `job` is `(dest, field)`; only `field`
-    varies per task (needs pickling to reach the worker -- real IPC cost,
-    but small next to `L`'s own ~325ms compute), the rest comes from
-    `_LINEARIZE_L_G` (set once, fork-inherited, unchanged per batch)."""
+    once (2026-09-02, user).
+
+    2026-09-11 (user: "are there duplicates in memory that could be
+    avoided" -- the impprior_ws OOMs): this used to take the whole
+    `(dest, field)` job as its argument, which `pool.map` pickles into
+    a pipe to reach the worker -- a real copy of every (potentially
+    large, one per free state SCALAR) `field` array, on top of the copy
+    already sitting in the parent's `jobs` list, and another on
+    deserialization in the worker. `anchor_spectra_and_derivs` (this
+    same module, just above) already avoids exactly this for its own
+    per-anchor inputs by stashing them in a fork-inherited global before
+    the pool starts, so workers see them via copy-on-write instead of
+    IPC -- `jobs` itself now goes into `_LINEARIZE_L_G` the same way,
+    and only a plain integer index (cheap to pickle) travels through
+    `pool.map`. Only the (much smaller, `y.size`-length) result `col`
+    still crosses the IPC boundary, same as before."""
     from . import gd_render
     from .focalplane import footprint_average_scene
-    dest, field = job
     G = _LINEARIZE_L_G
+    dest, field = G["jobs"][idx]
     col = gd_render.predict_neighborhood(
         G["fpa"], G["rows_win"], G["wn_hires"], footprint_average_scene(G["scene_etas"], field),
         G["ils"], pad=G["pad"], footprint=True).ravel()
@@ -749,11 +761,15 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
     if n_workers_eff <= 1 or len(jobs) < 4:
         results = [(dest, L(field)) for dest, field in jobs]
     else:
+        # `jobs` (every K/K_g column's full field array) goes into the
+        # fork-inherited global too, not just the small metadata -- see
+        # _L_worker's docstring. Workers pick up their own job by index
+        # via copy-on-write instead of having it pickled to them.
         _LINEARIZE_L_G.update(dict(fpa=fpa, rows_win=rows_win, wn_hires=wn_hires,
-                                   scene_etas=scene_etas, ils=ils, pad=pad))
+                                   scene_etas=scene_etas, ils=ils, pad=pad, jobs=jobs))
         ctx = mp.get_context("fork")
         with ctx.Pool(min(n_workers_eff, len(jobs))) as pool:
-            results = pool.map(_L_worker, jobs, chunksize=1)
+            results = pool.map(_L_worker, range(len(jobs)), chunksize=1)
 
     kg_stacks: dict = {name: [None] * dval_dg_by_name[name].shape[1] for name in dval_dg_by_name}
     for dest, col in results:

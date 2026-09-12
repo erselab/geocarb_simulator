@@ -1712,3 +1712,73 @@ tasks (everything that TIMEOUT'd or never got past `JobArrayTaskLimit`)
 now that they should finish in minutes rather than hours; audit
 `submit_impprior_ws_prerender_aero.sbatch` and other single-shot
 callers of `gd_joint_block_retrieve.py` for the same pattern.
+
+## 17. Sec.16's fix unmasked an OOM problem; found and fixed one real duplication in `linearize`'s L()-loop (2026-09-11)
+
+Resubmitting c3/c4/c5 with Sec.16's fix (real `--anchor-workers`
+parallelism) OOM'd on nearly every task within ~1 minute against the
+old `--mem=16G` (sized for the accidentally-serial pre-fix behavior).
+Operational mitigation shipped first: `--anchor-workers` 8->4,
+`--mem` 16G->128G (partition nodes have 504G) -- validated on a
+moderate c3 window (19 rows, 3 free rows): completed in 2886s, peak
+~41.5GB attributable, no plateau reached within the window's own
+runtime (kept climbing step-wise, once per GN iteration).
+
+User then asked directly: "are there duplicates in memory that could
+be avoided?" Root-caused with a cheap, fast repro (task 0, the
+SMALLEST window, 9 rows) instrumented with `resource.getrusage(...)
+.ru_maxrss` at the top of `linearize()`/`anchor_spectra_and_derivs`:
+
+- The MAIN process's own memory does NOT grow per GN iteration --
+  iteration 0's `linearize()` jumped 3074MB->7554MB (one-time), but
+  iteration 1's only moved 7554MB->7579MB (+25MB). No leak in the
+  parent.
+- Each of the 4 anchor-workers sat at ~8GB RSS even for this tiny
+  9-row window -- but `/proc/<pid>/smaps_rollup` PSS (proportional,
+  de-duplicates copy-on-write pages) showed the true UNIQUE share per
+  worker was only ~0.4-0.7GB in an earlier probe on a different window
+  -- most of that 8GB RSS is the ABSCO table (`gert.ABSCOTable.
+  load_all`, eagerly `np.array(...)`-materialized once before any
+  forking) correctly SHARED via copy-on-write, not duplicated. Naive
+  per-process RSS summing overcounts shared pages; system-wide `free`
+  `used` is the reliable signal, and PSS the reliable per-process one.
+
+**One real, fixed duplication**: `linearize`'s L()-loop dispatched
+`pool.map(_L_worker, jobs, chunksize=1)` where each job was `(dest,
+field)` and `field` a full `(n_anchor, n_hires)` array -- ONE per free
+state SCALAR (e.g. one per co2 bin, one per albedo bin; 30+ for
+c3/c4). `multiprocessing.Pool.map` pickles task arguments through an
+IPC pipe to reach workers EVEN under the `fork` context (fork only
+governs how worker *processes* are created, not how individual task
+payloads move) -- so every `field` array was serialized in the parent
+and deserialized again in the worker, real copies neither COW nor
+`anchor_spectra_and_derivs`'s own already-correct global-stash pattern
+(used just above in the same module) needed to pay.
+
+**Fix** (`geocarb_gert/jacobians.py`): `jobs` itself now goes into the
+same fork-inherited `_LINEARIZE_L_G` global that already carried the
+small metadata; `_L_worker` takes a plain integer index instead of the
+`(dest, field)` tuple, and reads its own job from the global (inherited
+via copy-on-write, no pickling) rather than having it pickled to it.
+Only the small `(y.size,)` result `col` still crosses the IPC boundary,
+same as before.
+
+**Validated** on the same c3 window used above (rows 380-398,
+`--anchor-workers 4`): peak attributable memory **41.5GB -> 23.3GB**
+(-44%), runtime unchanged (2854s vs 2886s -- this only changes how data
+moves, not what gets computed), and the result is bit-identical
+(`resid_hires_rms`, `x_hires` to every printed digit) to both the
+pre-fix run and a separately-checked c2 window's pre-existing
+completed result. No correctness risk: same arithmetic, cheaper IPC.
+
+**Not yet fixed** (open, deeper architectural item): both
+`anchor_spectra_and_derivs` and the L()-loop create a BRAND NEW
+`multiprocessing.Pool` on every single call, and `linearize()` is
+called once per outer GN iteration (up to `max_iter=15`) -- up to ~30
+fork/teardown cycles per window solve. This isn't shown to leak (the
+parent plateaus, per above), but repeated forking of a live process
+image is real, avoidable overhead; a persistent pool created once
+before the GN loop and reused across iterations (fed fresh work via
+lightweight IPC each iteration instead of a fresh fork) is the next
+lever if `--mem=128G` ever proves insufficient for c4/c5's widest
+windows.
