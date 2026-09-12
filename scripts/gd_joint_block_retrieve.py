@@ -517,6 +517,26 @@ def _solve_window(row_lo: int, row_hi: int):
     row_positions = None
     if frozen_atmosphere_positions_mode == "anchor":
         row_positions = {name: anchor_etas for name in prior_fields if name not in free}
+    # 2026-09-12 (user: "[tau_aerosol/height_aerosol's] behavior is much
+    # more like that of a gas than the surface -- correlation length
+    # scales... are much more like trace gases"): input/retrieval_
+    # defaults.yml's own corr_length_eta backs this up directly --
+    # tau_aerosol ~100km (matching ch4_ppb/co_ppb's broad-plume width),
+    # height_aerosol ~500km (matching t_offset_k/h2o_surface_vmr's own
+    # broad synoptic scale) -- neither anywhere near albedo's much
+    # shorter ~30km. Both were still riding on albedo's own fine anchor
+    # grid by construction (state_spec_from_scene's surface-row loop had
+    # no per-row override until this session's fix), spending the large
+    # majority of a c5 window's memory resolving along-slit structure
+    # the prior itself says isn't there. Put them on the same coarse
+    # bin_centers grid the gas rows already use, independent of
+    # --surface-positions (which stays governing albedo only) --
+    # `state_spec_from_scene` silently ignores a `row_positions` entry
+    # for a row that isn't in `surface_fields` this call, so this is a
+    # no-op whenever --aerosol is off.
+    row_positions = dict(row_positions or {})
+    row_positions.setdefault("tau_aerosol", bin_centers)
+    row_positions.setdefault("height_aerosol", bin_centers)
     spec_h = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length,
                                    prior_form=prior_form, uniform=uniform_priors,
                                    fields=prior_fields, band_label=band_label,

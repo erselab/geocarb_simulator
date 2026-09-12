@@ -837,18 +837,37 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
            for name, fn in fields.items()]
     if band_label is not None:
         # Shared grid by default (2026-08-25) -- surface rows use the SAME
-        # bin_centers atmosphere rows use, unless surface_positions (or,
-        # more generally, row_positions["albedo"]) is explicitly given.
-        # See this function's own docstring for why this is a deliberate
-        # behaviour change, not an oversight.
-        if "albedo" in _row_positions:
-            pos = np.atleast_1d(np.asarray(_row_positions["albedo"], dtype=float))
-        elif surface_positions is not None:
-            pos = np.atleast_1d(np.asarray(surface_positions, dtype=float))
-        else:
-            pos = bin_centers
-        rows += [_row(name, fn, pos, "surface")
-                 for name, fn in surface_fields.items()]
+        # bin_centers atmosphere rows use, unless surface_positions is
+        # explicitly given. See this function's own docstring for why this
+        # is a deliberate behaviour change, not an oversight.
+        #
+        # 2026-09-12 (user: "[tau_aerosol/height_aerosol's] behavior is
+        # much more like that of a gas than the surface -- correlation
+        # length scales... are much more like trace gases"): this used to
+        # resolve ONE shared `pos` for every `surface_fields` row at once,
+        # keyed off checking `"albedo" in row_positions` specifically --
+        # `row_positions`'s own docstring promises a per-row override for
+        # "ANY row, atmosphere included", but surface rows never actually
+        # got that per-row treatment, unlike the atmosphere-rows loop just
+        # above. That mattered once aerosol entered the state: tau_aerosol
+        # (~100km correlation length, input/retrieval_defaults.yml) and
+        # height_aerosol (~500km) are both already parameterized as
+        # broad-scale, gas-like rows -- matching or exceeding
+        # h2o_surface_vmr/t_offset_k's own 500km, which sit on the coarse
+        # bin_centers grid without controversy -- yet had no way to
+        # independently escape albedo's own much shorter (~30km) grid.
+        # Every surface row now resolves its OWN position independently,
+        # exactly like atmosphere rows already do; albedo's existing
+        # `surface_positions`-as-blanket-default behavior for any row NOT
+        # named in `row_positions` is unchanged, so a caller passing only
+        # `surface_positions` (no `row_positions`) sees no behavior change.
+        default_surface_pos = (bin_centers if surface_positions is None
+                               else np.atleast_1d(np.asarray(surface_positions, dtype=float)))
+        rows += [_row(name, fn,
+                     (default_surface_pos if name not in _row_positions
+                      else np.atleast_1d(np.asarray(_row_positions[name], dtype=float))),
+                     "surface")
+                for name, fn in surface_fields.items()]
     return StateSpec(rows)
 
 

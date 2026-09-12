@@ -1886,3 +1886,86 @@ the sweep's failed tasks (c2 task 56 -- never resubmitted after its
 12h TIMEOUT under Sec.16's fix; c3 tasks 54-56; c4 tasks 51-56; c5
 tasks 40-56) at the current `--mem=128G` to see how many now clear it
 on the strength of the plateau alone.
+
+## 19. `LinearizePool`'s own shared-memory buffer leaked ~460GB of `/dev/shm` on OOM-kill; and the real memory driver was the aerosol rows' position grid, not width or pooling at all (2026-09-12)
+
+Resubmitting the sweep's failed tasks under Sec.18's `--mem` budgets
+(c2 128G, c3 160G, c4 192G, c5 320G, each sized from prior failure
+severity, not direct measurement) surfaced two more findings.
+
+**Leak**: several c5 tasks died with `OSError: [Errno 28] No space
+left on device` or `Bus error` -- NOT OOM. `LinearizePool`'s
+shared-memory buffer lives on `/dev/shm`, a fixed-size (252G on this
+cluster's `atmos` nodes), NODE-WIDE tmpfs completely separate from the
+per-job memory cgroup. A cgroup OOM-kill is a SIGKILL, which skips
+`LinearizePool.close()`'s own `unlink()` -- and can take out
+`multiprocessing.resource_tracker`'s own watchdog process in the same
+sweep, so even its purpose-built orphan cleanup isn't reliable here.
+Found two nodes at 92% and 100% `/dev/shm` from exactly this (confirmed
+via `fuser` -- unreferenced means leaked, not in use), cleaned up
+~460GB of orphaned segments by hand, then fixed it two ways: (1)
+`jacobians.py` now names the segment deterministically from
+`SLURM_JOB_ID`/`SLURM_ARRAY_TASK_ID` instead of a random default name,
+unlinking any stale segment of the same name before creating a new
+one; (2) `submit_impprior_ws.sbatch` adds a `trap ... EXIT` that
+removes this task's own segment (by that same deterministic name) on
+ANY exit path -- confirmed the wrapper shell survives a plain SIGKILL
+of its python child (the "Killed" message in every log comes from the
+shell itself) -- plus a best-effort sweep at task start removing any of
+our OWN stale (>30min old, `fuser`-confirmed unreferenced) segments,
+covering the rarer case where the whole cgroup died together.
+
+**The real memory driver, found by working out array sizes directly
+from the code** (task 44, c5, width 27: `n_scene`=545 anchor points,
+`n_hires`=12352 hi-res spectral points, so one Jacobian `field` array
+is 545x12352 float64 = 54MB): atmosphere rows (co2/p/h2o/t) sit on the
+window's own coarse `bin_centers` grid (~54-90 points depending on
+width) by default, but ALL THREE free surface rows --
+`albedo`/`tau_aerosol`/`height_aerosol` -- were riding on the much
+finer anchor grid (545-833 points, `--surface-positions anchor`) as a
+single shared grid, regardless of each row's own physical behavior.
+88% of a c5 window's ~1851 Jacobian columns (and so ~88% of its ~100GB
+`jobs` list, doubled to ~200GB by `LinearizePool`'s own shared buffer)
+came from just `tau_aerosol`/`height_aerosol` sitting at anchor
+density. Comparing c4 vs c5 on the IDENTICAL window (task 52, width
+39) isolated it cleanly: c4 152.8GB, c5 367.5GB -- a 2.4x jump from
+adding those two rows alone, bigger than the width range across the
+ENTIRE 58-window sweep (23->833 anchors is ~9x; c4->c5 on one window is
+~2.4x on top of that).
+
+User: "[tau_aerosol/height_aerosol's] behavior is much more like that
+of a gas than the surface -- correlation length scales... are much
+more like trace gases." Confirmed directly in
+`input/retrieval_defaults.yml`'s own `correlation_length_eta`, already
+documented there BEFORE this session: `tau_aerosol` ~100km ("closer to
+ch4_ppb/co_ppb's own broad-plume width"), `height_aerosol` ~500km
+("broad synoptic drift, same scale as t_offset_k/h2o_surface_vmr") --
+both already understood as gas-like at the PRIOR level, matching or
+exceeding rows that already sit on the coarse grid without
+controversy, while `albedo` alone is genuinely short (~30km,
+"shorter than the gas rows"). With a window spanning at most a few km
+and `tau_aerosol`'s own correlation length ~100km, the anchor grid was
+resolving structure the prior itself says doesn't exist -- not
+approximating it away, correcting a mismatch between the row's
+STATISTICAL model and its STATE-SPACE parameterization that was never
+actually load-bearing.
+
+Root cause in code: `state_spec_from_scene`'s `row_positions` parameter
+promises (in its own docstring) a per-row grid override for "ANY row,
+atmosphere included" -- and the atmosphere-rows loop honors that
+per-name, but the surface-rows loop resolved ONE shared grid for the
+whole `surface_fields` group, keyed off checking `"albedo" in
+row_positions` specifically. Fixed: every surface row now resolves its
+own position independently, exactly like atmosphere rows already do.
+Backward compatible, verified directly: a caller passing only
+`surface_positions` (no `row_positions`), the previously-only path,
+puts every surface row on that one grid unchanged.
+`gd_joint_block_retrieve.py`'s hires spec construction now defaults
+`tau_aerosol`/`height_aerosol` (only when they're actually in the
+state, i.e. `--aerosol`) onto `bin_centers`, leaving `albedo` on
+`--surface-positions`'s own grid. Verified the row-count split lands
+exactly as expected via a direct unit test (no RT needed): `albedo`
+n=737, `tau_aerosol`/`height_aerosol` n=78, `total n_free` 2523 -> 1205
+on task 52's window -- not yet re-run through an actual retrieval to
+confirm convergence/accuracy are unaffected, only that the wiring is
+correct and backward-compatible.
