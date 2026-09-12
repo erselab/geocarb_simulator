@@ -549,7 +549,8 @@ def _anchor_spectra_one(g):
 
 
 def anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
-                              surface_at_anchor=None, n_workers: int = 1):
+                              surface_at_anchor=None, n_workers: int = 1,
+                              pool: "LinearizePool | None" = None):
     """Run the forward model once per anchor, returning radiance and the
     hi-res derivative of each requested row.
 
@@ -561,7 +562,18 @@ def anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
     ``1`` (default, unchanged) runs them sequentially; a daemon Pool
     worker forces this back to 1 regardless (cannot nest pools), same
     guard `joint_state.build_forward_state`/`render_at_anchors` use.
+
+    `pool` (2026-09-12, user): a `LinearizePool` spanning the whole GN
+    solve this call is one iteration of -- when given, its long-lived
+    anchor-pool workers are used instead of forking a fresh one here; see
+    `LinearizePool`'s docstring for why. Falls through to the plain path
+    below (unchanged) if `pool` is None or declines (e.g. inside a daemon
+    worker, where nested pools aren't allowed).
     """
+    if pool is not None:
+        result = pool.run_anchor(params_at_anchor, rows_needed, surface_at_anchor)
+        if result is not None:
+            return result
     import multiprocessing as mp
     n_anchor = len(params_at_anchor)
     if mp.current_process().daemon:
@@ -645,9 +657,205 @@ def _L_worker(idx):
     return dest, col
 
 
+class LinearizePool:
+    """A persistent worker pool spanning every GN iteration of ONE
+    `gauss_newton_state` call (one stage -- coarse or hires -- of one
+    window), replacing the plain (non-pool) path's fresh `ctx.Pool(...)`
+    per `linearize()` call in both `anchor_spectra_and_derivs` and
+    `linearize`'s own L()-loop.
+
+    2026-09-12 (user: "let's make that change", following up on the
+    impprior_ws OOMs Sec.17's `pool.map`-pickling fix didn't fully cure):
+    forking a NEW Pool on every GN iteration (up to 15/window --
+    `gauss_newton_state`'s own `max_iter`) forks from whatever the PARENT
+    process's RSS has grown to by that iteration -- and Python's own
+    refcounting touches (so copy-on-write duplicates) nearly every object
+    header a worker looks at, not just the bytes it actually needs. A
+    later iteration's fork therefore costs strictly more than an earlier
+    one even when the real job data is an identical size -- exactly the
+    "climbs with each iteration, no plateau" behavior
+    `submit_impprior_ws.sbatch` already documents. The fix: fork ONCE, as
+    early in the solve as possible (before iteration has had a chance to
+    grow the parent), and never again.
+
+    That breaks the fork-inherited-global trick used elsewhere in this
+    module (stash data in a plain dict, then fork so children see it via
+    copy-on-write) for anything that changes iteration to iteration --
+    only a FRESH fork ever picks up a global's latest value, and this pool
+    is deliberately never fresh after iteration 1. Two different fixes for
+    two different job shapes, both below:
+
+    * `run_anchor`'s per-iteration inputs (`params_at_anchor`/
+      `surface_at_anchor`) are tiny (a handful of floats per anchor) --
+      cheap to just pass through `pool.map`'s own pickling every call,
+      same as any ordinary multiprocessing job. `spectrum_jac` (an
+      unpicklable closure) is the only thing that does NOT change
+      per-iteration, so it alone goes into the fork-inherited global, set
+      once before this class's one anchor-pool fork.
+    * `run_L`'s per-iteration inputs (the K/K_g `field` arrays) are
+      exactly the large arrays Sec.17 found real pickling duplication in
+      -- still true with a long-lived pool. They go into a genuine
+      (name-addressed, OS-level) `multiprocessing.shared_memory` segment
+      instead: workers attach to it ONCE, by name, the first time they're
+      asked to do L-loop work, then keep re-reading its CURRENT bytes on
+      every later call -- the parent overwrites that same segment before
+      each `pool.map` without forking again. Only the segment's
+      name/shape/dtype (set into the fork-inherited global before this
+      pool's own lazy, one-time L-pool fork, once the first call reveals
+      the window's fixed job shape) and integer indices still cross
+      through `pool.map`'s pickling.
+    """
+
+    def __init__(self, n_workers: int, spectrum_jac):
+        import multiprocessing as mp
+        self.n_workers = 1 if mp.current_process().daemon else n_workers
+        self._anchor_pool = None
+        self._L_pool = None
+        self._shm = None
+        self._shm_shape = None
+        self._shm_dtype = None
+        if self.n_workers > 1:
+            _ANCHOR_SPECTRA_G["spectrum_jac"] = spectrum_jac
+            ctx = mp.get_context("fork")
+            self._anchor_pool = ctx.Pool(self.n_workers)
+
+    def run_anchor(self, params_at_anchor, rows_needed, surface_at_anchor=None):
+        """`None` return tells the caller to fall back to its own serial
+        path -- mirrors `anchor_spectra_and_derivs`'s own `n_workers<=1`
+        guard."""
+        if self._anchor_pool is None:
+            return None
+        n = len(params_at_anchor)
+        args = [(g, params_at_anchor[g],
+                surface_at_anchor[g] if surface_at_anchor else None, rows_needed)
+               for g in range(n)]
+        S: list = [None] * n
+        dS: list = [None] * n
+        for g, s, d in self._anchor_pool.imap_unordered(_anchor_spectra_one_persistent, args, chunksize=2):
+            S[g], dS[g] = s, d
+        return S, dS
+
+    def run_L(self, jobs, *, fpa, rows_win, wn_hires, scene_etas, ils, pad):
+        """`None` return tells the caller to fall back (same contract as
+        `run_anchor`).
+
+        2026-09-12 (user's own stress test, c5 task 44 -- OOM'd in under 2
+        minutes, far WORSE than the fresh-Pool-per-call code this was
+        replacing): the first version of this method built `fields =
+        np.stack(...)` -- a full second copy of every job's field array --
+        THEN copied that into the shared buffer -- a third. Three
+        same-sized copies of what could already be tens of GB for one L()
+        batch on a wide/aerosol window swamped a 128G budget almost
+        instantly, instead of the intended one-shared-buffer footprint.
+        Fixed by writing each field into the shared buffer AS `jobs` IS
+        WALKED, immediately dropping this method's own reference to it
+        (`jobs[i] = None`) so nothing outside `jobs` itself (already built
+        by `linearize`'s own loop, unavoidable, and identical in size to
+        what the old fresh-Pool-per-call path also held) keeps it alive --
+        peak extra memory here is one shared buffer plus, transiently, one
+        field, not two extra full copies of the whole batch.
+        """
+        if self.n_workers <= 1 or len(jobs) < 4:
+            return None
+        n = len(jobs)
+        first_field = np.asarray(jobs[0][1], dtype=np.float64)
+        shape = (n,) + first_field.shape
+        if self._L_pool is None:
+            # First L() batch this window has ever needed -- only now do we
+            # know its fixed job shape, so allocate the shared buffer and
+            # fork this stage's L-pool, IN THAT ORDER (the manifest below
+            # must already be in the global before the fork that lets
+            # workers see it via copy-on-write).
+            import multiprocessing as mp
+            from multiprocessing import shared_memory
+            nbytes = int(np.prod(shape)) * first_field.itemsize
+            self._shm = shared_memory.SharedMemory(create=True, size=nbytes)
+            self._shm_shape = shape
+            self._shm_dtype = first_field.dtype
+            _LINEARIZE_L_G.update(dict(fpa=fpa, rows_win=rows_win, wn_hires=wn_hires,
+                                       scene_etas=scene_etas, ils=ils, pad=pad,
+                                       shm_name=self._shm.name, shm_shape=self._shm_shape,
+                                       shm_dtype=self._shm_dtype))
+            ctx = mp.get_context("fork")
+            self._L_pool = ctx.Pool(self.n_workers)
+        elif shape != self._shm_shape:
+            raise RuntimeError(
+                f"LinearizePool.run_L: job shape changed mid-window "
+                f"({self._shm_shape} -> {shape}) -- one instance is "
+                f"scoped to exactly one gauss_newton_state call, whose "
+                f"free-parameter structure never changes between GN "
+                f"iterations")
+        buf = np.ndarray(self._shm_shape, dtype=self._shm_dtype, buffer=self._shm.buf)
+        dest_list: list = [None] * n
+        for i in range(n):
+            dest, field = jobs[i]
+            buf[i] = field
+            dest_list[i] = dest
+            jobs[i] = None   # drop this field the instant it's copied in,
+                              # rather than holding the whole batch AND the
+                              # shared buffer resident at once
+        cols = self._L_pool.map(_L_worker_shm, range(n), chunksize=1)
+        return list(zip(dest_list, cols))
+
+    def close(self):
+        if self._anchor_pool is not None:
+            self._anchor_pool.terminate()
+            self._anchor_pool.join()
+            self._anchor_pool = None
+        if self._L_pool is not None:
+            self._L_pool.terminate()
+            self._L_pool.join()
+            self._L_pool = None
+        if self._shm is not None:
+            self._shm.close()
+            self._shm.unlink()
+            self._shm = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def _anchor_spectra_one_persistent(arg):
+    """`LinearizePool.run_anchor`'s worker -- everything needed travels in
+    `arg` except the unpicklable `spectrum_jac` closure, which came in via
+    `_ANCHOR_SPECTRA_G` before this (long-lived) worker was forked."""
+    g, p, surf, rows_needed = arg
+    spectrum_jac = _ANCHOR_SPECTRA_G["spectrum_jac"]
+    s, d = spectrum_jac(p, rows_needed, surf)
+    return g, np.asarray(s, dtype=float), d
+
+
+_L_WORKER_SHM_CACHE: dict = {}
+
+
+def _L_worker_shm(idx):
+    """`LinearizePool.run_L`'s worker. Attaches to the shared field buffer
+    by name ONCE per worker PROCESS (cached across every task this
+    long-lived worker ever handles, not just this call) -- see
+    `LinearizePool`'s own docstring for why this replaces `_L_worker`'s
+    fork-inherited-global `jobs` list."""
+    from . import gd_render
+    from .focalplane import footprint_average_scene
+    from multiprocessing import shared_memory
+    G = _LINEARIZE_L_G
+    name = G["shm_name"]
+    shm = _L_WORKER_SHM_CACHE.get(name)
+    if shm is None:
+        shm = shared_memory.SharedMemory(name=name)
+        _L_WORKER_SHM_CACHE[name] = shm
+    fields = np.ndarray(G["shm_shape"], dtype=G["shm_dtype"], buffer=shm.buf)
+    return gd_render.predict_neighborhood(
+        G["fpa"], G["rows_win"], G["wn_hires"],
+        footprint_average_scene(G["scene_etas"], fields[idx]),
+        G["ils"], pad=G["pad"], footprint=True).ravel()
+
+
 def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
               wn_hires, ils, x, pad: int = 4, state_interp: str = "linear",
-              n_workers: int = 1):
+              n_workers: int = 1, pool: "LinearizePool | None" = None):
     """``(y, K, K_g)`` -- the predicted sub-image, its analytic Jacobian,
     and (only for rows with `sub_bin_anomaly.g_cov` set) the sensitivity
     of each anchor value to that row's `g` values.
@@ -669,6 +877,15 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
     cannot yet differentiate raises rather than silently contributing a zero
     column, which would look like a converged-but-unconstrained parameter
     instead of a missing feature.
+
+    `pool` (2026-09-12, user): pass a `LinearizePool` opened once before the
+    `gauss_newton_state` call this `linearize` is `jacobian_fn` for, so
+    every GN iteration's Pool work reuses the SAME forked workers instead
+    of forking fresh ones each time -- see `LinearizePool`'s docstring.
+    `None` (default) is the old behavior: a fresh Pool per call, still
+    exactly as before for any caller that doesn't opt in (e.g.
+    `gd_jacobian_validate.py`, one-off callers with no iteration loop to
+    amortize a persistent pool over).
     """
     scene_etas = np.asarray(scene_etas, dtype=float)
     order = np.argsort(scene_etas)
@@ -696,7 +913,7 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
                       for g in range(scene_etas.size)]
     rows_needed = [p.name for p in free]
     S, dS = anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
-                                      surf_at_anchor, n_workers=n_workers)
+                                      surf_at_anchor, n_workers=n_workers, pool=pool)
 
     def L(field):
         """The detector operator applied to a per-anchor hi-res field.
@@ -758,18 +975,23 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
             for m in range(dval_dg.shape[1]):
                 jobs.append((("Kg", p.name, m), dS_row * dval_dg[:, m][:, None]))
 
-    if n_workers_eff <= 1 or len(jobs) < 4:
-        results = [(dest, L(field)) for dest, field in jobs]
-    else:
-        # `jobs` (every K/K_g column's full field array) goes into the
-        # fork-inherited global too, not just the small metadata -- see
-        # _L_worker's docstring. Workers pick up their own job by index
-        # via copy-on-write instead of having it pickled to them.
-        _LINEARIZE_L_G.update(dict(fpa=fpa, rows_win=rows_win, wn_hires=wn_hires,
-                                   scene_etas=scene_etas, ils=ils, pad=pad, jobs=jobs))
-        ctx = mp.get_context("fork")
-        with ctx.Pool(min(n_workers_eff, len(jobs))) as pool:
-            results = pool.map(_L_worker, range(len(jobs)), chunksize=1)
+    results = None
+    if pool is not None and n_workers_eff > 1:
+        results = pool.run_L(jobs, fpa=fpa, rows_win=rows_win, wn_hires=wn_hires,
+                             scene_etas=scene_etas, ils=ils, pad=pad)
+    if results is None:
+        if n_workers_eff <= 1 or len(jobs) < 4:
+            results = [(dest, L(field)) for dest, field in jobs]
+        else:
+            # `jobs` (every K/K_g column's full field array) goes into the
+            # fork-inherited global too, not just the small metadata -- see
+            # _L_worker's docstring. Workers pick up their own job by index
+            # via copy-on-write instead of having it pickled to them.
+            _LINEARIZE_L_G.update(dict(fpa=fpa, rows_win=rows_win, wn_hires=wn_hires,
+                                       scene_etas=scene_etas, ils=ils, pad=pad, jobs=jobs))
+            ctx = mp.get_context("fork")
+            with ctx.Pool(min(n_workers_eff, len(jobs))) as one_shot_pool:
+                results = one_shot_pool.map(_L_worker, range(len(jobs)), chunksize=1)
 
     kg_stacks: dict = {name: [None] * dval_dg_by_name[name].shape[1] for name in dval_dg_by_name}
     for dest, col in results:

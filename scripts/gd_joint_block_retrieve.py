@@ -444,13 +444,13 @@ def _solve_window(row_lo: int, row_hi: int):
     spectrum_jac = (jac.make_spectrum_jac(absco, wide_inst, geo, solar, albedo)
                     if use_analytic else None)
 
-    def _linearizer(spec_, scene_etas_, enabled, interp_kind):
+    def _linearizer(spec_, scene_etas_, enabled, interp_kind, pool=None):
         if not enabled:
             return None
         def lin(x):
             return jac.linearize(FPA, rows_win, scene_etas_, spec_, spectrum_jac,
                                  wn_hires, ils, x, pad=PAD, state_interp=interp_kind,
-                                 n_workers=anchor_workers)
+                                 n_workers=anchor_workers, pool=pool)
         return lin
 
     # COARSE: scene evaluated at the state's own bin centres, so
@@ -470,10 +470,20 @@ def _solve_window(row_lo: int, row_hi: int):
                                     wn_hires, ils, pad=retrieval_pad, state_interp="linear",
                                     n_workers=anchor_workers,
                                     spatial_psf_fwhm_px=retrieval_psf_fwhm_px)
-        x_c, S_ret_c, avk_c = gauss_newton_state(fwd_c, y_true, spec_c, Sy_inv_diag,
-                                                 label=f"[{row_lo}-{row_hi}] coarse", verbose=False,
-                                                 jacobian_fn=_linearizer(spec_c, bin_centers, use_analytic, "linear"),
-                                                 return_cov=True, return_avk=True)
+        # 2026-09-12 (user: "let's make that change" -- LinearizePool, see
+        # jacobians.py): one persistent pool for the whole coarse GN solve
+        # instead of jac.linearize() forking a fresh one every iteration.
+        lin_pool_c = (jac.LinearizePool(anchor_workers, spectrum_jac)
+                     if use_analytic and anchor_workers > 1 else None)
+        try:
+            x_c, S_ret_c, avk_c = gauss_newton_state(fwd_c, y_true, spec_c, Sy_inv_diag,
+                                                     label=f"[{row_lo}-{row_hi}] coarse", verbose=False,
+                                                     jacobian_fn=_linearizer(spec_c, bin_centers, use_analytic,
+                                                                             "linear", pool=lin_pool_c),
+                                                     return_cov=True, return_avk=True)
+        finally:
+            if lin_pool_c is not None:
+                lin_pool_c.close()
         resid_c = y_true - fwd_c(x_c)
         # Standing rule: save the ENTIRE state vector (free AND frozen) and
         # the FULL residual field, never just summary scalars. `jacobian_used`
@@ -520,11 +530,22 @@ def _solve_window(row_lo: int, row_hi: int):
                                 wn_hires, ils, pad=retrieval_pad, state_interp=state_interp,
                                 n_workers=anchor_workers,
                                 spatial_psf_fwhm_px=retrieval_psf_fwhm_px)
-    x_h, S_ret_h, avk_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
-                                             label=f"[{row_lo}-{row_hi}] hires", verbose=False,
-                                             jacobian_fn=_linearizer(spec_h, anchor_etas, use_analytic_hires,
-                                                                     state_interp),
-                                             return_cov=True, return_avk=True)
+    # 2026-09-12 (user: "let's make that change" -- LinearizePool, see
+    # jacobians.py): one persistent pool for the whole hires GN solve
+    # instead of jac.linearize() forking a fresh one every iteration --
+    # the dominant driver of the impprior_ws OOMs (Sec.17's pool.map
+    # pickling fix alone wasn't enough; see docs/PROJECT_STATUS.md).
+    lin_pool_h = (jac.LinearizePool(anchor_workers, spectrum_jac)
+                 if use_analytic_hires and anchor_workers > 1 else None)
+    try:
+        x_h, S_ret_h, avk_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
+                                                 label=f"[{row_lo}-{row_hi}] hires", verbose=False,
+                                                 jacobian_fn=_linearizer(spec_h, anchor_etas, use_analytic_hires,
+                                                                         state_interp, pool=lin_pool_h),
+                                                 return_cov=True, return_avk=True)
+    finally:
+        if lin_pool_h is not None:
+            lin_pool_h.close()
     resid_h = y_true - fwd_h(x_h)
     out["hires"] = spec_h.snapshot(x_h, resid=resid_h,
                                    resid_rms=float(np.sqrt(np.mean(resid_h ** 2))),

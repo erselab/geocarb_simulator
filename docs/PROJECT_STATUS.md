@@ -1782,3 +1782,107 @@ before the GN loop and reused across iterations (fed fresh work via
 lightweight IPC each iteration instead of a fresh fork) is the next
 lever if `--mem=128G` ever proves insufficient for c4/c5's widest
 windows.
+
+## 18. `impprior_ws` resubmitted under Sec.17's fix still OOM'd on the widest c3/c4/c5 windows -- Sec.17's "not yet fixed" item built and validated: `LinearizePool` (2026-09-12)
+
+Sec.17's fix landed and the sweep resubmitted, but a chunk of the
+widest c3/c4/c5 windows OOM'd again at `--mem=128G` -- and this time
+`sacct`'s own `MaxRSS` (220-627GB) was itself a red herring of exactly
+Sec.17's earlier kind, just showing up in a different place: checking
+a live task directly (`/proc/<pid>/smaps_rollup` PSS, `free -g` on its
+node) put the REAL usage at ~18-80GB, nowhere near what `sacct`
+reported -- `sacct`'s `MaxRSS` naively sums per-process RSS across a
+job step's workers with no COW deduplication, same failure mode as
+naive `ps` summing, just at the Slurm-accounting layer instead. Do not
+use `sacct MaxRSS` to size `--mem` for this workload; use `free -g` on
+the live node or per-process PSS instead.
+
+The REAL OOMs were confirmed genuine (`slurmstepd` cgroup `oom_kill`
+events, no other jobs sharing the node) and traced to exactly the
+"not yet fixed" item Sec.17 flagged: `linearize()` forking a BRAND NEW
+`Pool` every GN iteration (up to 15/window) forks from whatever the
+PARENT's RSS has grown to by then, and Python's own refcounting
+touches (so copy-on-write duplicates) nearly every object header a
+worker looks at -- not just the bytes it actually needs. A later
+iteration's fork costs strictly more than an earlier one even when the
+real job data is identical in size, which is the "climbs with each
+iteration, no plateau" behavior `submit_impprior_ws.sbatch`'s own
+comment already predicted.
+
+**Fix**: `LinearizePool` (`geocarb_gert/jacobians.py`), a worker pool
+forked ONCE per `gauss_newton_state` call (one stage -- coarse or
+hires -- of one window) instead of once per GN iteration. Two
+mechanisms, because forking once breaks the fork-inherited-global
+trick for anything that changes iteration to iteration:
+
+- `anchor_spectra_and_derivs`'s per-iteration inputs are tiny (a
+  handful of floats per anchor) -- cheap to just pass through
+  `pool.map`'s own pickling every call, same as any ordinary
+  multiprocessing job. Only `spectrum_jac` (an unpicklable closure,
+  unchanging for the whole window) goes into the fork-inherited
+  global, set once before the one fork.
+- `linearize`'s L()-loop per-iteration inputs (the K/K_g `field`
+  arrays -- Sec.17's own large-array duplication target) go into a
+  genuine, name-addressed `multiprocessing.shared_memory` segment.
+  Workers attach to it ONCE, by name, on first use, then re-read its
+  CURRENT bytes on every later call; the parent overwrites the same
+  segment before each `pool.map` without forking again. Only the
+  segment's name/shape/dtype (set into the fork-inherited global
+  before the L-pool's own lazy, one-time fork, once the first call
+  reveals the window's fixed job shape) and integer indices still
+  cross through `pool.map`'s pickling.
+
+Both `linearize()` and `anchor_spectra_and_derivs()` take an optional
+`pool=` argument; `None` (the default, unchanged for every other
+caller -- `gd_jacobian_validate.py`, the archive demo) keeps Sec.17's
+exact fresh-Pool-per-call behavior. `gd_joint_block_retrieve.py` opens
+one `LinearizePool` per `gauss_newton_state` call (coarse and hires
+each get their own -- different scene grids, different job shapes)
+and closes it in a `finally` right after.
+
+**A real bug found and fixed during validation**: the first version of
+`LinearizePool.run_L` built `fields = np.stack(...)` (a second full
+copy of the job batch) and THEN copied that into the shared buffer (a
+third) -- three same-sized copies where the old code needed
+effectively zero (COW, read-only). Stress-tested directly against a
+window that used to OOM after 2h38m under the old code (c5 task 44,
+the `--aerosol` config, one of the widest windows): the buggy version
+OOM'd in under 2 minutes -- WORSE than what it replaced. Fixed by
+writing each field directly into the shared buffer as `jobs` is walked
+and dropping the reference immediately (`jobs[i] = None`) rather than
+staging a full second copy first; peak extra memory is now one shared
+buffer plus, transiently, one field, not two extra full-batch copies.
+
+**Validated**:
+- Correctness: narrow window (c1, task 1, single free param), new code
+  vs. a same-session baseline of the pre-`LinearizePool` code (`git
+  stash`, separate `--out-root`) -- `x_hires`/`resid_hires` max abs
+  diff 0.0, chi2/rms match to every printed digit. Same arithmetic,
+  same IPC-avoidance principle Sec.17 already established, just
+  amortized over more iterations.
+- The actual target behavior: re-ran c5 task 44 (the window that died
+  in 2 minutes pre-fix) under a 224G ceiling (dedicated sbatch job --
+  the 128G interactive session isn't big enough to tell fix-working
+  from fix-insufficient apart) with `free -g` polled on its node every
+  2 minutes. Memory jumped to ~206GB in the first ~2 minutes (one-time
+  setup: shared buffer + anchor pool) and then sat **flat at
+  205-206GB for ~40 minutes** across many GN iterations -- the
+  fork-driven growth this section set out to fix is confirmed gone.
+
+**Not fully fixed**: after that ~40-minute plateau, memory jumped
+again (206GB -> 233GB), exceeding the 224G ceiling and getting
+OOM-killed at 47 minutes elapsed -- no `RuntimeError` from this
+class's own job-shape-changed guard, so this is a SECOND, smaller,
+still-unexplained growth source, independent of pool forking --
+plausibly `gauss_newton_state`'s own iteration bookkeeping (LM retries,
+accumulating diagnostics) or ordinary numpy/Python allocator
+fragmentation over 15 iterations, not yet investigated. Shipping
+anyway: the fork-driven growth this section targeted is the dominant,
+confirmed mechanism, and this fix demonstrably helps (a task that used
+to OOM in 2 minutes now runs 47+ minutes and climbs far more slowly)
+even though the single hardest c5 window in the sweep may still need
+either more `--mem` or a real fix for this second source. Resubmitting
+the sweep's failed tasks (c2 task 56 -- never resubmitted after its
+12h TIMEOUT under Sec.16's fix; c3 tasks 54-56; c4 tasks 51-56; c5
+tasks 40-56) at the current `--mem=128G` to see how many now clear it
+on the strength of the plateau alone.
