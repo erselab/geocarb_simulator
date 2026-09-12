@@ -62,6 +62,34 @@ esac
 echo "CONF=${CONF}  FREE=${FREE}  ${AERO}  task ${SLURM_ARRAY_TASK_ID}/58"
 git rev-parse HEAD
 
+# 2026-09-12 (user's own resubmitted sweep: several c5 tasks died with
+# "No space left on device"/SIGBUS on /dev/shm, traced to LinearizePool's
+# shared-memory buffer -- see jacobians.py's own comment at its creation
+# site): a cgroup OOM-kill is a SIGKILL, which can take out
+# multiprocessing.resource_tracker's watchdog in the same sweep, so its
+# built-in orphan-cleanup can't be relied on either -- a leaked segment
+# (tens to a couple hundred GB) then sits on that node forever, starving
+# every later task that lands there. Two layers, since neither alone
+# covers every way this task can die:
+#   1. This task's OWN segment, by the deterministic name jacobians.py
+#      constructs from these same two SLURM ids -- removed on ANY exit
+#      from this script (success, `set -e` after the python line's own
+#      death, or an explicit early `exit`), as long as THIS shell is still
+#      alive to run it (true for a plain OOM-kill of the python child,
+#      confirmed directly: the "Killed" message comes from this shell
+#      catching the child's death, so the trap below gets to run after).
+#   2. ANY other stale segment of ours on THIS node, so a case where even
+#      this shell doesn't survive (the whole cgroup killed together) still
+#      gets cleaned up -- by the NEXT task lucky enough to land here,
+#      rather than never. `-mmin +30`: this sweep is a best-effort, so it
+#      only ever removes something clearly abandoned (older than any
+#      single L() batch takes to produce), and `fuser` (not just the
+#      window) confirms nothing still has it open before removing it.
+SHM_NAME="/dev/shm/geocarb_L_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+trap 'rm -f "${SHM_NAME}"' EXIT
+find /dev/shm -maxdepth 1 -user "${USER}" -name 'geocarb_L_*' -mmin +30 2>/dev/null \
+    | while read -r f; do fuser "$f" >/dev/null 2>&1 || rm -f "$f"; done
+
 ${PYTHON} scripts/gd_joint_block_retrieve.py \
     --fpa 2 --prior-fields structural --vary-albedo \
     --anchor-density 16 --surface-positions anchor --frozen-atmosphere-positions anchor \

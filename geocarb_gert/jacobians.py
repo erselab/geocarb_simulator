@@ -767,9 +767,33 @@ class LinearizePool:
             # must already be in the global before the fork that lets
             # workers see it via copy-on-write).
             import multiprocessing as mp
+            import os
             from multiprocessing import shared_memory
             nbytes = int(np.prod(shape)) * first_field.itemsize
-            self._shm = shared_memory.SharedMemory(create=True, size=nbytes)
+            # 2026-09-12 (user's own resubmitted sweep: several c5 tasks
+            # died with "No space left on device" / SIGBUS, traced to
+            # /dev/shm -- a fixed-size, NODE-WIDE tmpfs (252G on this
+            # cluster's `atmos` nodes), separate from the per-job memory
+            # cgroup entirely): a task's cgroup OOM-kill is a SIGKILL, which
+            # skips this class's own `close()`/`unlink()` -- and can also
+            # kill `multiprocessing.resource_tracker`'s own watchdog process
+            # in the same sweep, so even ITS designed-for-exactly-this
+            # orphan cleanup can't be relied on. A leaked segment (tens to
+            # a couple hundred GB, per Sec.18's math) then sits on that node
+            # forever, silently starving every later task (ours or another
+            # user's) that lands there. A random default name gives no way
+            # for anything outside this dead process to find and remove it
+            # after the fact -- naming it deterministically from SLURM's own
+            # IDs lets `submit_impprior_ws.sbatch`'s `trap` compute the
+            # exact same name and remove it on ANY exit path, without
+            # depending on this process (or its resource_tracker) surviving
+            # long enough to do it itself.
+            shm_name = f"geocarb_L_{os.environ.get('SLURM_JOB_ID', 'nojob')}_{os.environ.get('SLURM_ARRAY_TASK_ID', '0')}"
+            try:
+                shared_memory.SharedMemory(name=shm_name).unlink()
+            except FileNotFoundError:
+                pass
+            self._shm = shared_memory.SharedMemory(create=True, size=nbytes, name=shm_name)
             self._shm_shape = shape
             self._shm_dtype = first_field.dtype
             _LINEARIZE_L_G.update(dict(fpa=fpa, rows_win=rows_win, wn_hires=wn_hires,
