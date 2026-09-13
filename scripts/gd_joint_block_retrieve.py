@@ -688,7 +688,16 @@ def merge_parts(parts_dir: Path, out: "Path | None" = None) -> int:
                  f"these are not outputs from the same run.")
             return 1
         if meta is None:
-            meta = {k: d[k] for k in ("fpa", "uniform", "gamma", "sigma_abs", "g_ratio", "min_window", "pad")}
+            # window_scale/overlap added 2026-09-13 (user: "only show the
+            # values that are at bin centers strictly inside each window's
+            # eta bounds") -- plot_sweep needs both to reconstruct the RUN's
+            # own natural (overlap=0) tiling and identify each window's core
+            # (non-overlap) bins; previously missing here meant a merged
+            # pickle's own d.get("overlap", 0)/d.get("window_scale", 1.0)
+            # silently fell back to the wrong defaults for any run that
+            # used --overlap or --window-scale.
+            meta = {k: d[k] for k in ("fpa", "uniform", "gamma", "sigma_abs", "g_ratio",
+                                      "min_window", "pad", "window_scale", "overlap")}
         else:
             mismatches = {k: (meta[k], d[k]) for k in meta if meta[k] != d[k]}
             if mismatches:
@@ -854,14 +863,44 @@ def plot_sweep(in_path: Path, truth: str = "raw", truth_anchor_density: int = 4,
     if not has_coarse:
         print("no x_coarse in this pickle (hi-res-only sweep) -- plotting hi-res only")
 
+    # 2026-09-13 (user: "only show the values that are at bin centers
+    # strictly inside each window's eta bounds"): under --overlap, each
+    # window's own render extends past its natural (overlap=0) boundary
+    # so a later stage (query_state) can blend two windows' independent
+    # estimates in the shared rows -- but that also means a bin in the
+    # shared margin is covered by BOTH this window and its neighbor, each
+    # solved independently, so plotting every window's full range
+    # double-plots the overlap margin and can make an otherwise-clean fit
+    # look noisier than it is. Restrict each window's own plotted points
+    # to strictly inside its natural (overlap=0) tile's eta bounds --
+    # boundary_rows/window count below still reflect the real (possibly
+    # wider) tiling this run actually used; only which points get DRAWN
+    # changes. No-op at overlap=0 (natural bounds == actual bounds).
+    overlap_used = d.get("overlap", 0)
+    core_eta_bounds = None
+    if overlap_used:
+        natural_tiles = build_window_tiles(fpa, min_window=d.get("min_window"),
+                                           window_scale=d.get("window_scale", 1.0), overlap=0)
+        if len(natural_tiles) == len(windows):
+            core_eta_bounds = []
+            for lo, hi in natural_tiles:
+                eta_lo = float(_eta_of(fpa, np.array([512.0]), np.array([float(lo)]))[0])
+                eta_hi = float(_eta_of(fpa, np.array([512.0]), np.array([float(hi)]))[0])
+                core_eta_bounds.append((min(eta_lo, eta_hi), max(eta_lo, eta_hi)))
+        else:
+            print(f"WARNING: natural (overlap=0) tiling has {len(natural_tiles)} windows, "
+                 f"this run has {len(windows)} -- can't map core bounds by index, "
+                 f"plotting every bin (including overlap margins) as-is.")
+
     # Per window, per row: bin-center rows (x-axis) and true/prior/hires
     # VALUES AT THOSE SAME BIN CENTERS -- no interpolation anywhere.
     per_row = {name: [] for name in row_names}  # each entry: one window's own dict
     resid_c_all, resid_h_all, width_all, G_all, row_mid_all, boundary_rows = [], [], [], [], [], []
     chi2r_h_all = []  # per-window reduced chi2 (hi-res), when present in the snapshot
 
-    for w in windows:
+    for i, w in enumerate(windows):
         row_lo, row_hi = w["row_lo"], w["row_hi"]
+        eta_bounds = core_eta_bounds[i] if core_eta_bounds is not None else None
         for name in row_names:
             p = w["hires"]["params"][name]
             positions = np.asarray(p["positions"])
@@ -871,6 +910,12 @@ def plot_sweep(in_path: Path, truth: str = "raw", truth_anchor_density: int = 4,
             prior_vals = np.asarray(p["prior"], dtype=float)
             coarse_vals = (np.asarray(w["coarse"]["params"][name]["values"], dtype=float)
                           if has_coarse else None)
+            if eta_bounds is not None:
+                core_mask = (positions >= eta_bounds[0]) & (positions <= eta_bounds[1])
+                positions, true_vals = positions[core_mask], true_vals[core_mask]
+                hires_vals, prior_vals = hires_vals[core_mask], prior_vals[core_mask]
+                if coarse_vals is not None:
+                    coarse_vals = coarse_vals[core_mask]
             per_row[name].append(dict(
                 rows=eta_to_row(positions), true=true_vals, hires=hires_vals,
                 prior=prior_vals, coarse=coarse_vals))
