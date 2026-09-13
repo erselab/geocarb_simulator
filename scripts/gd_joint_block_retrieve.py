@@ -1036,7 +1036,12 @@ def plot_sweep(in_path: Path, truth: str = "raw", truth_anchor_density: int = 4,
                      "continuum = each row's own brightest column)", fontsize=10.5)
 
     fig.tight_layout()
-    plots_dir = REPO_ROOT / "figures" / "joint_block"
+    # 2026-09-13: was REPO_ROOT/"figures"/"joint_block" -- standing rule
+    # (user) is every geocarb_simulator figure goes to plots/, never
+    # scratchpad; plots/joint_block/ already existed (empty) as the
+    # intended destination, this just makes the code actually use it.
+    # Old output stays in figures/joint_block/ untouched -- not migrated.
+    plots_dir = REPO_ROOT / "plots" / "joint_block"
     plots_dir.mkdir(parents=True, exist_ok=True)
     truth_suffix = "" if truth != "anchor" else f"_truth-ad{truth_anchor_density}"
     rows_suffix = "" if rows is None else "_" + "-".join(n.split("_")[0] for n in row_names)
