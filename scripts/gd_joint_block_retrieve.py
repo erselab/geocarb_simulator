@@ -363,7 +363,84 @@ def _solve_window(row_lo: int, row_hi: int):
                           else np.array([float(als.xco2_ppm(xk))
                                         for xk in bin_centers * als.SLIT_HALF_KM]))
 
-    y_true = band["A"][rows_win, :].ravel()
+    free = tuple(_SWEEP.get("free", ("co2_ppm",)))
+    # `vary_albedo`, not just `"albedo" in free`, decides whether a surface
+    # row exists at all (2026-08-29 fix): before this, freezing albedo
+    # (leaving it out of --free) while --vary-albedo rendered a spatially-
+    # varying TRUTH always meant band_label stayed None -- no surface row
+    # got added to the StateSpec at all, so build_forward_state fell back
+    # to _SWEEP["albedo"]'s single fixed scalar for EVERY anchor, silently
+    # mismatching a truth scene that genuinely varies along the slit. That
+    # was never exercised before -- every prior sweep either froze albedo
+    # AND rendered it constant (`--free` without `--vary-albedo`) or freed
+    # albedo AND varied it (`--free ...,albedo --vary-albedo`, enforced by
+    # main()'s own validation) -- the "freeze albedo at the real per-
+    # position truth" case this fix enables was simply unreachable. Now:
+    # whenever `--vary-albedo` renders a real truth field, a surface row is
+    # always added (frozen unless "albedo" is also in --free), so a frozen
+    # row's own prior IS the true per-bin-center value (surface_fields
+    # defaults to als.SURFACE_FIELDS, exact truth) -- "albedo held fixed at
+    # truth" becomes an actual, correctly-wired configuration.
+    vary_albedo = _SWEEP.get("vary_albedo", False)
+    with_aerosol = _SWEEP.get("with_aerosol", False)
+    # `with_aerosol` also forces a surface row to exist (2026-09-09): the
+    # frozen tau_aerosol/height_aerosol rows must be in the StateSpec for
+    # build_forward_state to thread them into the forward model, or the
+    # retrieval would omit the aerosol the truth render now includes --
+    # the exact mismatch Sec.14 traced. surface_fields (from _SWEEP) still
+    # carries the aerosol fns in this case; it is stripped of them when
+    # --aerosol is off.
+    band_label = (GEOCARB_BANDS[FPA][0]
+                  if ("albedo" in free or vary_albedo or with_aerosol) else None)
+    corr_length = _SWEEP.get("corr_length")          # None -> per-row physical defaults
+    prior_form = _SWEEP.get("prior_form", "exponential")
+    spectrum = _make_state_spectrum(absco, wide_inst, geo, solar, albedo)
+
+    anchor_ext = max(PAD, retrieval_pad)
+    a_lo, a_hi = max(0, row_lo - anchor_ext), min(ROW_MAX_IDX, row_hi + anchor_ext)
+    anchor_rows = np.arange(a_lo, a_hi + 1e-9, 1.0 / anchor_density)
+    anchor_etas = np.sort(_eta_of(FPA, np.full(len(anchor_rows), 512.0),
+                                  anchor_rows.astype(float)))
+
+    # 2026-09-13 (user: "I would like to modify the truth generation
+    # pipeline so that we first specify a truth grid and then generate the
+    # observation image through the retrieval pipeline. That will allow us
+    # to match exactly" -- "The retrieval forward model" -- "Please also
+    # make that method of generation of truth the default"): `band["A"]`
+    # (the OLD default) is rendered by `_band_setup`'s OWN independent
+    # anchor grid (a fixed dx_km=0.5, or --resolution-matched-*'s own
+    # n_lookup_samples-driven one) -- a genuinely DIFFERENT discretization
+    # of `render_at_anchors` than the retrieval's own `build_forward_state`
+    # uses, confirmed directly (docs/PROJECT_STATUS.md's resolution-matched
+    # diagnostic): even with field VALUES matched exactly, residual never
+    # quite reached zero, shrinking as the two grids converged but never
+    # closing, because they were never actually the SAME grid. Building
+    # truth by calling `build_forward_state` itself -- the retrieval's own
+    # forward model -- at a fully-frozen (`free=()`) StateSpec whose rows
+    # sit on `anchor_etas` (this window's own anchor grid, so `interp_to`
+    # is the identity there, not a band-limiting re-interpolation) removes
+    # that gap entirely: `y_true` becomes bit-for-bit what `forward(x)`
+    # would compute at `x` = the true value, since it IS that computation.
+    # `--legacy-truth` reverts to the old `band["A"]` slice for direct
+    # comparison against every pre-2026-09-13 result, or for scripts that
+    # rely on the whole-image truth cache (`band["A"]` still gets built
+    # either way -- this only changes which array `y_true` reads from).
+    if _SWEEP.get("legacy_truth", False):
+        y_true = band["A"][rows_win, :].ravel()
+    else:
+        truth_surface_fields = als.SURFACE_FIELDS if with_aerosol else {
+            k: v for k, v in als.SURFACE_FIELDS.items()
+            if k not in ("tau_aerosol", "height_aerosol")}
+        truth_spec = state_spec_from_scene(anchor_etas, free=(), fields=als.STATE_FIELDS,
+                                           band_label=band_label,
+                                           surface_fields=truth_surface_fields,
+                                           surface_positions=anchor_etas,
+                                           kinds=ROW_KINDS)
+        fwd_truth = build_forward_state(FPA, rows_win, anchor_etas, truth_spec, spectrum,
+                                        wn_hires, ils, pad=retrieval_pad, state_interp=state_interp,
+                                        n_workers=anchor_workers,
+                                        spatial_psf_fwhm_px=retrieval_psf_fwhm_px)
+        y_true = fwd_truth(np.array([]))
     # Real per-pixel noise (Phase D of the config-consolidation plan),
     # replacing the old flat-scalar Sy_inv_diag = 1/mean(|signal|)^2 for
     # the whole window. geocarb_noise_model(FPA) is the same LinearShotNoise
@@ -397,39 +474,6 @@ def _solve_window(row_lo: int, row_hi: int):
 
     out = dict(row_lo=row_lo, row_hi=row_hi, width=width, G=G, bin_centers=bin_centers,
               prior_co2_ppm_bins=prior_co2_ppm_bins)
-
-    free = tuple(_SWEEP.get("free", ("co2_ppm",)))
-    # `vary_albedo`, not just `"albedo" in free`, decides whether a surface
-    # row exists at all (2026-08-29 fix): before this, freezing albedo
-    # (leaving it out of --free) while --vary-albedo rendered a spatially-
-    # varying TRUTH always meant band_label stayed None -- no surface row
-    # got added to the StateSpec at all, so build_forward_state fell back
-    # to _SWEEP["albedo"]'s single fixed scalar for EVERY anchor, silently
-    # mismatching a truth scene that genuinely varies along the slit. That
-    # was never exercised before -- every prior sweep either froze albedo
-    # AND rendered it constant (`--free` without `--vary-albedo`) or freed
-    # albedo AND varied it (`--free ...,albedo --vary-albedo`, enforced by
-    # main()'s own validation) -- the "freeze albedo at the real per-
-    # position truth" case this fix enables was simply unreachable. Now:
-    # whenever `--vary-albedo` renders a real truth field, a surface row is
-    # always added (frozen unless "albedo" is also in --free), so a frozen
-    # row's own prior IS the true per-bin-center value (surface_fields
-    # defaults to als.SURFACE_FIELDS, exact truth) -- "albedo held fixed at
-    # truth" becomes an actual, correctly-wired configuration.
-    vary_albedo = _SWEEP.get("vary_albedo", False)
-    with_aerosol = _SWEEP.get("with_aerosol", False)
-    # `with_aerosol` also forces a surface row to exist (2026-09-09): the
-    # frozen tau_aerosol/height_aerosol rows must be in the StateSpec for
-    # build_forward_state to thread them into the forward model, or the
-    # retrieval would omit the aerosol the truth render now includes --
-    # the exact mismatch Sec.14 traced. surface_fields (from _SWEEP) still
-    # carries the aerosol fns in this case; it is stripped of them when
-    # --aerosol is off.
-    band_label = (GEOCARB_BANDS[FPA][0]
-                  if ("albedo" in free or vary_albedo or with_aerosol) else None)
-    corr_length = _SWEEP.get("corr_length")          # None -> per-row physical defaults
-    prior_form = _SWEEP.get("prior_form", "exponential")
-    spectrum = _make_state_spectrum(absco, wide_inst, geo, solar, albedo)
 
     # Analytic Jacobians: derivatives from gert's per-layer arrays composed with
     # the detector operator, rather than n_free+1 forward evaluations.
@@ -507,11 +551,6 @@ def _solve_window(row_lo: int, row_hi: int):
         out["resid_coarse_rms"] = float(np.sqrt(np.mean(resid_c ** 2)))
         out["t_coarse"] = time.time() - t0
 
-    anchor_ext = max(PAD, retrieval_pad)
-    a_lo, a_hi = max(0, row_lo - anchor_ext), min(ROW_MAX_IDX, row_hi + anchor_ext)
-    anchor_rows = np.arange(a_lo, a_hi + 1e-9, 1.0 / anchor_density)
-    anchor_etas = np.sort(_eta_of(FPA, np.full(len(anchor_rows), 512.0),
-                                  anchor_rows.astype(float)))
     t0 = time.time()
     # HI-RES: scene on the finer anchor grid, every row interpolated there.
     surface_positions = anchor_etas if surface_positions_mode == "anchor" else None
@@ -1165,6 +1204,20 @@ def main() -> int:
                          "just never wired to a flag before. Off by default: noisy for "
                          "quick/smoke-test invocations, on by default in "
                          "submit_impprior_ws.sbatch's own production runs.")
+    ap.add_argument("--legacy-truth", action="store_true",
+                    help="2026-09-13 (user: match the retrieval's forward model "
+                         "exactly): the DEFAULT truth generation now calls "
+                         "build_forward_state itself (the retrieval's own forward "
+                         "model) on a fully-frozen StateSpec at this window's own "
+                         "anchor grid, instead of slicing band['A'] -- the whole-"
+                         "image truth _band_setup/render_at_anchors rendered "
+                         "independently, on its OWN (possibly different) anchor "
+                         "grid. That independence used to leave a real, never-"
+                         "quite-zero residual even with field VALUES matched "
+                         "exactly (docs/PROJECT_STATUS.md's resolution-matched "
+                         "diagnostic). Pass this flag to revert to the old "
+                         "band['A']-slice behavior -- for reproducing any "
+                         "pre-2026-09-13 result, or comparing against it directly.")
     ap.add_argument("--anchor-density", type=int, default=cfg.anchor_density,
                     help="anchors per detector row for the hi-res forward model "
                          "(default 1 = the original one-per-row). >1 places anchors at "
@@ -1638,6 +1691,7 @@ def main() -> int:
                        gamma=args.gamma, sigma_abs=args.sigma_abs, g_ratio=args.g_ratio,
                        uniform=args.uniform, uniform_priors=uniform_priors, atm_center=atm_center,
                        hires_only=args.hires_only, gn_verbose=args.gn_verbose,
+                       legacy_truth=args.legacy_truth,
                        anchor_density=args.anchor_density,
                        state_interp=args.state_interp,
                        free=tuple(x.strip() for x in args.free.split(',')),
