@@ -717,9 +717,22 @@ def merge_parts(parts_dir: Path, out: "Path | None" = None) -> int:
     if missing_windows:
         print(f"  missing: {sorted(missing_windows)[:10]}{' ...' if len(missing_windows) > 10 else ''}")
 
-    suffix = "_uniform" if meta["uniform"] else ""
-    suffix += f"_gratio{meta['g_ratio']:g}"
-    default_out = parts_dir.parent / f"gd_joint_block_whole_slit_fpa{meta['fpa']}{suffix}.pkl"
+    # 2026-09-13 (user: "create a unique folder for each run that has the
+    # pkl and plots"): one directory per run, named for the run itself
+    # (parts_dir's own name minus "_parts" -- already the FULL
+    # distinguishing config: gratio/adens/free rows/aero/valb/spos/fapos/
+    # ovlp/etc., unlike the old default_out's own suffix, which only ever
+    # covered uniform/g_ratio and so collided across different --free
+    # configs sharing everything else -- e.g. every one of c1-c5 at the
+    # same gratio/adens would previously have written the SAME default
+    # path). plot_sweep saves alongside whatever pkl it's given, so a run
+    # merged into this folder gets its plot placed here too, automatically.
+    run_name = parts_dir.name
+    if run_name.endswith("_parts"):
+        run_name = run_name[: -len("_parts")]
+    run_dir = parts_dir.parent / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    default_out = run_dir / f"{run_name}.pkl"
     out_path = out if out else default_out
     with open(out_path, "wb") as f:
         pickle.dump({"results": results, "tiles": all_tiles, **meta}, f)
@@ -1036,12 +1049,19 @@ def plot_sweep(in_path: Path, truth: str = "raw", truth_anchor_density: int = 4,
                      "continuum = each row's own brightest column)", fontsize=10.5)
 
     fig.tight_layout()
-    # 2026-09-13: was REPO_ROOT/"figures"/"joint_block" -- standing rule
-    # (user) is every geocarb_simulator figure goes to plots/, never
-    # scratchpad; plots/joint_block/ already existed (empty) as the
-    # intended destination, this just makes the code actually use it.
-    # Old output stays in figures/joint_block/ untouched -- not migrated.
-    plots_dir = REPO_ROOT / "plots" / "joint_block"
+    # 2026-09-13 (user: "create a unique folder for each run that has the
+    # pkl and plots"): save alongside whatever pkl this plot was built
+    # from, so a run merged into its own directory (merge_parts's own
+    # per-run folder, see its docstring) gets its plot placed right next
+    # to the data it came from, not off in a separate global tree. Was
+    # briefly REPO_ROOT/"plots"/"joint_block" (a fixed global location,
+    # the standing "figures go to plots/, never scratchpad" rule) -- this
+    # supersedes that for this workflow specifically: `results/` is not
+    # scratchpad, and co-locating pkl+plot per run is more useful here
+    # than a single shared plots/ tree. A caller pointing --plot at a
+    # bare pkl outside any run folder still gets a sensible answer (saves
+    # next to that pkl, wherever it is) rather than erroring.
+    plots_dir = in_path.parent
     plots_dir.mkdir(parents=True, exist_ok=True)
     truth_suffix = "" if truth != "anchor" else f"_truth-ad{truth_anchor_density}"
     rows_suffix = "" if rows is None else "_" + "-".join(n.split("_")[0] for n in row_names)
@@ -1057,8 +1077,10 @@ def _merge_cli(argv) -> int:
                                  description=merge_parts.__doc__)
     ap.add_argument("parts_dir", type=str, help="directory of taskNNNofM.pkl files "
                     "(the *_parts/ directory the array job wrote into)")
-    ap.add_argument("--out", type=str, default=None, help="output path (default: "
-                    "parts_dir with the trailing _parts stripped, plus .pkl)")
+    ap.add_argument("--out", type=str, default=None, help="output path (default: a new "
+                    "directory named for the run -- parts_dir with the trailing _parts "
+                    "stripped -- containing <run_name>.pkl; --plot then saves its figure "
+                    "alongside it in that same directory)")
     args = ap.parse_args(argv)
     return merge_parts(Path(args.parts_dir), Path(args.out) if args.out else None)
 
