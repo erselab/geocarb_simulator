@@ -1,9 +1,20 @@
 #!/bin/bash
 # Whole-slit imperfect-prior (structural) sweep, one SLURM array task per
-# window (2026-09-10, user). Dense (continuous) truth, --vary-albedo, all
-# frozen rows on the ad16 anchor grid so the scene is representable
-# (docs/PROJECT_STATUS.md Sec.15), g_ratio=0.5 (ALGORITHM_ROADMAP
-# production default).
+# window (2026-09-10, user). --vary-albedo, all frozen rows on the ad16
+# anchor grid so the scene is representable (docs/PROJECT_STATUS.md
+# Sec.15), g_ratio=0.5 (ALGORITHM_ROADMAP production default). The
+# intent (2026-09-13, user): "verify the retrieval works properly by
+# giving it less and less information with each experiment" -- every
+# row NOT in --free is held exactly at the truth value (not an
+# imperfect prior -- see gd_joint_block_retrieve.py's own per-row
+# fields mixing), and truth itself uses --n-lookup-samples 400 (the
+# "representative" ~7km-spacing render, matching --prior-fields
+# exact's own default) rather than the dense 500m/5600-sample one a
+# non-"exact" --prior-fields would otherwise default to -- Sec.15's
+# aerosol-confound investigation traced a real non-convergence to
+# exactly that finer texture outrunning what any retrieval grid in
+# this sweep can represent, a confound distinct from (and this sweep
+# doesn't want to also be testing) the imperfect-prior question itself.
 #
 # Select the free-parameter set with:  sbatch --export=ALL,CONF=c1 ...
 #   c1  co2_ppm
@@ -91,7 +102,7 @@ find /dev/shm -maxdepth 1 -user "${USER}" -name 'geocarb_L_*' -mmin +30 2>/dev/n
     | while read -r f; do fuser "$f" >/dev/null 2>&1 || rm -f "$f"; done
 
 ${PYTHON} scripts/gd_joint_block_retrieve.py \
-    --fpa 2 --prior-fields structural --vary-albedo \
+    --fpa 2 --prior-fields structural --vary-albedo --n-lookup-samples 400 \
     --anchor-density 16 --surface-positions anchor --frozen-atmosphere-positions anchor \
     --g-ratio 0.5 --hires-only --jacobian analytic --gn-verbose \
     --anchor-workers "${SLURM_CPUS_PER_TASK}" \

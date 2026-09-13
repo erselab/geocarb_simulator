@@ -1583,10 +1583,28 @@ def main() -> int:
     # STATE_FIELDS/SURFACE_FIELDS -- otherwise a FROZEN row (whose value IS
     # its prior, verbatim) would silently disagree with what generated
     # y_true, a real, avoidable truth/prior mismatch for exactly the rows
-    # meant to be held fixed at the true value. 'structural' (or any other
-    # non-exact choice) is a DELIBERATE imperfect prior and is untouched by
-    # this -- resolution-matching the truth doesn't change what "imperfect"
-    # means for it.
+    # meant to be held fixed at the true value.
+    #
+    # 2026-09-13 (user, correcting this section's own former framing: "It's
+    # my intention to verify the retrieval works properly by giving it less
+    # and less information with each experiment. Everything not free in
+    # these experiments should be exactly equal to the truth"): a
+    # non-"exact" --prior-fields (e.g. "structural") used to apply
+    # UNIFORMLY to every row regardless of free/frozen status -- a FROZEN
+    # row's value IS its prior verbatim, so this injected permanent,
+    # uncorrectable bias into whatever wasn't under active study, not just
+    # the row(s) being tested. Measured directly on t_offset_k: its
+    # "structural" prior is flat/zero while truth is a full ±3K synoptic
+    # sinusoid -- freezing it under the old code meant carrying ~100% of
+    # the true signal as bias, not a small representability gap. That's a
+    # confound for exactly the experiment this sweep exists to run
+    # ("how much can freeing MORE rows correct for), so an imperfect prior
+    # now only ever applies to a row that's actually free; every frozen row
+    # uses the real STATE_FIELDS/SURFACE_FIELDS value, mixed in per-row
+    # below. Also applies to `--vary-albedo`-only runs where "albedo" is
+    # never in --free (still gets a real state row, frozen) -- previously
+    # frozen at SURFACE_FIELDS_PRIOR's patch-layout-only approximation
+    # instead of the real per-position truth.
     if resolution_matched_active and args.prior_fields == "exact":
         prior_fields_resolved = rm_fields
         # state_spec_from_scene's own surface_fields convention differs from
@@ -1599,9 +1617,13 @@ def main() -> int:
         _rm_albedo_fn = rm_surface_fields[rm_band_label]
         surface_fields_resolved = {"albedo": lambda x_km, label, _fn=_rm_albedo_fn: _fn(x_km)}
     else:
-        prior_fields_resolved = als.PRIOR_FIELD_SETS[args.prior_fields]
-        surface_fields_resolved = als.SURFACE_PRIOR_FIELD_SETS.get(
+        _imperfect_fields = als.PRIOR_FIELD_SETS[args.prior_fields]
+        _imperfect_surface_fields = als.SURFACE_PRIOR_FIELD_SETS.get(
             args.prior_fields, als.SURFACE_FIELDS)
+        prior_fields_resolved = {name: (fn if name in free_check else als.STATE_FIELDS[name])
+                                 for name, fn in _imperfect_fields.items()}
+        surface_fields_resolved = {name: (fn if name in free_check else als.SURFACE_FIELDS[name])
+                                   for name, fn in _imperfect_surface_fields.items()}
     if not with_aerosol:
         # Drop the aerosol rows from the retrieval-side surface registry too,
         # so state_spec_from_scene never adds a tau_aerosol/height_aerosol
