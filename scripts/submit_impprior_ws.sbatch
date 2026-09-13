@@ -93,7 +93,7 @@ find /dev/shm -maxdepth 1 -user "${USER}" -name 'geocarb_L_*' -mmin +30 2>/dev/n
 ${PYTHON} scripts/gd_joint_block_retrieve.py \
     --fpa 2 --prior-fields structural --vary-albedo \
     --anchor-density 16 --surface-positions anchor --frozen-atmosphere-positions anchor \
-    --g-ratio 0.5 --hires-only --jacobian analytic \
+    --g-ratio 0.5 --hires-only --jacobian analytic --gn-verbose \
     --anchor-workers "${SLURM_CPUS_PER_TASK}" \
     --task-id "${SLURM_ARRAY_TASK_ID}" --n-tasks 58 \
     --free "${FREE}" ${AERO}

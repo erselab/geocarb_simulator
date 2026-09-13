@@ -329,6 +329,7 @@ def _solve_window(row_lo: int, row_hi: int):
     uniform_priors = _SWEEP["uniform_priors"]
     g_ratio = _SWEEP.get("g_ratio", G_RATIO)
     hires_only = _SWEEP.get("hires_only", False)
+    gn_verbose = _SWEEP.get("gn_verbose", False)
     anchor_density = int(_SWEEP.get("anchor_density", 1))
     state_interp = _SWEEP.get("state_interp", "linear")  # interp1d kind: "linear" or "nearest"
     prior_fields = _SWEEP.get("prior_fields")            # an als.PRIOR_FIELD_SETS[...] dict, always explicit (never None)
@@ -477,7 +478,7 @@ def _solve_window(row_lo: int, row_hi: int):
                      if use_analytic and anchor_workers > 1 else None)
         try:
             x_c, S_ret_c, avk_c = gauss_newton_state(fwd_c, y_true, spec_c, Sy_inv_diag,
-                                                     label=f"[{row_lo}-{row_hi}] coarse", verbose=False,
+                                                     label=f"[{row_lo}-{row_hi}] coarse", verbose=gn_verbose,
                                                      jacobian_fn=_linearizer(spec_c, bin_centers, use_analytic,
                                                                              "linear", pool=lin_pool_c),
                                                      return_cov=True, return_avk=True)
@@ -559,7 +560,7 @@ def _solve_window(row_lo: int, row_hi: int):
                  if use_analytic_hires and anchor_workers > 1 else None)
     try:
         x_h, S_ret_h, avk_h = gauss_newton_state(fwd_h, y_true, spec_h, Sy_inv_diag,
-                                                 label=f"[{row_lo}-{row_hi}] hires", verbose=False,
+                                                 label=f"[{row_lo}-{row_hi}] hires", verbose=gn_verbose,
                                                  jacobian_fn=_linearizer(spec_h, anchor_etas, use_analytic_hires,
                                                                          state_interp, pool=lin_pool_h),
                                                  return_cov=True, return_avk=True)
@@ -1156,6 +1157,14 @@ def main() -> int:
     ap.add_argument("--hires-only", action="store_true",
                     help="skip the coarse solve (unchanged by --anchor-density/"
                          "--state-interp, so re-running it would just reproduce the baseline)")
+    ap.add_argument("--gn-verbose", action="store_true",
+                    help="print gauss_newton_state's own per-iteration line (|dx|, "
+                         "rms_resid, J, lam, accepted) to stdout as the solve runs, "
+                         "instead of only finding out how far it got after the fact -- "
+                         "the function already supports this (its own verbose=True), "
+                         "just never wired to a flag before. Off by default: noisy for "
+                         "quick/smoke-test invocations, on by default in "
+                         "submit_impprior_ws.sbatch's own production runs.")
     ap.add_argument("--anchor-density", type=int, default=cfg.anchor_density,
                     help="anchors per detector row for the hi-res forward model "
                          "(default 1 = the original one-per-row). >1 places anchors at "
@@ -1606,7 +1615,8 @@ def main() -> int:
                        albedo=albedo, wn_hires=band["wn_hires"], ils=band["ils"], fpa=fpa,
                        gamma=args.gamma, sigma_abs=args.sigma_abs, g_ratio=args.g_ratio,
                        uniform=args.uniform, uniform_priors=uniform_priors, atm_center=atm_center,
-                       hires_only=args.hires_only, anchor_density=args.anchor_density,
+                       hires_only=args.hires_only, gn_verbose=args.gn_verbose,
+                       anchor_density=args.anchor_density,
                        state_interp=args.state_interp,
                        free=tuple(x.strip() for x in args.free.split(',')),
                        corr_length=args.corr_length, prior_form=args.prior_form,
