@@ -7,14 +7,23 @@
 # giving it less and less information with each experiment" -- every
 # row NOT in --free is held exactly at the truth value (not an
 # imperfect prior -- see gd_joint_block_retrieve.py's own per-row
-# fields mixing), and truth itself uses --n-lookup-samples 400 (the
-# "representative" ~7km-spacing render, matching --prior-fields
-# exact's own default) rather than the dense 500m/5600-sample one a
-# non-"exact" --prior-fields would otherwise default to -- Sec.15's
-# aerosol-confound investigation traced a real non-convergence to
-# exactly that finer texture outrunning what any retrieval grid in
-# this sweep can represent, a confound distinct from (and this sweep
-# doesn't want to also be testing) the imperfect-prior question itself.
+# fields mixing).
+#
+# Truth resolution left at its --prior-fields!=exact default (5600
+# samples, 500m spacing) -- NOT --n-lookup-samples 400 (7km spacing),
+# briefly tried and reverted (2026-09-13, user: "7km is not
+# representative when the gratio is 0.5 and the ad is 16 -- that
+# would be overkill"): 400's 7km spacing is coarser than even the
+# COARSE bin_centers grid (g_ratio=0.5 -> 1367m spacing), let alone
+# the anchor grid (anchor_density=16 -> 171m spacing) -- it would
+# discard real structure this config can resolve, not avoid a
+# representability confound. 5600's 500m spacing IS coarser than the
+# anchor grid's own 171m, so it stays representable there (Sec.15's
+# actual requirement) without needlessly limiting what the sweep can
+# retrieve. Matching the anchor grid exactly would be 1024*16=16384
+# samples (171m); matching just the coarse grid would be ~2048 (1367m)
+# -- neither has been the deliberate choice here, the plain default
+# has.
 #
 # Select the free-parameter set with:  sbatch --export=ALL,CONF=c1 ...
 #   c1  co2_ppm
@@ -102,7 +111,7 @@ find /dev/shm -maxdepth 1 -user "${USER}" -name 'geocarb_L_*' -mmin +30 2>/dev/n
     | while read -r f; do fuser "$f" >/dev/null 2>&1 || rm -f "$f"; done
 
 ${PYTHON} scripts/gd_joint_block_retrieve.py \
-    --fpa 2 --prior-fields structural --vary-albedo --n-lookup-samples 400 \
+    --fpa 2 --prior-fields structural --vary-albedo \
     --anchor-density 16 --surface-positions anchor --frozen-atmosphere-positions anchor \
     --g-ratio 0.5 --hires-only --jacobian analytic --gn-verbose \
     --anchor-workers "${SLURM_CPUS_PER_TASK}" \
