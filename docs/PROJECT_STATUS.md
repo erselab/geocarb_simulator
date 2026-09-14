@@ -2089,3 +2089,58 @@ produced under the OLD no-op behavior and are stale for `h2o_surface_
 vmr` specifically (every other row in those results is unaffected).
 Past PROJECT_STATUS.md sections and pickles stay valid as a record of
 what was true then; only a fresh rerun picks up the new prior.
+
+## 22. `impprior_ws_g1ad4ov2` c5 (aerosol): 7/58 windows crashed with "p_levels must be strictly increasing" -- an unbounded LM trial step, not a truth/prior bug (2026-09-14)
+
+Merging the c5 (aerosol) sweep found 7/58 windows errored, all the same
+`ValueError: p_levels must be strictly increasing (TOA -> surface)`
+(`gert/atmosphere.py`'s own `AtmosphericProfile.__post_init__` check),
+scattered across the slit (rows 79-91, 481-507, 767-807, 804-846,
+882-926, 923-969, 966-1014) rather than confined to one region --
+already a hint this is an optimizer-path issue, not a scene/truth
+problem at those specific rows.
+
+Reproduced one (rows 79-91, task 9) standalone with `_worker`'s own
+`except Exception` removed so the real traceback would print instead
+of being swallowed into `error=...`. First attempt (single-threaded,
+`--anchor-workers 1`) was too slow to finish inside its own time
+budget and was cancelled; re-run at `--anchor-workers 4` (matching the
+real sweep) converged cleanly in 10 iterations with NO crash at all --
+which does not, on its own, mean the bug is gone: this reproduction
+ran against the current working tree, which by then already included
+Sec.21's `h2o_surface_vmr` structural-prior fix. Since `h2o_surface_
+vmr` is one of c5's free rows, its starting `x0` differs from
+whatever the original (pre-Sec.21) crashing run used, so the entire GN
+trajectory differs from iteration 0 -- not an apples-to-apples repro,
+and inconclusive about root cause on its own.
+
+Root cause found instead by reading `gauss_newton_state`'s own
+Levenberg-Marquardt inner loop directly (`geocarb_gert/joint_state.py`,
+the `for _try in range(lm_max_tries):` block): each trial step
+`x_trial = x + dx_trial` is completely UNBOUNDED -- nothing clamps any
+free row, `p_surface_hpa`/`height_aerosol` included -- before calling
+`forward(x_trial)` to evaluate the trial's residual/cost. If a trial
+(even one this same damping ladder would go on to reject on its own
+merits, had it been able to finish evaluating) happens to push
+`p_surface_hpa`/`height_aerosol` far enough that the derived pressure-
+level grid stops being monotonic, `forward()` raises `ValueError`
+straight out of this loop with nothing to catch it -- propagating past
+`gauss_newton_state`, past `_solve_window`, and only ever caught by
+`_worker`'s outer `except Exception`, which discards the ENTIRE
+window's solve (every already-converged iteration included) rather
+than just rejecting that one bad trial.
+
+Fix (user approved, 2026-09-14): wrapped the trial's `forward(x_trial)`
+call in `try/except ValueError`, treating an invalid trial exactly like
+a worse-objective one -- `lam *= lm_up`, continue the damping ladder --
+instead of letting the exception escape. Generic LM robustness fix, not
+specific to `p_surface_hpa`/`height_aerosol` -- protects any future free
+row whose forward model can go physically invalid, the same way a
+worse-cost trial already gets rejected rather than accepted.
+
+Not yet re-validated against a fresh c5 run (holding off further
+`impprior_ws` submissions until this AND Sec.21's h2o prior are both
+picked up together, per user instruction). The one debug-reproduction
+part file this touched (`task009of58.pkl` in c5's `_parts` dir) was
+overwritten by the (confounded, Sec.21-affected) successful debug run
+-- harmless, since c5 needs a full rerun anyway once both fixes land.

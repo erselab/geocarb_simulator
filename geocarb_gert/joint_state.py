@@ -1071,7 +1071,21 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
             A_damped = A + lam * np.diag(diagA)
             dx_trial = np.linalg.solve(A_damped, b)
             x_trial = x + dx_trial
-            resid_trial = y_true - forward(x_trial)
+            # 2026-09-14 (c5/impprior_ws: a p_surface_hpa/height_aerosol
+            # trial step landed outside AtmosphericProfile's own valid
+            # range -- p_levels non-monotonic -- and crashed the whole
+            # window's solve with an uncaught ValueError, discarding
+            # every already-converged iteration. x_trial is otherwise
+            # unbounded (no clamp on any free row), so an unlucky trial
+            # -- one this same damping ladder would have rejected on
+            # J_trial's own merits anyway, had it been able to evaluate
+            # one -- must be treated the same as a worse-objective trial:
+            # reject it and damp harder, not propagate the exception.
+            try:
+                resid_trial = y_true - forward(x_trial)
+            except ValueError:
+                lam *= lm_up
+                continue
             J_trial = _objective(resid_trial, x_trial)
             if J_trial < J_cur:
                 dx = dx_trial
