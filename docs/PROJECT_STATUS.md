@@ -2027,3 +2027,65 @@ reproducing or comparing against any pre-2026-09-13 result. `band["A"]`
 itself is still built either way (other consumers may still read it);
 this only changes which array `_solve_window`'s own `y_true` reads
 from.
+
+## 21. `h2o_surface_vmr`'s "structural" prior was a no-op copy of truth -- given a real, physically-motivated synoptic term (2026-09-13)
+
+Found while reviewing `impprior_ws_g1ad4ov2` c4's per-row plot summary:
+`h2o_surface_vmr`'s prior-vs-truth bias printed as exactly 0 (`mean=+0
+rms=0 max|bias|=0`), which read as "frozen" even though it's in c4's
+`--free` list. It wasn't frozen -- `state_spec_from_scene` genuinely
+lets GN move it -- but under `--prior-fields structural`,
+`STATE_FIELDS_PRIOR["h2o_surface_vmr"]` pointed at the same function
+as truth (`along_slit_scene.py`'s own comment: "h2o has no such
+[localized] content to begin with ... so it's unchanged from
+STATE_FIELDS"). So the retrieval started already AT the truth for
+this one row while every other free row (co2, p_surface, t_offset,
+albedo) started from a deliberately wrong prior -- not the intended
+"give it less and less information" experiment design (Sec.19's own
+motivation) for this row specifically.
+
+Root cause: every OTHER row's structural prior follows a "keep the
+known/static part, drop the unknown/day-to-day part" split --
+CO2/CH4/CO drop their localized plume+hotspots, `p_surface_hpa` keeps
+its static topographic `mountain` term but drops the synoptic
+sinusoid, `t_offset_k` drops its synoptic sinusoid entirely (flat
+0K). `h2o_surface_vmr`'s truth was *only* the smooth arid-to-humid
+climatological gradient -- no synoptic term existed to drop, so there
+was nothing for a structural prior to differ from.
+
+Fix (user, 2026-09-13: "let's create a structural prior for h2o that
+is physically meaningful" -- chose to add real synoptic content to
+truth over leaving truth alone and just biasing the prior): gave
+`h2o_surface_vmr` the same "climatology + today's weather" structure
+`p_surface_hpa`/`t_offset_k` already have.
+`h2o_surface_vmr_prior(x_km)` is now the old function body (the pure
+tanh climatological gradient) on its own; `h2o_surface_vmr(x_km)`
+(truth) multiplies it by `1 + H2O_SYNOPTIC_FRAC * sin(2*pi*(x_km +
+1400)/2800 + 2.0)`, `H2O_SYNOPTIC_FRAC = 0.15`. Multiplicative, not
+additive like p_surface/t_offset's own sinusoid -- an additive
+constant sized for the humid end would drive VMR negative at the arid
+end, and physically a day's excess moisture is a much larger absolute
+VMR swing over an already-humid region than the same swing over an
+arid one. Own phase (2.0) so it doesn't move in lockstep with
+p_surface's (0.5) or t_offset's (1.5) along the slit.
+`STATE_FIELDS_PRIOR["h2o_surface_vmr"]` now reads
+`h2o_surface_vmr_prior` instead of `h2o_surface_vmr` -- the only wiring
+change needed, since `gd_joint_block_retrieve.py`'s frozen/free-row
+mixing (Sec.19) already reads generically from this dict rather than
+special-casing any row.
+
+Validated directly: prior-truth bias at 9 sample points along the
+slit is now genuinely nonzero, up to ~2.5e-3 VMR (~15-20% of the
+local climatological background), and `STATE_FIELDS["h2o_surface_vmr"]`
+(truth)/`STATE_FIELDS_PRIOR["h2o_surface_vmr"]` (prior) no longer
+coincide.
+
+Consequence, same shape as Sec.20's own t_offset-addition note: any
+FUTURE rerun of a config that frees `h2o_surface_vmr` under
+`--prior-fields structural` (c4, c5) now starts from a real imperfect
+prior for that row rather than the truth -- the c4/c5 results already
+merged today (both at `g_ratio=1`/`anchor_density=4`/`overlap=2`) were
+produced under the OLD no-op behavior and are stale for `h2o_surface_
+vmr` specifically (every other row in those results is unaffected).
+Past PROJECT_STATUS.md sections and pickles stay valid as a record of
+what was true then; only a fresh rerun picks up the new prior.

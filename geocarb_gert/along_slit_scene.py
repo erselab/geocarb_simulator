@@ -559,10 +559,40 @@ def xch4_ppb(x_km):
     return background + plume + hotspots
 
 
-def h2o_surface_vmr(x_km):
-    # smooth arid -> humid climatological gradient across the whole transect
+#: Day-to-day boundary-layer moisture anomaly, as a FRACTION of the local
+#: climatological background (2026-09-13, user: "let's create a structural
+#: prior for h2o that is physically meaningful"). Until now `h2o_surface_
+#: vmr` was pure climatology with no "today's weather" term at all -- the
+#: only STATE_FIELDS row missing one (p_surface/t_offset both have their
+#: own synoptic sinusoid; see their docstrings) -- so its structural prior
+#: was a no-op copy of truth rather than a real imperfect prior. Modeled as
+#: MULTIPLICATIVE (not an additive constant like p_surface/t_offset's) so
+#: the anomaly scales with the local humidity level -- a day's excess
+#: moisture over an already-humid coastal region is physically a much
+#: larger absolute VMR swing than the same swing over the arid end, and an
+#: additive term sized for the humid end would let VMR go negative at the
+#: arid end. +/-15%: same order as p_surface's/t_offset's own synoptic
+#: amplitude relative to their background range, not a measured value.
+H2O_SYNOPTIC_FRAC = 0.15
+
+
+def h2o_surface_vmr_prior(x_km):
+    # The climatological part alone -- structural prior (2026-09-13): a
+    # real L2 prior knows the broad arid-to-humid background, not today's
+    # actual boundary-layer moisture (the synoptic term `h2o_surface_vmr`
+    # adds on top). Same "keep the static/known part, drop the day-to-day
+    # part" convention as p_surface_hpa_prior/t_offset_k_prior.
     t = 0.5 * (1.0 + np.tanh(x_km / 500.0))
     return 0.005 + t * (0.018 - 0.005)
+
+
+def h2o_surface_vmr(x_km):
+    background = h2o_surface_vmr_prior(x_km)
+    # Own period/phase (2800 km, phase 2.0) so it isn't perfectly
+    # correlated with p_surface's (2800 km, phase 0.5) or t_offset's
+    # (2800 km, phase 1.5) synoptic terms along the slit.
+    synoptic = H2O_SYNOPTIC_FRAC * np.sin(2 * np.pi * (x_km + 1400) / 2800 + 2.0)
+    return background * (1.0 + synoptic)
 
 
 def p_surface_hpa(x_km):
@@ -675,13 +705,15 @@ STATE_FIELDS = {
 
 # Same shape as STATE_FIELDS, but each field is the "structural" prior
 # defined above -- background/topography-aware, never the localized plume/
-# hot-spot/synoptic content. h2o has no such content to begin with (a single
-# smooth climatological gradient), so it's unchanged from STATE_FIELDS.
+# hot-spot/synoptic content. h2o_surface_vmr_prior (2026-09-13) is the
+# climatological background alone, with the multiplicative synoptic
+# anomaly `h2o_surface_vmr` itself adds stripped out -- same convention as
+# p_surface_hpa_prior/t_offset_k_prior, no longer a no-op copy of truth.
 STATE_FIELDS_PRIOR = {
     "co2_ppm": lambda x: xco2_ppm_prior(x),
     "ch4_ppb": lambda x: xch4_ppb_prior(x),
     "co_ppb": lambda x: xco_ppb_prior(x),
-    "h2o_surface_vmr": lambda x: h2o_surface_vmr(x),
+    "h2o_surface_vmr": lambda x: h2o_surface_vmr_prior(x),
     "p_surface_hpa": lambda x: p_surface_hpa_prior(x),
     "t_offset_k": lambda x: t_offset_k_prior(x),
 }
