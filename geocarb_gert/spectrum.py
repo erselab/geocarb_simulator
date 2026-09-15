@@ -32,10 +32,55 @@ import numpy as np
 
 import gert
 from gert.forward_model import ForwardModel
-from gert.rt_solver import SingleScatterSolver
+from gert.rt_solver import SingleScatterSolver, XRTMSolver
 
 from . import along_slit_scene as als
 from .aerosol_defaults import aerosol_scalars_for
+
+#: 2026-09-15 (Phase 2 of the XRTM integration plan): the one place a
+#: `solver="single_scatter"|"xrtm"` string resolves to an actual gert
+#: `RTSolver` instance -- every `simulate_spectrum`/`spectrum_and_jacobian`
+#: call site goes through this, so adding a third solver later means
+#: touching this dict once, not every call site. `n_streams=2` (user,
+#: 2026-09-15) overrides gert's own "recommended" default of 8 -- a
+#: deliberate speed/accuracy tradeoff for whole-slit-sweep cost, not yet
+#: independently validated at this project's own scale (see Phase 5 of
+#: the plan) -- confirm radiance accuracy before trusting it blindly.
+#: XRTM needs NO separate phase-function-moment config here: `XRTMSolver.
+#: solve()` computes its own Legendre moments internally from the SAME
+#: `g_aerosol`/`ssa_aerosol` kwargs `_build_aerosol_kwargs` already builds
+#: for `SingleScatterSolver` (via `gert.legendre.combined_layer_coef`,
+#: gert-internal) -- the `xrtm_config.py` module this project's own plan
+#: anticipated needing turned out to be unnecessary.
+def _ensure_xrtm_importable():
+    """`XRTMSolver._load_xrtm()` does a bare `import xrtm` -- but the
+    compiled extension lives at `gert/xrtm/interfaces/xrtm.so`, not
+    `gert/xrtm/` itself (that directory has no `__init__.py`, so without
+    its own `interfaces` subdir on `sys.path`, `import xrtm` silently
+    resolves to an EMPTY namespace package instead of raising ImportError
+    -- confirmed directly, 2026-09-15: `hasattr(xrtm, 'xrtm')` is `False`,
+    not an exception, so this failure mode is easy to miss). Every
+    existing sbatch script's `PYTHONPATH` only has the `gert` repo root,
+    not this subpath -- add it here, once, rather than requiring every
+    caller to remember XRTMSolver's own docstring instruction
+    (`export PYTHONPATH=$PWD/interfaces:$PYTHONPATH`).
+    """
+    import os
+    import sys
+    import gert as _gert_pkg
+    interfaces_dir = os.path.join(os.path.dirname(os.path.dirname(_gert_pkg.__file__)),
+                                  "xrtm", "interfaces")
+    if interfaces_dir not in sys.path:
+        sys.path.insert(0, interfaces_dir)
+
+
+def _build_solver(solver: str, jacobians: bool):
+    if solver == "single_scatter":
+        return SingleScatterSolver(jacobians=jacobians)
+    if solver == "xrtm":
+        _ensure_xrtm_importable()
+        return XRTMSolver(method="eig_add", n_streams=2, jacobians=jacobians)
+    raise ValueError(f"unknown solver {solver!r} -- expected 'single_scatter' or 'xrtm'")
 
 
 @dataclass
@@ -91,7 +136,8 @@ def _build_aerosol_kwargs(surface: Optional[dict], n_wn: int, geo,
 
 def simulate_spectrum(atm_params: dict, surface: Optional[dict], absco, wide_inst,
                       geo, solar, jacobians: bool = False,
-                      aerosol_type: str = "smoke") -> SpectrumResult:
+                      aerosol_type: str = "smoke",
+                      solver: str = "single_scatter") -> SpectrumResult:
     """Build the atmosphere from `atm_params` (the kwargs
     `along_slit_scene.atmosphere_from_params` takes) and run one
     `gert.ForwardModel` pass.
@@ -119,7 +165,7 @@ def simulate_spectrum(atm_params: dict, surface: Optional[dict], absco, wide_ins
     aer_kwargs = _build_aerosol_kwargs(surface, n_wn, geo, aerosol_type)
 
     fm = ForwardModel(atm, absco, wide_inst, geo,
-                      solver=SingleScatterSolver(jacobians=jacobians),
+                      solver=_build_solver(solver, jacobians),
                       solar_spectrum=solar)
     res = fm.run(albedo=np.array([alb]), albedo_slope=np.array([slope]),
                 jacobians=jacobians, **aer_kwargs)
@@ -129,7 +175,8 @@ def simulate_spectrum(atm_params: dict, surface: Optional[dict], absco, wide_ins
 
 def spectrum_and_jacobian(atm_params: dict, rows, absco, wide_inst, geo, solar,
                           surface: Optional[dict] = None,
-                          aerosol_type: str = "smoke"):
+                          aerosol_type: str = "smoke",
+                          solver: str = "single_scatter"):
     """``(S_hires, {row: dS/d(param)})`` -- the analytic-Jacobian
     counterpart of `simulate_spectrum`. Row dispatch is delegated to
     `geocarb_gert.jacobians` (`SURFACE_ROW_JACOBIAN`, `gas_dI_dparam`,
@@ -137,11 +184,20 @@ def spectrum_and_jacobian(atm_params: dict, rows, absco, wide_inst, geo, solar,
     `height_aerosol_dI_dparam`) -- unchanged from `make_spectrum_jac`,
     just relocated to call through `simulate_spectrum` for the nominal
     state instead of building its own `ForwardModel`.
+
+    `solver` (2026-09-15, Phase 2/3 of the XRTM integration plan) picks
+    between two DIFFERENT aerosol-height/thickness Jacobian compositions,
+    not just a different forward-model call: `SingleScatterSolver`'s
+    `tau_abv`-based RT-level-FD (`height_aerosol_dI_dparam`,
+    `thickness_aerosol_dI_dparam`'s AOD-scaling-only version) vs XRTM's
+    exact analytic `K_aer_lay_hires` composition (`*_xrtm` variants) --
+    see both functions' own docstrings for why one solver's `K_ssa_lay==0`
+    makes the latter degenerate there.
     """
     from . import jacobians as jac  # local import: jacobians imports this module too
 
     sr = simulate_spectrum(atm_params, surface, absco, wide_inst, geo, solar,
-                           jacobians=True, aerosol_type=aerosol_type)
+                           jacobians=True, aerosol_type=aerosol_type, solver=solver)
     res, atm = sr.result, sr.atm
     surface = surface or {}
     alb = float(surface.get("albedo", 0.0))
@@ -160,13 +216,18 @@ def spectrum_and_jacobian(atm_params: dict, rows, absco, wide_inst, geo, solar,
     d = {}
     for row in rows:
         if row == "height_aerosol":
-            d[row] = jac.height_aerosol_dI_dparam(res, atm, float(height_aer),
-                                                   thickness_aerosol=thickness_aer)
+            d[row] = (jac.height_aerosol_dI_dparam_xrtm(res, atm, float(height_aer), float(thickness_aer))
+                      if solver == "xrtm" else
+                      jac.height_aerosol_dI_dparam(res, atm, float(height_aer),
+                                                   thickness_aerosol=thickness_aer))
         elif row == "amplitude_aerosol":
             d[row] = jac.amplitude_aerosol_dI_dparam(res, float(thickness_aer))
         elif row == "thickness_aerosol":
-            d[row] = jac.thickness_aerosol_dI_dparam(
-                res, atm, float(height_aer), float(thickness_aer), float(amp_aer))
+            d[row] = (jac.thickness_aerosol_dI_dparam_xrtm(
+                        res, atm, float(height_aer), float(thickness_aer), float(amp_aer))
+                      if solver == "xrtm" else
+                      jac.thickness_aerosol_dI_dparam(
+                        res, atm, float(height_aer), float(thickness_aer), float(amp_aer)))
         elif row in jac.SURFACE_ROW_JACOBIAN:
             d[row] = jac.surface_dI_dparam(res, row)
         elif row == "p_surface_hpa":

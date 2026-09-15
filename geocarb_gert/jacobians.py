@@ -514,6 +514,100 @@ def height_aerosol_dI_dparam(res, atm, height_aerosol_val, window: int = 0,
     return -m * I_scatter * dtau_abv_dheight
 
 
+def _gaussian_aer_frac_derivs(p_layers, height_aerosol_val: float, thickness_aerosol_val: float):
+    """Closed-form ``d(aer_frac[l])/d(height_aerosol)``,
+    ``d(aer_frac[l])/d(thickness_aerosol)`` for the Gaussian aerosol
+    vertical profile (2026-09-15, Phase 3 of the XRTM integration plan --
+    matches `forward_model.py:551-563`'s own weight formula exactly:
+    ``w_l = exp(-0.5*((p_l-mu)/sigma)**2)``, ``aer_frac_l = w_l / sum(w)``).
+
+    Quotient rule on the normalized weight gives, for either parameter
+    theta in {mu, sigma}::
+
+        d(aer_frac_l)/d(theta) = aer_frac_l * (d(ln w_l)/d(theta)
+                                               - <d(ln w)/d(theta)>_frac)
+
+    where ``<.>_frac`` is the aer_frac-weighted mean over layers -- the
+    same "de-mean under the distribution's own weights" structure a
+    softmax gradient has, since `aer_frac` IS a softmax of
+    ``-0.5*((p-mu)/sigma)**2``. For mu: ``d(ln w_l)/d(mu) = (p_l-mu)/
+    sigma**2``. For sigma: ``d(ln w_l)/d(sigma) = (p_l-mu)**2/sigma**3``.
+    """
+    p = np.asarray(p_layers, dtype=float)
+    mu = float(height_aerosol_val)
+    sigma = float(thickness_aerosol_val)
+    dp = p - mu
+    w = np.exp(-0.5 * (dp / sigma) ** 2)
+    w_sum = w.sum()
+    if w_sum <= 0:
+        z = np.zeros_like(p)
+        return z, z
+    aer_frac = w / w_sum
+    mean_dp = float(np.sum(aer_frac * dp))
+    mean_dp2 = float(np.sum(aer_frac * dp ** 2))
+    d_height = aer_frac / sigma ** 2 * (dp - mean_dp)
+    d_thickness = aer_frac / sigma ** 3 * (dp ** 2 - mean_dp2)
+    return d_height, d_thickness
+
+
+def height_aerosol_dI_dparam_xrtm(res, atm, height_aerosol_val: float,
+                                  thickness_aerosol_val: float, window: int = 0):
+    """``dI_hires/d(height_aerosol)`` under the XRTM solver (2026-09-15,
+    Phase 3 of the XRTM integration plan) -- exact analytic composition
+    through the already-generic ``K_aer_lay_hires`` per-layer aerosol
+    Jacobian (`forward_model.py:728-751`, populated for any solver
+    exposing real per-layer `K_tau_lay`/`K_ssa_lay`) and the closed-form
+    Gaussian-weight derivative above. Zero extra RT calls -- and, unlike
+    `height_aerosol_dI_dparam` (the `SingleScatterSolver`-specific
+    RT-level-FD version above), genuinely SMOOTH in `height_aerosol`: no
+    `tau_abv`/`above_mask` hard cutoff anywhere in this composition.
+
+    Requires ``jacobians=True`` AND ``solver="xrtm"`` on the
+    `ForwardModel.run()` call that produced `res` -- under
+    `SingleScatterSolver`, `K_ssa_lay_hires` is identically zero, which
+    `docs/PROJECT_STATUS.md` Sec.11's "Bug 2" already showed makes this
+    exact composition cancel to ~zero (a real physical degeneracy, not a
+    bug here) -- use `height_aerosol_dI_dparam` for that solver instead.
+    """
+    K_aer_lay = res.K_aer_lay_hires[window] if res.K_aer_lay_hires else None
+    tau_aer_col = res.tau_aer_col_hires[window] if res.tau_aer_col_hires else None
+    if K_aer_lay is None or tau_aer_col is None:
+        raise RuntimeError("K_aer_lay_hires/tau_aer_col_hires are None -- was the "
+                           "ForwardModel run with jacobians=True, solver='xrtm', and "
+                           "aerosol kwargs?")
+    d_height, _ = _gaussian_aer_frac_derivs(atm.p_layers, height_aerosol_val, thickness_aerosol_val)
+    return np.asarray(tau_aer_col, dtype=float) * np.einsum(
+        "lw,l->w", np.asarray(K_aer_lay, dtype=float), d_height)
+
+
+def thickness_aerosol_dI_dparam_xrtm(res, atm, height_aerosol_val: float,
+                                     thickness_aerosol_val: float,
+                                     amplitude_aerosol_val: float, window: int = 0):
+    """``dI_hires/d(thickness_aerosol)`` under the XRTM solver (2026-09-15,
+    Phase 3): BOTH terms are now exact and analytic, unlike
+    `thickness_aerosol_dI_dparam` above (which only captures the AOD-
+    scaling term under `SingleScatterSolver`, since the reshaping term is
+    degenerate there for the same `K_ssa_lay==0` reason `height_aerosol_
+    dI_dparam_xrtm`'s own docstring explains) -- the AOD-scaling term
+    (``K_tau_aer_hires`` chain rule, unchanged) plus the profile-reshaping
+    term (``K_aer_lay_hires`` chain rule through the closed-form Gaussian-
+    weight sigma-derivative, genuinely informative here).
+    """
+    K_tau_aer = getattr(res, "K_tau_aer_hires", None)
+    K_aer_lay = res.K_aer_lay_hires[window] if res.K_aer_lay_hires else None
+    tau_aer_col = res.tau_aer_col_hires[window] if res.tau_aer_col_hires else None
+    if K_tau_aer is None or K_aer_lay is None or tau_aer_col is None:
+        raise RuntimeError("K_tau_aer_hires/K_aer_lay_hires/tau_aer_col_hires are None "
+                           "-- was the ForwardModel run with jacobians=True, "
+                           "solver='xrtm', and aerosol kwargs?")
+    scaling_term = (np.asarray(K_tau_aer[window], dtype=float)
+                    * float(amplitude_aerosol_val) * np.sqrt(2.0 * np.pi))
+    _, d_thickness = _gaussian_aer_frac_derivs(atm.p_layers, height_aerosol_val, thickness_aerosol_val)
+    reshape_term = np.asarray(tau_aer_col, dtype=float) * np.einsum(
+        "lw,l->w", np.asarray(K_aer_lay, dtype=float), d_thickness)
+    return scaling_term + reshape_term
+
+
 def height_aerosol_dI_dparam_fd(absco, wide_inst, geo, solar, atm, alb, slope,
                                 tau_aer, height_aerosol_val, h_rel: float = 1e-2):
     """``dI_hires/d(height_aerosol)`` -- a genuine RT-level finite
@@ -565,7 +659,7 @@ def height_aerosol_dI_dparam_fd(absco, wide_inst, geo, solar, atm, alb, slope,
     return (_I(height_aerosol_val + h) - _I(height_aerosol_val - h)) / (2.0 * h)
 
 
-def make_spectrum_jac(absco, wide_inst, geo, solar, albedo):
+def make_spectrum_jac(absco, wide_inst, geo, solar, albedo, solver: str = "single_scatter"):
     """``spectrum_jac(params, rows) -> (S_hires, {row: dS/d(param)})``.
 
     Thin wrapper around `geocarb_gert.spectrum.spectrum_and_jacobian`
@@ -576,6 +670,10 @@ def make_spectrum_jac(absco, wide_inst, geo, solar, albedo):
     albedo)` -- since `spectrum_and_jacobian` deliberately has no
     module-scalar fallback of its own (see its docstring: albedo
     resolution is the caller's responsibility).
+
+    `solver` (2026-09-15) is threaded straight through to
+    `spectrum_and_jacobian` -- see that function's own docstring for what
+    it changes about aerosol-row Jacobian dispatch.
     """
     from .spectrum import spectrum_and_jacobian
 
@@ -583,7 +681,7 @@ def make_spectrum_jac(absco, wide_inst, geo, solar, albedo):
         surface = dict(surface or {})
         surface["albedo"] = float(surface.get("albedo", albedo))
         return spectrum_and_jacobian(params, rows, absco, wide_inst, geo, solar,
-                                     surface=surface)
+                                     surface=surface, solver=solver)
 
     return spectrum_jac
 

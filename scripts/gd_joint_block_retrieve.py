@@ -236,7 +236,7 @@ def build_window_tiles(fpa: int, row_min: int = 0, row_max: int = ROW_MAX_IDX,
     return tiles
 
 
-def _make_state_spectrum(absco, wide_inst, geo, solar, albedo):
+def _make_state_spectrum(absco, wide_inst, geo, solar, albedo, solver: str = "single_scatter"):
     """spectrum(params_dict[, surface_dict]) -> hi-res radiance, built
     straight from `als.atmosphere_from_params`. Deliberately NOT gert's
     StateVector.gas_scaling, which only knows how to scale gases and would
@@ -271,7 +271,8 @@ def _make_state_spectrum(absco, wide_inst, geo, solar, albedo):
         px_albedo = surface["albedo"] if surface is not None else albedo
         sfc = dict(surface or {})
         sfc["albedo"] = px_albedo
-        return simulate_spectrum(params, sfc, absco, wide_inst, geo, solar).I_hires
+        return simulate_spectrum(params, sfc, absco, wide_inst, geo, solar,
+                                 solver=solver).I_hires
     return spectrum
 
 
@@ -399,7 +400,8 @@ def _solve_window(row_lo: int, row_hi: int):
                   if ("albedo" in free or vary_albedo or with_aerosol) else None)
     corr_length = _SWEEP.get("corr_length")          # None -> per-row physical defaults
     prior_form = _SWEEP.get("prior_form", "exponential")
-    spectrum = _make_state_spectrum(absco, wide_inst, geo, solar, albedo)
+    rt_solver = _SWEEP.get("solver", "single_scatter")
+    spectrum = _make_state_spectrum(absco, wide_inst, geo, solar, albedo, solver=rt_solver)
 
     anchor_ext = max(PAD, retrieval_pad)
     a_lo, a_hi = max(0, row_lo - anchor_ext), min(ROW_MAX_IDX, row_hi + anchor_ext)
@@ -491,7 +493,7 @@ def _solve_window(row_lo: int, row_hi: int):
     # available for hires unconditionally now, the same as coarse always was.
     use_analytic = _SWEEP.get("jacobian", "fd") == "analytic"
     use_analytic_hires = use_analytic
-    spectrum_jac = (jac.make_spectrum_jac(absco, wide_inst, geo, solar, albedo)
+    spectrum_jac = (jac.make_spectrum_jac(absco, wide_inst, geo, solar, albedo, solver=rt_solver)
                     if use_analytic else None)
 
     def _linearizer(spec_, scene_etas_, enabled, interp_kind, pool=None):
@@ -704,8 +706,15 @@ def merge_parts(parts_dir: Path, out: "Path | None" = None) -> int:
             # used --overlap or --window-scale.
             meta = {k: d[k] for k in ("fpa", "uniform", "gamma", "sigma_abs", "g_ratio",
                                       "min_window", "pad", "window_scale", "overlap")}
+            # solver added 2026-09-15 -- default "single_scatter" for any
+            # part file written before this field existed (every run
+            # before today), matching window_scale/overlap's own
+            # backward-compat precedent above.
+            meta["solver"] = d.get("solver", "single_scatter")
         else:
-            mismatches = {k: (meta[k], d[k]) for k in meta if meta[k] != d[k]}
+            d_solver = d.get("solver", "single_scatter")
+            mismatches = {k: (meta[k], (d_solver if k == "solver" else d[k]))
+                         for k in meta if meta[k] != (d_solver if k == "solver" else d[k])}
             if mismatches:
                 print(f"FAIL: {pf} has different run parameters than earlier parts: {mismatches}")
                 return 1
@@ -1368,6 +1377,22 @@ def main() -> int:
                          "scripts/gd_jacobian_validate.py --interp-kind nearest), or to "
                          "exercise a state target (dispersion, albedo) neither matrix "
                          "covered.")
+    ap.add_argument("--solver", type=str, default="single_scatter",
+                    choices=["single_scatter", "xrtm"],
+                    help="which gert RTSolver both truth generation and the retrieval's "
+                         "own forward model use (2026-09-15, Phase 2 of the XRTM "
+                         "integration plan). 'single_scatter' (default, unchanged "
+                         "behavior) is gert.rt_solver.SingleScatterSolver -- Beer-Lambert "
+                         "+ single-scatter aerosol, no multiple scattering. 'xrtm' is "
+                         "gert.rt_solver.XRTMSolver(method='eig_add', n_streams=2) -- real "
+                         "multiple scattering, and (only under this solver) genuinely "
+                         "smooth analytic height_aerosol/thickness_aerosol Jacobians (see "
+                         "geocarb_gert/jacobians.py's height_aerosol_dI_dparam_xrtm/"
+                         "thickness_aerosol_dI_dparam_xrtm) -- SingleScatterSolver's own "
+                         "K_ssa_lay==0 makes that same composition degenerate. 'xrtm' is "
+                         "NOT yet benchmarked at this project's own scale (Phase 5 of the "
+                         "plan) -- materially more expensive per RT call than "
+                         "single_scatter, opt in deliberately, not as a silent default.")
     ap.add_argument("--n-windows", type=int, default=None,
                     help="target number of slit windows; solved for via "
                          "scale_for_window_count. Default (None) keeps the historical "
@@ -1803,7 +1828,7 @@ def main() -> int:
                        state_interp=args.state_interp,
                        free=tuple(x.strip() for x in args.free.split(',')),
                        corr_length=args.corr_length, prior_form=args.prior_form,
-                       jacobian=args.jacobian,
+                       jacobian=args.jacobian, solver=args.solver,
                        prior_fields=prior_fields_resolved,
                        surface_fields=surface_fields_resolved,
                        prior_anchor_density=args.prior_anchor_density,
@@ -1941,7 +1966,7 @@ def main() -> int:
               "hires_only": args.hires_only, "anchor_density": args.anchor_density,
               "state_interp": args.state_interp, "free": free_t,
               "corr_length": args.corr_length, "prior_form": args.prior_form,
-              "jacobian": args.jacobian, "n_windows": len(all_tiles),
+              "jacobian": args.jacobian, "solver": args.solver, "n_windows": len(all_tiles),
               "window_scale": window_scale, "prior_fields": args.prior_fields,
               "n_lookup_samples": n_lookup_samples,
               "prior_anchor_density": args.prior_anchor_density,
