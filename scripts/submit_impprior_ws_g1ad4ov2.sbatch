@@ -18,6 +18,31 @@
 #   c3  co2_ppm,p_surface_hpa,albedo
 #   c4  co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo   ("everything", no aerosol)
 #   c5  c4 + tau_aerosol,height_aerosol  --aerosol                ("everything" + aerosol retrieved)
+#   c5b c4 + tau_aerosol (NOT height_aerosol)  --aerosol           (diagnostic, 2026-09-15 --
+#       see below)
+#
+# c5b (2026-09-15, user: isolate whether height_aerosol's non-smooth
+# Jacobian specifically drives c5's slow convergence, vs. just "2 more
+# free rows in general"): c5's own GN logs showed a stark, near-uniform
+# split from c4 -- c4 converges in 3-5 iterations on EVERY one of 58
+# windows, c5 needed up to 14 and 35/58 (60%) hit the max_iter=15 cap,
+# while the per-iteration wall-clock cost only rose ~1.2-1.3x (fully
+# explained by height_aerosol's own already-documented extra 2 RT
+# calls/anchor, docs/PROJECT_STATUS.md Sec.11) -- i.e. the slowdown is
+# almost entirely an ITERATION-COUNT problem, not a per-iteration-cost
+# one. height_aerosol's Jacobian is a genuine RT-level finite
+# difference of a discontinuous function (`tau_abv`'s hard
+# `above_mask = atm.p_layers < height_aerosol`, gert's forward_model.py
+# -- see jacobians.py's own height_aerosol_dI_dparam docstring); a
+# locally-computed derivative of a discontinuous function is a poor
+# local model for Gauss-Newton's quadratic approximation, producing
+# exactly the "lam pinned, J flat for 10+ iterations" plateau signature
+# seen directly in c5's own logs (e.g. task 56/57). c5b keeps aerosol
+# physics and tau_aerosol (validated smooth, Sec.11) free, but FREEZES
+# height_aerosol at truth (Sec.19's generic frozen-row-holds-truth
+# logic) -- if iteration counts drop back near c4's 3-5 range, that
+# confirms height_aerosol's non-smoothness specifically (not just
+# aerosol/dimensionality in general) as the dominant driver.
 #
 #SBATCH --job-name=impprior_ws_g1ad4ov2
 #SBATCH --account=ltmurray_lab
@@ -42,13 +67,14 @@ PYTHON=/gpfs/fs1/home/scrowel3/miniforge3/envs/analysis/bin/python
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 
-: "${CONF:?set CONF=c1|c2|c3|c4|c5 via --export=ALL,CONF=...}"
+: "${CONF:?set CONF=c1|c2|c3|c4|c5|c5b via --export=ALL,CONF=...}"
 case "${CONF}" in
   c1) FREE="co2_ppm"; AERO="" ;;
   c2) FREE="co2_ppm,p_surface_hpa"; AERO="" ;;
   c3) FREE="co2_ppm,p_surface_hpa,albedo"; AERO="" ;;
   c4) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo"; AERO="" ;;
   c5) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,tau_aerosol,height_aerosol"; AERO="--aerosol" ;;
+  c5b) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,tau_aerosol"; AERO="--aerosol" ;;
   *) echo "unknown CONF=${CONF}"; exit 1 ;;
 esac
 
