@@ -75,11 +75,22 @@ def _ensure_xrtm_importable():
 
 
 def _build_solver(solver: str, jacobians: bool):
+    """2026-09-15 (user, after the first cost benchmark): `method=
+    'eig_add'` even at its OWN minimum `n_streams=2` is NOT "the 2-stream
+    method" -- it's still the full general discrete-ordinates eigenvalue-
+    decomposition machinery, just solving a smaller matrix.
+    `method='two_stream'` is a SEPARATE, purpose-built implementation
+    (the same one `gert.rt_solver.LSISolver` uses as its own "fast"
+    solver) -- measured directly: 3.27s vs `eig_add(n_streams=2)`'s
+    105.28s per anchor at this band's ~12353 hi-res wavenumber points, a
+    ~32x difference from switching METHOD, not the streams number. Made
+    the default here.
+    """
     if solver == "single_scatter":
         return SingleScatterSolver(jacobians=jacobians)
     if solver == "xrtm":
         _ensure_xrtm_importable()
-        return XRTMSolver(method="eig_add", n_streams=2, jacobians=jacobians)
+        return XRTMSolver(method="two_stream", jacobians=jacobians)
     raise ValueError(f"unknown solver {solver!r} -- expected 'single_scatter' or 'xrtm'")
 
 
