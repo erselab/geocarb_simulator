@@ -768,6 +768,17 @@ def _plot_truth_fn_for(row_name: str, truth: str, match_x_km, band_label: str):
         if truth == "anchor":
             return als.resolution_matched_albedo_fn(match_x_km, band_label)
         return lambda x_km: als.albedo_for_label(x_km, band_label)  # noqa: E731
+    if row_name in ("tau_aerosol", "height_aerosol"):
+        # 2026-09-15: first successful full c5 (--aerosol) merge exposed
+        # this gap -- these two rows live in als.SURFACE_FIELDS (same
+        # (x_km, band_label) signature as albedo), not als.STATE_FIELDS,
+        # so the plain STATE_FIELDS[row_name] lookup below raised
+        # KeyError. No resolution-matched ("anchor") truth variant exists
+        # for either row (unlike albedo) -- both are on the coarse
+        # bin_centers grid already (Sec.19), not the fine anchor grid, so
+        # there's no sub-anchor structure a resolution-matched
+        # reconstruction would need to recover.
+        return lambda x_km: als.SURFACE_FIELDS[row_name](x_km, band_label)  # noqa: E731
     if truth == "anchor":
         return als.resolution_matched_fields(match_x_km)[row_name]
     return als.STATE_FIELDS[row_name]
