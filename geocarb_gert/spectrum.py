@@ -52,20 +52,36 @@ def _build_aerosol_kwargs(surface: Optional[dict], n_wn: int, geo,
                           aerosol_type: str) -> dict:
     """`{}` when neither `tau_aerosol` nor `height_aerosol` is present in
     `surface` -- matches every existing call site's `.get(...)` convention:
-    `tau_aerosol=None` is `gert.ForwardModel.run`'s own documented
-    "aerosol term omitted", zero behavior change by default.
+    `amplitude_aerosol=None` is treated the same as `gert.ForwardModel.run`'s
+    own documented "aerosol term omitted" (`tau_aerosol=None`) -- zero
+    behavior change by default.
+
+    2026-09-15 (user: "introduce the Gaussian parameters into the state
+    vector instead of a tau_aerosol"): `gert`'s own `ForwardModel.run`
+    interface is UNCHANGED -- it still wants a scalar column `tau_aerosol`.
+    This function is where geocarb_simulator's own `amplitude_aerosol`/
+    `thickness_aerosol` state gets converted to that column value (the
+    Gaussian integral, `tau = amplitude * sigma * sqrt(2*pi)`, matching
+    `forward_model.py`'s own normalized-weight convention for
+    `aerosol_profile_shape="gaussian"`) -- confined to this one adapter
+    function rather than pushed into the shared `gert` library.
+    `thickness_aerosol` (now the real per-anchor state value, not the old
+    fixed `als.AEROSOL_THICKNESS_PA` constant) is passed straight through
+    unchanged.
     """
-    tau_aer = (surface or {}).get("tau_aerosol")
+    amp_aer = (surface or {}).get("amplitude_aerosol")
     height_aer = (surface or {}).get("height_aerosol")
-    if tau_aer is None:
+    thickness_aer = (surface or {}).get("thickness_aerosol", als.AEROSOL_THICKNESS_PA)
+    if amp_aer is None:
         return {}
+    tau_aer = float(amp_aer) * float(thickness_aer) * np.sqrt(2.0 * np.pi)
     ssa, g, qext_norm = aerosol_scalars_for(aerosol_type)
     p_aer_val = als.aerosol_phase_hg(g, np.cos(geo.scattering_angle))
     return dict(
         tau_aerosol=tau_aer,
         height_aerosol=height_aer,
         aerosol_profile_shape="gaussian",
-        thickness_aerosol=als.AEROSOL_THICKNESS_PA,
+        thickness_aerosol=thickness_aer,
         ssa_aerosol=[np.full(n_wn, ssa)],
         g_aerosol=[g],
         qext_aerosol=[np.full(n_wn, qext_norm)],
@@ -130,20 +146,34 @@ def spectrum_and_jacobian(atm_params: dict, rows, absco, wide_inst, geo, solar,
     surface = surface or {}
     alb = float(surface.get("albedo", 0.0))
     slope = float(surface.get("albedo_slope", 0.0))
-    tau_aer = surface.get("tau_aerosol")
+    amp_aer = surface.get("amplitude_aerosol")
     height_aer = surface.get("height_aerosol")
+    thickness_aer = surface.get("thickness_aerosol", als.AEROSOL_THICKNESS_PA)
+    # 2026-09-15: `tau_aer` here is the SAME derived column value
+    # `_build_aerosol_kwargs` computed for the nominal-state `sr` above --
+    # recomputed (not re-derived from `res`) since `p_surface_dI_dparam`'s
+    # own RT-fallback FD path (jacobians.py) needs it as a plain kwarg to
+    # rebuild a perturbed `ForwardModel.run()` call, same as before.
+    tau_aer = (float(amp_aer) * float(thickness_aer) * np.sqrt(2.0 * np.pi)
+              if amp_aer is not None else None)
 
     d = {}
     for row in rows:
         if row == "height_aerosol":
             d[row] = jac.height_aerosol_dI_dparam(res, atm, float(height_aer),
-                                                   thickness_aerosol=als.AEROSOL_THICKNESS_PA)
+                                                   thickness_aerosol=thickness_aer)
+        elif row == "amplitude_aerosol":
+            d[row] = jac.amplitude_aerosol_dI_dparam(res, float(thickness_aer))
+        elif row == "thickness_aerosol":
+            d[row] = jac.thickness_aerosol_dI_dparam(
+                res, atm, float(height_aer), float(thickness_aer), float(amp_aer))
         elif row in jac.SURFACE_ROW_JACOBIAN:
             d[row] = jac.surface_dI_dparam(res, row)
         elif row == "p_surface_hpa":
             d[row] = jac.p_surface_dI_dparam(res, atm_params, absco=absco, wide_inst=wide_inst,
                                              geo=geo, solar=solar, alb=alb, slope=slope,
-                                             tau_aer=tau_aer, height_aer=height_aer)
+                                             tau_aer=tau_aer, height_aer=height_aer,
+                                             thickness_aer=thickness_aer)
         elif row == "t_offset_k":
             d[row] = jac.t_offset_dI_dparam(res)
         elif row in jac.GAS_ROW_MOLECULE:

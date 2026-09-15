@@ -175,10 +175,14 @@ def gas_dI_dparam(res, mol: str, param_value: float, window: int = 0):
 #: `surface`-target rows and the `ForwardResult` field holding their exact
 #: hi-res derivative. These come free with ``jacobians=True`` -- no chain
 #: rule, no approximation: gert differentiates the surface term directly.
+#: 2026-09-15: `tau_aerosol` retired as a directly-retrievable row (see
+#: `along_slit_scene.amplitude_aerosol`'s own docstring) -- its dispatch is
+#: now `amplitude_aerosol_dI_dparam`/`thickness_aerosol_dI_dparam` (both
+#: still read `K_tau_aer_hires`, just with a chain-rule scale factor), not
+#: a bare field lookup here.
 SURFACE_ROW_JACOBIAN = {
     "albedo": "K_albedo_hires",
     "albedo_slope": "K_slope_hires",
-    "tau_aerosol": "K_tau_aer_hires",
 }
 
 
@@ -201,6 +205,58 @@ def surface_dI_dparam(res, row: str, window: int = 0):
     return np.asarray(arr[window], dtype=float)
 
 
+def amplitude_aerosol_dI_dparam(res, thickness_aerosol_val: float, window: int = 0):
+    """``dI_hires/d(amplitude_aerosol)`` -- exact chain rule through the
+    already-exact ``K_tau_aer_hires`` column Jacobian (2026-09-15,
+    replacing directly-retrieved ``tau_aerosol`` with the Gaussian shape
+    parameters): ``tau_aerosol = amplitude_aerosol * thickness_aerosol *
+    sqrt(2*pi)`` is LINEAR in ``amplitude_aerosol`` at fixed
+    ``thickness_aerosol``, so ``dI/d(amplitude) = K_tau_aer_hires *
+    thickness_aerosol * sqrt(2*pi)`` exactly -- no approximation, no extra
+    RT calls, same cost as the old (now-retired) direct ``tau_aerosol``
+    Jacobian.
+    """
+    arr = getattr(res, "K_tau_aer_hires", None)
+    if arr is None:
+        raise RuntimeError("K_tau_aer_hires is None -- was the ForwardModel run with "
+                           "jacobians=True, aerosol kwargs, and a jacobian-enabled solver?")
+    return np.asarray(arr[window], dtype=float) * float(thickness_aerosol_val) * np.sqrt(2.0 * np.pi)
+
+
+def thickness_aerosol_dI_dparam(res, atm, height_aerosol_val: float,
+                                thickness_aerosol_val: float,
+                                amplitude_aerosol_val: float, window: int = 0):
+    """``dI_hires/d(thickness_aerosol)`` -- the AOD-SCALING term only
+    (2026-09-15): ``thickness_aerosol`` has two effects on
+    ``tau_aerosol = amplitude * thickness * sqrt(2*pi)`` -- (1) scales the
+    total column linearly (captured here, exact, via the same
+    ``K_tau_aer_hires`` chain rule as ``amplitude_aerosol_dI_dparam``), and
+    (2) reshapes the Gaussian profile's own WIDTH, redistributing where the
+    aerosol mass sits across layers.
+
+    **(2) is NOT included here.** Reproducing `height_aerosol_dI_dparam`'s
+    own RT-level finite-difference treatment for the reshaping term is
+    deferred to the XRTM integration (this project's own plan,
+    2026-09-15): under `SingleScatterSolver`, `K_ssa_lay_hires` is
+    identically zero (see that solver's own per-layer Jacobian formula),
+    which is exactly the condition `docs/PROJECT_STATUS.md` Sec.11's "Bug 2"
+    already showed makes the generic `K_aer_lay_hires` chain-rule
+    composition cancel to ~zero for a mass-conserving reshaping -- so unlike
+    `height_aerosol`, there is no existing RT-level-FD precedent this could
+    cheaply reuse; building one now would duplicate real solver-specific RT
+    machinery that becomes free (exact, zero extra RT calls) once the XRTM
+    per-layer Jacobians land. Expected to be a smaller effect than the AOD-
+    scaling term captured here (reshaping only shifts sub-total structure at
+    a fixed total load, not the load itself) -- treat this as a real, known,
+    bounded approximation, not a placeholder passed off as exact.
+    """
+    arr = getattr(res, "K_tau_aer_hires", None)
+    if arr is None:
+        raise RuntimeError("K_tau_aer_hires is None -- was the ForwardModel run with "
+                           "jacobians=True, aerosol kwargs, and a jacobian-enabled solver?")
+    return np.asarray(arr[window], dtype=float) * float(amplitude_aerosol_val) * np.sqrt(2.0 * np.pi)
+
+
 def _layer_mid(a):
     """Level array (n_lev,) -> layer array (n_lev-1,) by midpoint."""
     a = np.asarray(a, dtype=float)
@@ -210,7 +266,7 @@ def _layer_mid(a):
 def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6,
                         absco=None, wide_inst=None, geo=None, solar=None,
                         alb=None, slope=None, tau_aer=None, height_aer=None,
-                        h_rel_rt: float = 1e-3):
+                        thickness_aer=None, h_rel_rt: float = 1e-3):
     """``dI_hires/d(p_surface_hpa)`` -- dispatches to the fast analytic
     composition (`_p_surface_dI_dparam_analytic`) when no aerosol row is
     present (`tau_aer is None` -- every existing caller, zero behavior
@@ -259,7 +315,8 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6,
         res_ = fm.run(albedo=np.array([alb]), albedo_slope=np.array([slope]),
                      tau_aerosol=tau_aer, height_aerosol=height_aer,
                      aerosol_profile_shape="gaussian",
-                     thickness_aerosol=als.AEROSOL_THICKNESS_PA,
+                     thickness_aerosol=(thickness_aer if thickness_aer is not None
+                                        else als.AEROSOL_THICKNESS_PA),
                      ssa_aerosol=[np.full(n_wn, als.AEROSOL_SSA)],
                      g_aerosol=[als.AEROSOL_G],
                      qext_aerosol=[np.full(n_wn, als.AEROSOL_QEXT_NORM)],
@@ -917,7 +974,8 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
 
     free = spec.free_params
     supported = (set(GAS_ROW_MOLECULE) | set(SURFACE_ROW_JACOBIAN)
-                | {"p_surface_hpa", "t_offset_k", "height_aerosol"})
+                | {"p_surface_hpa", "t_offset_k", "height_aerosol",
+                   "amplitude_aerosol", "thickness_aerosol"})
     unsupported = [p.name for p in free if p.name not in supported]
     if unsupported:
         raise NotImplementedError(

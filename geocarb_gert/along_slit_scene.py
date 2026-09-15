@@ -444,6 +444,67 @@ def height_aerosol_prior(x_km, label=None):
     return np.full_like(np.asarray(x_km, dtype=float), 85000.0)
 
 
+def thickness_aerosol(x_km, label=None):
+    """Gaussian aerosol-profile width (sigma) [Pa] -- NEW row (2026-09-15,
+    user: "introduce the Gaussian parameters into the state vector instead
+    of a tau_aerosol"). Previously a single fixed constant
+    (`AEROSOL_THICKNESS_PA`) with no spatial variation at all -- own modest
+    synoptic drift here (own phase, `+3.0`, distinct from `height_aerosol`'s
+    `+2.2`/`t_offset_k`'s `+1.5`/`p_surface_hpa`'s `+0.5`) so the layer's
+    width genuinely varies along the slit like every other structural row,
+    rather than being a trivially-exact free parameter the way `h2o_
+    surface_vmr` was before Sec.21's fix -- same failure mode, avoided here
+    from the start. Amplitude (2000 Pa, 20% of background) deliberately
+    smaller than `height_aerosol`'s own 8000 Pa -- a layer's width is
+    physically a gentler climatological signal than its vertical position.
+    """
+    background = AEROSOL_THICKNESS_PA
+    drift = 2000.0 * np.sin(2 * np.pi * (x_km + 1400) / 2800 + 3.0)
+    return np.clip(background + drift, 100.0, None)
+
+
+def thickness_aerosol_prior(x_km, label=None):
+    """Structural prior: flat background only, matching `height_aerosol_
+    prior`'s own convention.
+    """
+    return np.full_like(np.asarray(x_km, dtype=float), AEROSOL_THICKNESS_PA)
+
+
+def amplitude_aerosol(x_km, label=None):
+    """Gaussian aerosol-profile peak layer-density [Pa^-1] -- NEW row
+    (2026-09-15), replacing `tau_aerosol` as the directly-retrieved aerosol-
+    loading state. `tau_aerosol = amplitude_aerosol * thickness_aerosol *
+    sqrt(2*pi)` (the Gaussian integral, matching `forward_model.py`'s own
+    normalized-weight convention) is now a DERIVED diagnostic, computed at
+    the point (`spectrum.py::_build_aerosol_kwargs`) where geocarb_
+    simulator's own state feeds into `gert.ForwardModel.run`'s unchanged
+    `tau_aerosol` kwarg.
+
+    Defined by DIVIDING the existing `tau_aerosol`/`thickness_aerosol` truth
+    profiles by the Gaussian-integral factor -- preserves the exact same
+    physical total-AOD truth scene (background + haze event) this project
+    has used since Sec.11, now expressed as amplitude x width instead of a
+    directly-specified column value.
+    """
+    tau = tau_aerosol(x_km, label)
+    sigma = thickness_aerosol(x_km, label)
+    return tau / (sigma * np.sqrt(2.0 * np.pi))
+
+
+def amplitude_aerosol_prior(x_km, label=None):
+    """Structural prior: DIVIDES `tau_aerosol_prior`'s own flat-background
+    value by `thickness_aerosol_prior`'s own flat-background width -- both
+    factors already real, nonzero imperfect priors (tau_aerosol_prior omits
+    the haze event; thickness_aerosol_prior omits the width drift), so this
+    quotient is a genuine, nonzero prior-vs-truth mismatch too, not another
+    no-op copy of truth (the h2o_surface_vmr failure mode Sec.21 already
+    fixed once).
+    """
+    tau = tau_aerosol_prior(x_km, label)
+    sigma = thickness_aerosol_prior(x_km, label)
+    return tau / (sigma * np.sqrt(2.0 * np.pi))
+
+
 #: Fixed aerosol microphysics for the `tau_aerosol`/`height_aerosol` state
 #: rows (2026-09-08) -- `smoke` (fresh biomass-burning), matching the
 #: haze-event truth-field narrative above.
@@ -511,10 +572,17 @@ def aerosol_phase_hg(g: float, cos_theta: float) -> float:
 #: whenever `"albedo"` is in `--free` -- see that script for the actual
 #: production wiring. `gd_per_row_retrieve._band_setup`'s own `vary_albedo` still
 #: defaults to False for every OTHER caller, unaffected.
+#: 2026-09-15: `tau_aerosol` retired as a directly-retrievable row (see
+#: `amplitude_aerosol`'s own docstring) -- `amplitude_aerosol`/
+#: `thickness_aerosol` take its place. The `tau_aerosol`/`tau_aerosol_prior`
+#: functions themselves stay defined above (still useful for computing the
+#: derived diagnostic's own "true" value directly, e.g. for plotting),
+#: just no longer registered here as a free-able row.
 SURFACE_FIELDS = {
     "albedo": albedo_for_label,
-    "tau_aerosol": tau_aerosol,
+    "amplitude_aerosol": amplitude_aerosol,
     "height_aerosol": height_aerosol,
+    "thickness_aerosol": thickness_aerosol,
 }
 
 #: Imperfect surface prior (2026-08-25) -- the surface-side sibling of
@@ -528,8 +596,9 @@ SURFACE_FIELDS = {
 #: atmosphere rows -- one flag now drives both.
 SURFACE_FIELDS_PRIOR = {
     "albedo": albedo_for_label_prior,
-    "tau_aerosol": tau_aerosol_prior,
+    "amplitude_aerosol": amplitude_aerosol_prior,
     "height_aerosol": height_aerosol_prior,
+    "thickness_aerosol": thickness_aerosol_prior,
 }
 
 SURFACE_PRIOR_FIELD_SETS = {

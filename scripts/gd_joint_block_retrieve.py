@@ -252,12 +252,17 @@ def _make_state_spectrum(absco, wide_inst, geo, solar, albedo):
     the forward model, matching `state_spec_from_scene`'s whole point in
     adding that row in the first place.
 
-    `surface.get("tau_aerosol")`/`.get("height_aerosol")` (2026-09-08,
-    `None` when neither row is present -- every existing caller, and any
-    current one that doesn't free/freeze them) forward straight to `fm.
-    run`'s own `tau_aerosol`/`height_aerosol` kwargs, which already treat
-    `None` as "aerosol term omitted" -- zero behavior change by default,
-    the same guarantee `t_offset_k=0.0`'s own default gave.
+    `surface.get("amplitude_aerosol")`/`.get("height_aerosol")`/
+    `.get("thickness_aerosol")` (2026-09-08, updated 2026-09-15 when
+    `tau_aerosol` was retired as a directly-retrievable row in favor of
+    the Gaussian shape parameters -- see `along_slit_scene.amplitude_
+    aerosol`'s own docstring) -- `None` when no aerosol rows are present
+    (every existing caller, and any current one that doesn't free/freeze
+    them) forward through `simulate_spectrum`'s own `_build_aerosol_kwargs`,
+    which converts amplitude/thickness to the column `tau_aerosol` `fm.run`
+    still wants and treats `None` as "aerosol term omitted" -- zero
+    behavior change by default, the same guarantee `t_offset_k=0.0`'s own
+    default gave.
     """
     def spectrum(params: dict, surface: dict | None = None):
         # 2026-09-09 consolidation (geocarb_gert.spectrum) -- was its own
@@ -304,8 +309,8 @@ SUB_BIN_ANOMALY_ORACLES = {"truth": _oracle_g_truth, "prior": _oracle_g_prior}
 #: prior that could be zero -- only valid with `--jacobian analytic`
 #: (`gauss_newton_state` raises otherwise; see its own docstring on why
 #: kind="scale" is required for the finite-difference step).
-ROW_KINDS = {"t_offset_k": "absolute", "tau_aerosol": "absolute",
-            "height_aerosol": "absolute"}
+ROW_KINDS = {"t_offset_k": "absolute", "height_aerosol": "absolute",
+            "amplitude_aerosol": "absolute", "thickness_aerosol": "absolute"}
 
 
 def _solve_window(row_lo: int, row_hi: int):
@@ -430,7 +435,7 @@ def _solve_window(row_lo: int, row_hi: int):
     else:
         truth_surface_fields = als.SURFACE_FIELDS if with_aerosol else {
             k: v for k, v in als.SURFACE_FIELDS.items()
-            if k not in ("tau_aerosol", "height_aerosol")}
+            if k not in ("amplitude_aerosol", "height_aerosol", "thickness_aerosol")}
         truth_spec = state_spec_from_scene(anchor_etas, free=(), fields=als.STATE_FIELDS,
                                            band_label=band_label,
                                            surface_fields=truth_surface_fields,
@@ -575,8 +580,9 @@ def _solve_window(row_lo: int, row_hi: int):
     # for a row that isn't in `surface_fields` this call, so this is a
     # no-op whenever --aerosol is off.
     row_positions = dict(row_positions or {})
-    row_positions.setdefault("tau_aerosol", bin_centers)
+    row_positions.setdefault("amplitude_aerosol", bin_centers)
     row_positions.setdefault("height_aerosol", bin_centers)
+    row_positions.setdefault("thickness_aerosol", bin_centers)
     spec_h = state_spec_from_scene(bin_centers, free=free, corr_length=corr_length,
                                    prior_form=prior_form, uniform=uniform_priors,
                                    fields=prior_fields, band_label=band_label,
@@ -768,9 +774,11 @@ def _plot_truth_fn_for(row_name: str, truth: str, match_x_km, band_label: str):
         if truth == "anchor":
             return als.resolution_matched_albedo_fn(match_x_km, band_label)
         return lambda x_km: als.albedo_for_label(x_km, band_label)  # noqa: E731
-    if row_name in ("tau_aerosol", "height_aerosol"):
+    if row_name in ("amplitude_aerosol", "height_aerosol", "thickness_aerosol"):
         # 2026-09-15: first successful full c5 (--aerosol) merge exposed
-        # this gap -- these two rows live in als.SURFACE_FIELDS (same
+        # this gap (originally for tau_aerosol/height_aerosol, before
+        # tau_aerosol was retired as a free row the same day) -- these
+        # rows live in als.SURFACE_FIELDS (same
         # (x_km, band_label) signature as albedo), not als.STATE_FIELDS,
         # so the plain STATE_FIELDS[row_name] lookup below raised
         # KeyError. No resolution-matched ("anchor") truth variant exists
@@ -1441,12 +1449,14 @@ def main() -> int:
                          "heterogeneity) -- only the reverse (free, not rendered) is blocked.")
     ap.add_argument("--aerosol", action="store_true",
                     help="render the TRUTH scene with background aerosol (als.SURFACE_FIELDS' "
-                         "tau_aerosol/height_aerosol: AOD 0.05 + a haze feature; a mid-BL "
-                         "layer height + synoptic drift) AND carry a matching frozen "
-                         "tau_aerosol/height_aerosol row in the retrieval state. OFF by "
+                         "amplitude_aerosol/height_aerosol/thickness_aerosol -- AOD "
+                         "(=amplitude*thickness*sqrt(2pi)) 0.05 + a haze feature; a mid-BL "
+                         "layer height + synoptic drift; a fixed-width Gaussian + its own "
+                         "modest drift) AND carry a matching frozen amplitude_aerosol/"
+                         "height_aerosol/thickness_aerosol row in the retrieval state. OFF by "
                          "default (2026-09-09, Sec.14): without this, both the truth render "
                          "and the forward model are aerosol-free -- the pre-Sec.11 behaviour. "
-                         "Implied automatically when 'tau_aerosol' or 'height_aerosol' is in "
+                         "Implied automatically when any aerosol row is in "
                          "--free. NOTE: joint aerosol retrieval does not yet converge "
                          "(PROJECT_STATUS Sec.14) -- this flag exists to reproduce that, and "
                          "to keep every OTHER config genuinely aerosol-free.")
@@ -1585,8 +1595,9 @@ def main() -> int:
     if args.sub_bin_anomaly != "none" and "albedo" not in free_check:
         ap.error("--sub-bin-anomaly only has an effect on a free 'albedo' row -- add "
                  "'albedo' to --free, or drop --sub-bin-anomaly.")
-    with_aerosol = (args.aerosol or "tau_aerosol" in free_check
-                    or "height_aerosol" in free_check)
+    with_aerosol = (args.aerosol or "amplitude_aerosol" in free_check
+                    or "height_aerosol" in free_check
+                    or "thickness_aerosol" in free_check)
     if with_aerosol and not args.aerosol:
         print("NOTE: --aerosol implied (an aerosol row is in --free).", flush=True)
     if args.resolution_matched_anchor_density is not None and args.anchor_density != args.resolution_matched_anchor_density:
@@ -1773,12 +1784,14 @@ def main() -> int:
                                    for name, fn in _imperfect_surface_fields.items()}
     if not with_aerosol:
         # Drop the aerosol rows from the retrieval-side surface registry too,
-        # so state_spec_from_scene never adds a tau_aerosol/height_aerosol
-        # row -- keeping the retrieval forward aerosol-free to match the
-        # (now also aerosol-free) truth render. With --aerosol they stay,
-        # frozen at their prior/exact value unless also in --free.
+        # so state_spec_from_scene never adds an amplitude_aerosol/
+        # height_aerosol/thickness_aerosol row -- keeping the retrieval
+        # forward aerosol-free to match the (now also aerosol-free) truth
+        # render. With --aerosol they stay, frozen at their prior/exact
+        # value unless also in --free.
         surface_fields_resolved = {k: v for k, v in surface_fields_resolved.items()
-                                   if k not in ("tau_aerosol", "height_aerosol")}
+                                   if k not in ("amplitude_aerosol", "height_aerosol",
+                                                "thickness_aerosol")}
 
     _SWEEP.update(dict(band=band, absco=absco, wide_inst=wide_inst, geo=geo, solar=solar,
                        albedo=albedo, wn_hires=band["wn_hires"], ils=band["ils"], fpa=fpa,

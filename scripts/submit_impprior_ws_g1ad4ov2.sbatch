@@ -17,9 +17,23 @@
 #   c2  co2_ppm,p_surface_hpa
 #   c3  co2_ppm,p_surface_hpa,albedo
 #   c4  co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo   ("everything", no aerosol)
-#   c5  c4 + tau_aerosol,height_aerosol  --aerosol                ("everything" + aerosol retrieved)
-#   c5b c4 + tau_aerosol (NOT height_aerosol)  --aerosol           (diagnostic, 2026-09-15 --
-#       see below)
+#   c5  c4 + amplitude_aerosol,height_aerosol,thickness_aerosol  --aerosol
+#       ("everything" + aerosol retrieved)
+#   c5b c4 + amplitude_aerosol,thickness_aerosol (NOT height_aerosol)  --aerosol
+#       (diagnostic, 2026-09-15 -- see below)
+#
+# 2026-09-15 (user: "introduce the Gaussian parameters into the state
+# vector instead of a tau_aerosol", matching how they run `gert` in other
+# applications): `tau_aerosol` retired as a directly-retrievable row.
+# `amplitude_aerosol`/`height_aerosol`/`thickness_aerosol` (the Gaussian
+# profile's peak density, center, and width) take its place; column AOD
+# is now `amplitude_aerosol * thickness_aerosol * sqrt(2*pi)`, a derived
+# diagnostic rather than something GN solves for directly -- see
+# `along_slit_scene.amplitude_aerosol`'s own docstring. The c5/c5b runs
+# already merged under the OLD `tau_aerosol` row name (this file's own
+# git history / docs/PROJECT_STATUS.md Sec.11-22) stay valid as a record
+# of what was true then; only a FRESH submission under this updated CONF
+# picks up the new parameterization.
 #
 # c5b (2026-09-15, user: isolate whether height_aerosol's non-smooth
 # Jacobian specifically drives c5's slow convergence, vs. just "2 more
@@ -73,8 +87,8 @@ case "${CONF}" in
   c2) FREE="co2_ppm,p_surface_hpa"; AERO="" ;;
   c3) FREE="co2_ppm,p_surface_hpa,albedo"; AERO="" ;;
   c4) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo"; AERO="" ;;
-  c5) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,tau_aerosol,height_aerosol"; AERO="--aerosol" ;;
-  c5b) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,tau_aerosol"; AERO="--aerosol" ;;
+  c5) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol,thickness_aerosol"; AERO="--aerosol" ;;
+  c5b) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,thickness_aerosol"; AERO="--aerosol" ;;
   *) echo "unknown CONF=${CONF}"; exit 1 ;;
 esac
 
