@@ -5,7 +5,23 @@ __pycache__/
 .eggs/
 build/
 dist/
-results/
+**/results/**
+# ...except plots under the top-level results/ tree (2026-09-15, user:
+# "I especially want the plots to be included so I can download and
+# view them") -- pkl/other data files stay ignored everywhere,
+# including archive/initial_build/results/ (a separate old archive,
+# no plots in it anyway). Two earlier attempts were wrong: "results/*"
+# only reached one level deep (staged 1384 nested pkls it should have
+# excluded); "results/**", lacking a leading "/", matched ONLY the
+# top-level results/ directory (git anchors any pattern with a
+# non-trailing "/" to the .gitignore's own directory) and silently
+# left archive/initial_build/results/ matching NO rule at all -- not
+# re-included, just entirely unignored by omission. The leading "**/"
+# here restores "any results/ dir, any depth" for the base ignore; the
+# leading "/" on the two lines below then deliberately re-anchors
+# THEM to the repo root only, so the re-include is top-level-only.
+!/results/**/
+!/results/**/*.png
 **/scratch_work/*.pkl
 **/scratch_work/*.log
 *.err
