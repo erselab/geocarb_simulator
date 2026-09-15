@@ -834,7 +834,18 @@ def plot_sweep(in_path: Path, truth: str = "raw", truth_anchor_density: int = 4,
     with open(in_path, "rb") as f:
         d = pickle.load(f)
     results = d["results"]
-    windows = sorted(results.values(), key=lambda r: r["row_lo"])
+    # 2026-09-15: an errored window's own snapshot is just {row_lo, row_hi,
+    # error} (_worker's own except-branch, see its docstring) -- no
+    # "hires" key, so plotting it raised KeyError. First hit on an
+    # incomplete/partial merge (some windows never solved OK) rather than
+    # a fully-successful one, where this never came up. Skip errored
+    # windows the same way merge_parts's own summary line already does,
+    # rather than trying to plot a result that was never produced.
+    errored = [r for r in results.values() if "error" in r]
+    if errored:
+        print(f"WARNING: {len(errored)}/{len(results)} windows errored during solve "
+             f"(rows {[(r['row_lo'], r['row_hi']) for r in errored]}) -- excluded from plot.")
+    windows = sorted((r for r in results.values() if "error" not in r), key=lambda r: r["row_lo"])
     fpa = d.get("fpa", FPA)
     band_label = GEOCARB_BANDS[fpa][0]
 
