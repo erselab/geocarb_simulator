@@ -1,0 +1,68 @@
+name: docs
+
+# Builds docs/ with Sphinx and deploys to GitHub Pages on every push to
+# main. `gert`/`xrtm` are mocked in docs/conf.py (autodoc_mock_imports) so
+# this needs no real HPC data environment, compiled RT extension, or the
+# separate (still-private) erselab/gert repo -- just enough of
+# geocarb_simulator's own source to be importable for docstring extraction.
+#
+# One-time manual step this workflow can't do for itself: in the repo's
+# own Settings -> Pages, set Source to "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'geocarb_gert/**'
+      - 'scripts/gd_joint_block_retrieve.py'
+      - 'scripts/gd_jacobian_validate.py'
+      - 'scripts/gd_xrtm_aerosol_jacobian_validate.py'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Sphinx + theme + Markdown support + real (non-gert) deps
+        # scipy/matplotlib are genuine, non-mocked dependencies -- found
+        # directly by building locally first (see docs/conf.py's own
+        # comments): geocarb_gert.joint_state imports scipy.interpolate at
+        # module level, scripts/gd_joint_block_retrieve.py imports
+        # matplotlib the same way.
+        run: pip install sphinx furo myst-parser numpy scipy matplotlib
+
+      - name: Build
+        run: sphinx-build -b html docs docs/_build/html
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build/html
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

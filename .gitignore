@@ -29,6 +29,11 @@ dist/
 
 *.npz
 
+# Sphinx docs build output (source lives in docs/, built by CI --
+# .github/workflows/docs.yml -- never committed)
+docs/_build/
+docs/api/**/*.rst.bak
+
 # Jupyter
 .ipynb_checkpoints/
 
