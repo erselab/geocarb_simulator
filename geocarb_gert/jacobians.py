@@ -697,49 +697,45 @@ _POOL_RESULT_TIMEOUT_S = 900.0
 
 
 class PoolHangError(RuntimeError):
-    """Raised by `_imap_unordered_with_timeout`/`_map_with_timeout` in
-    place of hanging forever (2026-09-16, found running the first real
-    XRTM window solve): `multiprocessing.pool.Pool`'s internal
-    `_handle_results` thread unpickles every worker RESULT -- success
-    value or exception -- via `get()` at the top of its own loop, with no
-    `except Exception` around that specific call (only `OSError`/
-    `EOFError`). If a worker's result can't be unpickled in the parent
-    (happened here: XRTM's own C-level rejection of an invalid physical
-    parameter raises an exception type, `xrtm.error`, that isn't a real
-    importable module attribute), that thread dies silently -- and since
-    it's the ONLY thing that ever fires the `threading.Event` every
-    `pool.map()`/`imap_unordered()`/`.get()` caller blocks on, EVERY
-    future call against that same pool hangs forever, with worker
-    processes still alive and still burning CPU on unrelated queued work
-    (confirmed directly: 10+ CPU-hours with zero further progress before
-    being killed manually). A no-op wrapper around `Pool.imap_unordered`/
-    `Pool.map_async().get()` with a timeout turns that silent, unbounded
-    hang into a prompt, loud, diagnosable exception instead -- it cannot
-    prevent the underlying pickling failure (that's a `gert`/XRTM-binding
-    issue, out of this project's control), but it stops one bad result
-    from silently stalling a whole SLURM allocation.
+    """Raised by `_map_with_timeout` in place of hanging forever
+    (2026-09-16, found running the first real XRTM window solve):
+    `multiprocessing.pool.Pool`'s internal `_handle_results` thread
+    unpickles every worker RESULT -- success value or exception -- via
+    `get()` at the top of its own loop, with no `except Exception` around
+    that specific call (only `OSError`/`EOFError`). If a worker's result
+    can't be unpickled in the parent (happened here: XRTM's own C-level
+    rejection of an invalid physical parameter raises an exception type,
+    `xrtm.error`, that isn't a real importable module attribute), that
+    thread dies silently -- and since it's the ONLY thing that ever fires
+    the `threading.Event` every `pool.map()`/`imap_unordered()`/`.get()`
+    caller blocks on, EVERY future call against that same pool hangs
+    forever, with worker processes still alive and still burning CPU on
+    unrelated queued work (confirmed directly: 10+ CPU-hours with zero
+    further progress before being killed manually). A no-op wrapper
+    around `Pool.map_async().get()` with a timeout turns that silent,
+    unbounded hang into a prompt, loud, diagnosable exception instead --
+    it cannot prevent the underlying pickling failure (that's a `gert`/
+    XRTM-binding issue, out of this project's control), but it stops one
+    bad result from silently stalling a whole SLURM allocation.
+
+    2026-09-16 (real bug found and fixed the same day this landed): a
+    first version of this also had `_imap_unordered_with_timeout`, calling
+    `pool.imap_unordered(..., chunksize=2).next(timeout=...)`. Turns out
+    `Pool.imap_unordered` only returns the timeout-capable
+    `IMapUnorderedIterator` when `chunksize == 1` -- for any other
+    chunksize (both real call sites here use 2) it silently returns a
+    plain generator expression (`(item for chunk in result for item in
+    chunk)`, `multiprocessing/pool.py`'s own source) with no `.next(
+    timeout=)` at all, so every call crashed immediately with
+    `AttributeError: 'generator' object has no attribute 'next'` --
+    caught only by actually running the full sweep, not by the unit test
+    (which happened to use chunksize=1 and never hit this branch). Both
+    real call sites now use `_map_with_timeout` instead -- neither reads
+    results incrementally as workers finish (both just index into a
+    pre-sized list by job id regardless of arrival order), so batched
+    `map_async().get()` is functionally identical to streamed
+    `imap_unordered` here and sidesteps the whole chunksize trap.
     """
-
-
-def _imap_unordered_with_timeout(pool, func, iterable, chunksize: int,
-                                 timeout: float = _POOL_RESULT_TIMEOUT_S, label: str = ""):
-    """Drop-in replacement for `for x in pool.imap_unordered(func, iterable,
-    chunksize=chunksize):` that raises `PoolHangError` instead of blocking
-    forever if no result arrives within `timeout` seconds of the previous
-    one. See `PoolHangError`'s own docstring for why this is needed."""
-    import multiprocessing as mp
-    it = pool.imap_unordered(func, iterable, chunksize=chunksize)
-    while True:
-        try:
-            yield it.next(timeout=timeout)
-        except StopIteration:
-            return
-        except mp.TimeoutError as e:
-            raise PoolHangError(
-                f"{label or 'pool.imap_unordered'}: no result in {timeout:.0f}s -- the pool "
-                f"is likely permanently stalled (see PoolHangError's own docstring); check "
-                f"worker stderr for the real underlying error, and treat this pool as unusable."
-            ) from e
 
 
 def _map_with_timeout(pool, func, iterable, chunksize: int,
@@ -821,8 +817,8 @@ def anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
     dS: list = [None] * n_anchor
     ctx = mp.get_context("fork")
     with ctx.Pool(min(n_workers, n_anchor)) as pool:
-        for g, s, d in _imap_unordered_with_timeout(pool, _anchor_spectra_one, range(n_anchor),
-                                                    chunksize=2, label="anchor_spectra_and_derivs"):
+        for g, s, d in _map_with_timeout(pool, _anchor_spectra_one, range(n_anchor),
+                                         chunksize=2, label="anchor_spectra_and_derivs"):
             S[g], dS[g] = s, d
     return S, dS
 
@@ -960,8 +956,8 @@ class LinearizePool:
                for g in range(n)]
         S: list = [None] * n
         dS: list = [None] * n
-        for g, s, d in _imap_unordered_with_timeout(self._anchor_pool, _anchor_spectra_one_persistent,
-                                                    args, chunksize=2, label="LinearizePool.run_anchor"):
+        for g, s, d in _map_with_timeout(self._anchor_pool, _anchor_spectra_one_persistent,
+                                         args, chunksize=2, label="LinearizePool.run_anchor"):
             S[g], dS[g] = s, d
         return S, dS
 
