@@ -81,7 +81,7 @@
 #SBATCH --partition=atmos
 #SBATCH --array=0-57%20
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=64G
+#SBATCH --mem=180G
 #SBATCH --time=8:00:00
 # 2026-09-13 (user: "bump up the default time to cover the longest runs
 # so we can avoid rerunning"): 2h was too tight -- the c4/c5 resubmission
@@ -89,6 +89,21 @@
 # 3/58 (c4) and 13/58 (c5, aerosol) windows at 2h, mostly the widest
 # ones. 8h is a generous margin above that, not a measured ceiling --
 # raise further if a future run still times out.
+#
+# 2026-09-16 (user, after the c5x memory-cluster investigation): --mem
+# raised 64G -> 180G -- tasks 36-56 (a contiguous, real memory-heavy
+# stretch of this scene) measured MaxRSS 78-107GB against the old 64G
+# request, causing 10 outright cgroup OOM-kills (PoolHangError -- a
+# SIGKILL'd worker leaves no exception to report, see that class's own
+# docstring) and pushing 11 more into TIMEOUT (surviving under memory
+# pressure but thrashing too slowly to converge in 8h) -- 21/58 windows,
+# one contiguous failure block. `atmos` nodes have ~493GB RAM/64 CPUs
+# (sinfo) against this script's own --cpus-per-task=4, so 180G leaves
+# real margin above the worst observed case while still packing 2
+# tasks/node. --time briefly dropped to 6h in the same change, then put
+# back to 8h (user: "I thought the wall clock was set to 3 hours" --
+# it was already 8h, not 6h or 3h; kept at 8h, unchanged from 2026-09-13's
+# own value above).
 #SBATCH --output=slurm_out/impprior_ws_g1ad4ov2_%x_%A_%a.out
 
 set -euo pipefail

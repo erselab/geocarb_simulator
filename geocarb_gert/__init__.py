@@ -1,8 +1,18 @@
-"""geocarb_gert — adapter wiring the GeoCarb scan simulator to the GERT library.
+"""geocarb_gert — adapter wiring the GeoCarb scan simulator to the GERT library,
+plus this project's own joint-block retrieval algorithm built on top of it.
 
-This package is deliberately thin.  It contains **no radiative transfer and no
-retrieval code**: `gert` supplies those.  What lives here is everything that is
-specific to *how GeoCarb flies and what it is*:
+This package contains **no radiative transfer**: `gert` supplies that (via
+:mod:`geocarb_gert.spectrum`'s thin wrapper around `gert.ForwardModel`). It
+DOES contain the retrieval itself -- :mod:`geocarb_gert.joint_state` (the
+freezable per-element state vector and the Gauss-Newton/Levenberg-Marquardt
+solver, ``gauss_newton_state``) and :mod:`geocarb_gert.jacobians` (the
+analytic Jacobians driving it) are this project's own code, not `gert`'s.
+(This module's docstring said otherwise until 2026-09-16 -- stale from an
+early, pre-retrieval phase of the project; see ``docs/PROJECT_STATUS.md``
+for how the joint-block retrieval came to live here.)
+
+What else lives here is everything specific to *how GeoCarb flies and what
+it is*:
 
 * :mod:`geocarb_gert.instrument` — the four GeoCarb spectral bands.
 * :mod:`geocarb_gert.radiometry` — the mission-side GSD/dwell → noise mapping.
@@ -11,7 +21,8 @@ specific to *how GeoCarb flies and what it is*:
 * :mod:`geocarb_gert.adapter`   — ``ScanBlock`` → per-pixel `gert.Geometry`
   and `gert.osse.Scene`.
 
-See ``docs/STATUS_AND_ROADMAP.md`` §3.7 in the gert repo for the layering rule.
+See ``docs/STATUS_AND_ROADMAP.md`` §3.7 in the gert repo for the layering rule
+between `gert` (the RT/retrieval library) and this downstream project.
 """
 __version__ = "0.0.1"
 

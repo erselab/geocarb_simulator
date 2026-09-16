@@ -2144,3 +2144,282 @@ picked up together, per user instruction). The one debug-reproduction
 part file this touched (`task009of58.pkl` in c5's `_parts` dir) was
 overwritten by the (confounded, Sec.21-affected) successful debug run
 -- harmless, since c5 needs a full rerun anyway once both fixes land.
+
+## 23. XRTM multi-stream solver integrated as a second RT backend, with the aerosol state redesigned from `tau_aerosol` to Gaussian shape parameters (2026-09-15/16)
+
+Motivated by investigating `height_aerosol`'s non-smooth Jacobian under
+`SingleScatterSolver` (Sec.22's own trial-step fix papered over the
+symptom -- an unbounded LM step crossing a pressure-level boundary --
+without addressing why the Jacobian was discontinuous there in the
+first place: `SingleScatterSolver`'s `tau_abv`/`above_mask` hard
+threshold, a real, documented artifact of that solver, not a physical
+property of aerosols). The user's own working hypothesis, stated
+sharply and correctly: "a perfect model experiment should not get
+easier with a more nonlinear model" -- pushing back on an early,
+imprecise framing of "XRTM should just fix this." The resolution:
+distinguishing physical richness (more nonlinear) from Jacobian
+fidelity (smooth vs. discontinuous) as two independent axes --
+`SingleScatterSolver`'s slowdown traces to specific, avoidable
+implementation artifacts (the hard threshold; `K_ssa_lay` identically
+zero; `thickness_aerosol`'s reshaping term only approximated), not an
+inherent cost of simpler physics.
+
+**State-vector redesign** (user, 2026-09-15: "Introduce the Gaussian
+parameters into the state vector instead of a tau_aerosol. This is the
+way I have been running GERT in other applications."): `tau_aerosol`
+retired as a directly-retrieved row, replaced by the three parameters
+of the aerosol vertical profile's own Gaussian shape --
+`amplitude_aerosol` (peak layer density, Pa^-1), `height_aerosol`
+(centroid pressure, Pa, unchanged name/units from before), and NEW
+`thickness_aerosol` (width/sigma, Pa, previously a single fixed
+constant `AEROSOL_THICKNESS_PA` with no along-slit variation at all).
+`tau_aerosol = amplitude_aerosol * thickness_aerosol * sqrt(2*pi)`
+(the Gaussian integral) is now a derived diagnostic, computed at
+`spectrum.py::_build_aerosol_kwargs`, the one place geocarb_simulator's
+state feeds into `gert.ForwardModel.run`'s unchanged `tau_aerosol`
+kwarg -- `gert`'s own interface required no changes for this.
+`along_slit_scene.py` gained `amplitude_aerosol`/`amplitude_aerosol_
+prior`/`thickness_aerosol`/`thickness_aerosol_prior`, each with its own
+independent synoptic drift (own phase, distinct from `height_aerosol`'s
+and `t_offset_k`'s) so the layer's shape genuinely varies along the
+slit like every other structural row.
+
+**XRTM solver wiring** (`geocarb_gert/spectrum.py::_build_solver`):
+dispatches `"single_scatter"` (unchanged) or `"xrtm"` ->
+`gert.rt_solver.XRTMSolver`. Two real environment/implementation
+findings along the way:
+
+* `_ensure_xrtm_importable()` -- XRTM's compiled extension lives at
+  `gert/xrtm/interfaces/xrtm.so`, not the `gert/xrtm/` package root;
+  without that subdirectory on `sys.path`, a bare `import xrtm`
+  silently resolves to an EMPTY namespace package (no exception, no
+  `AttributeError` until something is actually accessed) -- this
+  environment gap is also the likely root cause of the `xrtm.error`
+  pickling failure Sec.24 below investigates.
+* Solver method choice: the user's own directive ("Also set the
+  default for XRTM to be nstreams=2") was initially implemented as
+  `method="eig_add", n_streams=2` -- the user's own follow-up
+  skepticism ("It was only 2 streams, which is the lowest option
+  anyways") prompted a direct benchmark showing `method="two_stream"`
+  is a SEPARATE, ~32x cheaper implementation, not `eig_add` with a
+  reduced stream count. Switched the default; re-validated Jacobians
+  (an even cleaner smoothness result than the first pass).
+
+**Analytic Jacobian rewrite** (`geocarb_gert/jacobians.py`): new
+`height_aerosol_dI_dparam_xrtm`/`thickness_aerosol_dI_dparam_xrtm`,
+composed from XRTM's real per-layer `K_tau_lay`/`K_ssa_lay` (exposed
+generically as `K_aer_lay_hires`/`K_tau_aer_hires`/`tau_aer_col_hires`
+in `gert.ForwardResult`, via `forward_model.py`'s existing chain-rule
+composition -- no `gert` edits needed here) and a new closed-form
+`_gaussian_aer_frac_derivs` (the Gaussian-weight quotient-rule
+derivative w.r.t. mu/sigma). Zero extra RT calls, and genuinely smooth
+in `height_aerosol` (no `tau_abv` cutoff anywhere in the composition) --
+unlike the `SingleScatterSolver`-specific versions, where `K_ssa_lay`
+being identically zero makes this exact composition cancel to ~zero (a
+real physical degeneracy of that solver, not a bug).
+
+**Validation** (`scripts/gd_xrtm_aerosol_jacobian_validate.py`, new):
+single-anchor scope (XRTM's own per-wavenumber Python loop makes even
+one forward call materially more expensive than `SingleScatterSolver`'s
+closed form, so no window-scale validation). Confirmed: XRTM's forward
+radiance ~13% higher than single_scatter's on an AOD=0.05 scene
+(expected multi-scatter effect, not a bug); analytic-vs-FD agreement
+for all three aerosol rows (cos~1.0); and the actual point of the whole
+exercise -- `height_aerosol`'s Jacobian jump across a pressure-layer
+boundary is IDENTICAL/non-shrinking under `SingleScatterSolver` as the
+finite-difference step shrinks (a genuine discontinuity) but shrinks
+proportionally under XRTM (genuinely smooth).
+
+**Also found along the way, real bugs, both fixed in this window**:
+`gd_render.LSISolver` (Low-Streams Interpolation) has a ~12-13%
+Jacobian error floor unrelated to sampling density -- unsuitable for
+retrieval Jacobians (fine for radiance-only truth generation, where it
+isn't used here anyway). And `h2o_surface_vmr`'s own "structural" prior
+(Sec.21, same window) was a no-op copy of truth, not a real background-
+only prior -- fixed the same way `tau_aerosol_prior`/`height_aerosol_
+prior`'s own "flat background, no localized event" convention already
+worked.
+
+## 24. Trial-step bounds clamping + a generic pool-hang timeout guard, found and fixed running the first real XRTM window solve (2026-09-16)
+
+An unbounded LM trial step (`gauss_newton_state`'s own inner loop,
+`geocarb_gert/joint_state.py`) drove `albedo` negative; under
+`SingleScatterSolver` this only ever hit `gert`'s own `p_levels must be
+strictly increasing` `ValueError` (Sec.22, already caught). Under
+XRTM, an invalid physical parameter is instead rejected at the C level,
+raising `xrtm.error` -- and that exception type doesn't survive being
+pickled back across a `multiprocessing.Pool` worker boundary (see
+Sec.23's `_ensure_xrtm_importable` note on why `import xrtm` isn't
+reliably resolvable everywhere -- the likely mechanism, though not
+fully confirmed here; see Sec.26 for where this trail was picked back
+up). `Pool`'s own `_handle_results` thread unpickles every result with
+no `except Exception` guard around that specific call, so the thread
+just dies silently -- and since it's the only thing that ever signals
+the `threading.Event` every `pool.map()`/`.get()` caller blocks on,
+EVERY future call against that pool hangs forever, workers still alive
+and still burning CPU on queued work. Confirmed directly: 10+ CPU-hours
+with zero further progress before being killed manually.
+
+Two-part fix (user: "Let's fix the trial-step issue, then investigate
+the hang mechanism"):
+
+* `StateSpec.clip_trial(x_trial)` (new) -- clamps a packed GN/LM trial
+  vector to each free row's own physical `bounds` (new `ParamSpec`
+  field) BEFORE `forward()` ever sees it, correctly handling
+  `kind="scale"` (divides physical bounds by `prior`, per-element) vs.
+  `kind="absolute"` (direct clamp). `scripts/gd_joint_block_retrieve.py`
+  gained `ROW_BOUNDS = {"albedo": (0, 1), "amplitude_aerosol": (1e-8,
+  None), "thickness_aerosol": (100.0, None)}` -- `amplitude_aerosol`/
+  `thickness_aerosol` get a small positive floor (not literally 0)
+  since both feed a division that would produce NaN/inf, not just a
+  wrong-but-finite value, right at 0.
+* `PoolHangError`/`_map_with_timeout` (new, `geocarb_gert/jacobians.py`)
+  -- wraps `pool.map_async(...).get(timeout=900.0)`; a pool that hasn't
+  delivered a result in 15 minutes is declared permanently unusable and
+  the task fails loudly instead of silently burning its wall-clock
+  budget. A real bug was found and fixed building this: a first version
+  also had `_imap_unordered_with_timeout` (`pool.imap_unordered(...,
+  chunksize=2).next(timeout=...)`) -- `Pool.imap_unordered` only
+  returns the timeout-capable `IMapUnorderedIterator` at `chunksize=1`;
+  any other chunksize (both real call sites here used 2) silently
+  returns a plain generator with no `.next(timeout=)` at all, crashing
+  every call immediately with `AttributeError: 'generator' object has
+  no attribute 'next'` -- missed by the unit test (which happened to
+  use `chunksize=1`), caught only running the full sweep. Removed
+  entirely; both call sites use `_map_with_timeout` instead.
+
+Validated: window 0 converged cleanly in 4 iterations, 949s, no hang.
+
+## 25. c5x production sweep (58 windows): 21/58 failed in one contiguous scene region -- genuine memory exhaustion against a stale `--mem` budget, not an XRTM bug (2026-09-16)
+
+The full `impprior_ws_g1ad4ov2` c5x config (XRTM `two_stream`, same
+free-row set as c5) submitted as job 1921228. Of the 37/58 windows that
+solved, NONE hit the `max_iter=15` cap (1x4, 12x5, 6x6, 8x7, 6x8, 1x10,
+1x12, 1x13, 1x14 iterations) -- a real, large improvement over c5's
+35/58 cap-hits and c5b's ~60-65%, consistent with Sec.23's smoothness
+argument. (This iteration-count comparison is superseded by Sec.26
+below -- see that section for why.)
+
+The other 21/58 (tasks 36-56, ONE perfectly contiguous block, zero
+successes anywhere in that range) split into two failure modes with
+the same underlying cause: 10 outright `PoolHangError` (cgroup
+OOM-kill/SIGKILL -- a killed worker leaves no exception to report at
+all, the same generic symptom Sec.24's guard exists to catch, but a
+DIFFERENT mechanism: this fired in `LinearizePool.run_L`, which never
+calls XRTM at all, so it can't be an `xrtm.error`-pickling failure);
+11 `TIMEOUT` (survived under memory pressure but thrashed too slowly
+to converge inside the sbatch script's 8h wall-clock, several reaching
+iter 9-13 with `|dx|` still dropping cleanly toward `tol` before being
+cut off). `sacct --format=MaxRSS` on the affected tasks: 78-107GB,
+against the sbatch script's `--mem=64G` request -- confirmed even
+SUCCESSFUL early-task memory use (35-53GB) was already close to that
+ceiling, so this was latent, not something XRTM/c5x introduced (user
+confirmed prior sweep generations saw "100GB or more" too).
+
+Also found merging this sweep: `scripts/submit_impprior_ws_g1ad4ov2.
+sbatch`'s `c5`/`c5x` configs share an IDENTICAL `FREE` row set
+(`--solver` isn't part of the auto-generated results-directory naming
+scheme), so they write into the SAME `_parts` directory -- c5x's run
+silently overwrote every one of c5's own raw part files, including
+with error-only pkls for its own 21 failed windows. c5's raw
+single_scatter data for this exact config is now unrecoverable without
+a full rerun (no merged pkl or plot was ever saved separately) --
+harmless for numbers already reported in this log, but a hazard for any
+future two-solver A/B comparison sharing a row set; worth a
+`--solver`-aware directory name if this pattern recurs.
+
+Fix (`scripts/submit_impprior_ws_g1ad4ov2.sbatch`, user-confirmed):
+`--mem` raised 64G -> 180G (the `atmos` partition's own nodes have
+~493GB RAM / 64 CPUs per `sinfo`, against this script's `--cpus-per-
+task=4`, so 180G leaves real margin while still packing 2 tasks/node).
+`--time` briefly considered for reduction (the TIMEOUT failures were a
+SYMPTOM of memory-pressure thrashing, not genuine per-iteration
+slowness, so throughput should recover once real memory is available)
+but the user caught a wrong assumption about its prior value mid-edit
+and it was left unchanged at 8h.
+
+## 26. The real bug: `height_aerosol`/`thickness_aerosol` never actually updated -- a missing prior-`sigma` override for every `kind="absolute"` row (2026-09-16)
+
+Merging/plotting the c5x sweep (Sec.25) surfaced an anomaly the summary
+stats alone hid: `height_aerosol` and `thickness_aerosol` showed
+IDENTICAL prior and posterior RMS/mean/max to every displayed digit.
+Direct inspection of the raw retrieved state (via each window's own
+`hires['slices']`, not a hand-rolled guess at row layout -- rows do NOT
+share a uniform per-row bin count, an easy way to get this wrong)
+confirmed it wasn't a plotting artifact: in ALL 37/37 solved windows,
+both rows were flat at their prior value to ~1e-13 relative precision
+(floating-point noise) -- `amplitude_aerosol`, the third aerosol row,
+varied normally.
+
+Root cause, found by reading `state_spec_from_scene`'s own sigma
+resolution (`geocarb_gert/joint_state.py`): `default_sigma = {"co2_
+ppm": 0.10, "ch4_ppb": 0.10, "co_ppb": 0.20, "h2o_surface_vmr": 0.25,
+"p_surface_hpa": 0.02, "albedo": 0.20}`, merged with any caller-supplied
+`sigmas` dict, then `sigma=float(sigmas.get(name, 0.10))` -- a LITERAL
+absolute fallback for anything not in that dict. `scripts/gd_joint_
+block_retrieve.py` never passed its own `sigmas=` override at any call
+site, ever (checked directly: no `sigmas=` assignment anywhere in that
+file, at any point in its history). `Sa_block`/`Sa_inv_block` (the
+prior covariance/precision built from `self.sigma`) apply this value
+DIRECTLY to the packed state element `xi` -- for `kind="scale"` rows
+(the six above) `xi` is a dimensionless multiplier on the row's own
+prior, so a fractional sigma like 0.10 is correct by construction. But
+`t_offset_k`/`height_aerosol`/`thickness_aerosol`/`amplitude_aerosol`
+are all `kind="absolute"` (`ROW_KINDS`, Sec.23) -- `xi` IS the physical
+value, so sigma must be in that row's own physical units, and none of
+the four ever got one:
+
+* `height_aerosol` (~85000 Pa physical scale): sigma=0.10 Pa is
+  absurdly tight relative to the row's own scale -- the prior term
+  completely dominates the GN cost, pinning the row to prior regardless
+  of what the data Jacobian says. Same mechanism, same effect, for
+  `thickness_aerosol` (~10000 Pa scale).
+* `amplitude_aerosol` (~2e-6 scale): sigma=0.10 is the OPPOSITE
+  extreme -- enormous relative to the value, an effectively flat/
+  uninformative prior, letting data dominate completely with no real
+  regularization. Same bug, opposite-direction symptom -- this is why
+  it looked fine while its two siblings looked frozen.
+* `t_offset_k` (Kelvin): also falls through to 0.10, but 0.1 K happens
+  to be a plausible absolute uncertainty by COINCIDENCE, so this row
+  was never visibly broken.
+
+This is NOT new to XRTM/c5x -- `height_aerosol` has been a free row
+since c5 (single_scatter), predating Sec.23's Gaussian-profile
+redesign entirely, with the same missing-override gap present the
+whole time (though the row it replaced, `tau_aerosol`, had a physical
+scale ~0.05 much closer to the 0.10 fallback, so it may have been less
+badly pinned than `height_aerosol`/`thickness_aerosol` are here). c5's
+35/58 cap-hits and c5b's ~60-65% (this log, earlier) were very likely
+ALSO measured against a retrieval quietly letting this bug dominate
+those rows -- not wrong as a historical record of what that code did,
+but not a valid baseline for judging c5x against, either. Sec.25's own
+iteration-count comparison is superseded by this finding: c5x's 37/58
+windows all converging without hitting the cap partly reflects GN
+effectively searching a 6-of-8-parameter space, not 8, not purely
+XRTM's smoother Jacobian as originally framed.
+
+Fix (user-specified values, 2026-09-16, explicitly placeholder/order-
+of-magnitude for now -- "In a real problem these will have to be
+tuned"): new `ROW_SIGMAS` dict in `scripts/gd_joint_block_retrieve.py`,
+threaded into every `state_spec_from_scene` call alongside `ROW_KINDS`/
+`ROW_BOUNDS`: `t_offset_k` 5 K; `height_aerosol` 100 hPa (10000 Pa);
+`thickness_aerosol` 10 hPa (1000 Pa); `amplitude_aerosol` "100%" --
+since this row is `kind="absolute"` (not `"scale"`), a single fixed
+ABSOLUTE sigma is needed rather than a simple fraction, derived
+dynamically from `als.amplitude_aerosol_prior`'s own flat-background
+value at `x_km=0.0` (~2e-6) as the "100%" reference scale, rather than
+a hand-typed magic number that would silently drift out of sync if the
+prior's own background changed.
+
+Validated directly: window (0,10) rerun with the fix converged in 11
+iterations (was 9 under the bug) and both previously-frozen rows now
+show real, structured per-bin movement -- `height_aerosol` 85000 ->
+82660-82745 Pa, `thickness_aerosol` 10000 -> 9886-9893 Pa, both varying
+smoothly across the window's 11 bins rather than sitting dead flat.
+
+Since this fix changes convergence AND posterior for every window, not
+just the ones Sec.25 found broken, c4/c5/c5b/c5x all need a fresh
+resubmission before any cross-config comparison is meaningful again --
+in progress: `--mem`/`--time` already updated per Sec.25, c5b and c5x
+being resubmitted as full 58-window sweeps (not a narrow resubmit of
+just the previously-failed windows).

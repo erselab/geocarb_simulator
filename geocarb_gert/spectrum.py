@@ -154,8 +154,11 @@ def simulate_spectrum(atm_params: dict, surface: Optional[dict], absco, wide_ins
     `gert.ForwardModel` pass.
 
     `surface` follows the convention already used at every migrated call
-    site: `{"albedo": ..., "albedo_slope": ..., "tau_aerosol": ...,
-    "height_aerosol": ...}`, any key optional/absent -> that physics is
+    site: `{"albedo": ..., "albedo_slope": ..., "amplitude_aerosol": ...,
+    "height_aerosol": ..., "thickness_aerosol": ...}` (the Gaussian
+    vertical-profile parameterization -- see `_build_aerosol_kwargs`'s own
+    docstring; `tau_aerosol` was a free row here until 2026-09-15, now
+    only a derived diagnostic), any key optional/absent -> that physics is
     omitted, exactly like today. `None` is equivalent to `{}`.
 
     **Albedo fallback is the CALLER's responsibility.** Every existing call

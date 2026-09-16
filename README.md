@@ -1,4 +1,25 @@
-# geosat_geometry — Long-Slit Geostationary Satellite Geometry Simulator
+# geocarb_simulator — GeoCarb OSSE and Joint-Block Retrieval Simulator
+
+An end-to-end simulator and retrieval testbed for **GeoCarb**, a long-slit
+geostationary CO₂/CH₄/CO instrument concept. Three layers, each independently
+usable:
+
+| Layer | What it is | Where |
+|---|---|---|
+| **Geometry engine** | Satellite orbit, slit/scan geometry, ray tracing, model-field sampling, NetCDF output — no radiative transfer, no retrieval | `geosat_geometry.py`, `model_sampler.py`, `scan_sampler.py` (documented below) |
+| **Instrument/mission adapter** | Wires the geometry engine's `ScanBlock`s to [GERT](../../gert) (the RT/retrieval library) as per-pixel geometry and scenes; GeoCarb-specific radiometric/instrument config | `geocarb_gert/{instrument,radiometry,adapter,scene}.py` |
+| **Joint-block retrieval algorithm** | This project's own along-slit, multi-parameter (CO₂/CH₄/CO/H₂O/surface-pressure/temperature-offset/albedo/aerosol) Gauss-Newton retrieval, analytic Jacobians, and RT-solver choice (`single_scatter` or XRTM multi-stream) — built ON TOP of `gert`, not part of it | `geocarb_gert/{joint_state,jacobians,spectrum,along_slit_scene}.py`, `scripts/gd_joint_block_retrieve.py` |
+
+The joint-block retrieval is where most of this project's actual development
+has happened — see `docs/PROJECT_STATUS.md` (chronological build log) and
+`docs/ALGORITHM_ROADMAP.md` (current state and open questions) for the full
+record; auto-generated API docs are hosted at the repo's GitHub Pages site.
+The rest of this README documents the geometry engine (`geosat_geometry.py`
+and friends) in detail, plus a `geocarb_gert` overview near the bottom.
+
+---
+
+## `geosat_geometry.py` — Long-Slit Geostationary Satellite Geometry
 
 Efficient Python module for simulating the observation geometry of a long-slit
 geostationary (GEO) instrument (e.g. **GeoCarb**).  Computes pixel centres,
@@ -699,17 +720,24 @@ valid estimate.
 
 ---
 
-## `geocarb_gert` — driving GERT from the scan simulator
+## `geocarb_gert` — driving GERT from the scan simulator, and this project's own joint-block retrieval
 
 `geocarb_gert/` wires this simulator to the [GERT](../../gert) radiative-transfer
 and retrieval library, enabling **instrument-design OSSEs**: how do GSD, dwell
 time, spectral resolution and detector noise propagate into the posterior
-uncertainty on retrieved XCO₂?
+uncertainty on retrieved XCO₂? It also contains this project's own **joint-block
+retrieval algorithm** — a real Gauss-Newton/Levenberg-Marquardt solver over a
+freezable, per-element along-slit state vector (CO₂/CH₄/CO/H₂O/surface pressure/
+temperature offset/albedo/aerosol), not just instrument-design tooling.
 
-**Layering.**  GERT models what an instrument *is* (photon budget, detector
-noise, saturation, RT, retrieval).  This repo owns how GeoCarb *flies* — orbit,
-slit, scan schedule, per-pixel geometry, and the scene.  No RT or retrieval code
-lives here.  See `docs/STATUS_AND_ROADMAP.md` §3.7 in the gert repo.
+**Layering.**  `gert` models what an instrument *is* (photon budget, detector
+noise, saturation, RT) and provides the RT solvers themselves (`SingleScatterSolver`,
+the XRTM multi-stream wrapper). This repo owns how GeoCarb *flies* (orbit, slit,
+scan schedule, per-pixel geometry, the scene) AND the retrieval algorithm built
+on top of `gert`'s RT — `gert` itself contains no retrieval code (`geocarb_gert/
+__init__.py`'s own docstring said otherwise until 2026-09-16; see `docs/
+PROJECT_STATUS.md` for how the joint-block retrieval came to live here). See
+`docs/STATUS_AND_ROADMAP.md` §3.7 in the gert repo for the full layering rule.
 
 | Module | Role |
 |:--|:--|
@@ -717,6 +745,11 @@ lives here.  See `docs/STATUS_AND_ROADMAP.md` §3.7 in the gert repo.
 | `geocarb_gert.radiometry` | **mission-side** GSD/dwell → `gert.RadiometricNoise` |
 | `geocarb_gert.adapter`    | `ScanBlock` → per-pixel `gert.Geometry`; `gert.osse.Scene` |
 | `geocarb_gert.scene`      | standard-atmosphere `AtmosphericProfile` (model-driven scenes via `model_sampler`) |
+| `geocarb_gert.along_slit_scene` | synthetic along-slit truth/prior scenes for every retrieved quantity, including the Gaussian aerosol vertical-profile parameterization |
+| `geocarb_gert.joint_state` | the freezable per-element `StateSpec`/`ParamSpec` state vector and the GN/LM solver (`gauss_newton_state`) |
+| `geocarb_gert.jacobians` | analytic Jacobians for every state row, for both RT solvers |
+| `geocarb_gert.spectrum` | the single place that turns retrieval state into a `gert.ForwardModel` run, dispatching between the `single_scatter` and `xrtm` (multi-stream) solvers |
+| `scripts/gd_joint_block_retrieve.py` | the production driver: whole-slit sweeps, checkpointing, merge/plot |
 
 **GeoCarb stares.**  Integration time is set by the dwell schedule and is
 *independent of GSD* — unlike a LEO pushbroom, where `t_int = GSD/v_ground`.

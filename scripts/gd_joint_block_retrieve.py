@@ -334,6 +334,39 @@ ROW_KINDS = {"t_offset_k": "absolute", "height_aerosol": "absolute",
 ROW_BOUNDS = {"albedo": (0.0, 1.0), "amplitude_aerosol": (1e-8, None),
               "thickness_aerosol": (100.0, None)}
 
+#: Row name -> ParamSpec `sigma` override (2026-09-16, real bug found
+#: merging the c5x sweep): `state_spec_from_scene`'s own `default_sigma`
+#: dict (`geocarb_gert/joint_state.py`) only covers the ORIGINAL five
+#: `kind="scale"` rows (co2_ppm/ch4_ppb/co_ppb/h2o_surface_vmr/albedo,
+#: plus p_surface_hpa) -- every `kind="absolute"` row in `ROW_KINDS`
+#: above silently fell through to that function's own literal `0.10`
+#: fallback, in ABSOLUTE physical units regardless of the row's actual
+#: scale (`Sa_block`/`Sa_inv_block` use `self.sigma` directly on the
+#: packed element, which for an "absolute" row IS the physical value --
+#: no per-row unit conversion happens anywhere else). `t_offset_k`
+#: (Kelvin) happened to look fine since 0.1 K is a plausible absolute
+#: scale by coincidence; `height_aerosol`/`thickness_aerosol` (~85000/
+#: ~10000 Pa) got a prior so tight relative to their own scale it pinned
+#: both to the prior every iteration (confirmed directly: posterior ==
+#: prior to ~1e-13 relative precision in all 37/37 solved c5x windows);
+#: `amplitude_aerosol` (~2e-6) got the opposite failure -- a prior so
+#: loose it was effectively flat, letting data dominate with no real
+#: regularization at all. User-specified values (2026-09-16), explicitly
+#: placeholder/order-of-magnitude for now ("In a real problem these will
+#: have to be tuned"): t_offset_k 5 K; height_aerosol 100 hPa; thickness_
+#: aerosol 10 hPa (both converted to Pa, this project's own aerosol-row
+#: unit, matching `along_slit_scene.height_aerosol`/`thickness_aerosol`'s
+#: own docstrings); amplitude_aerosol "100%" -- since it's `kind=
+#: "absolute"` (not "scale"), a single fixed ABSOLUTE sigma is needed,
+#: derived here from `als.amplitude_aerosol_prior`'s own flat-background
+#: value at x_km=0.0 (~2e-6, the same "evaluate at the center, `x_km=0.0`"
+#: convention `state_spec_from_scene`'s own `uniform=True` mode uses) as
+#: the "100%" reference scale, rather than a hand-typed magic number that
+#: would silently drift out of sync if the prior's own background changed.
+ROW_SIGMAS = {"t_offset_k": 5.0, "height_aerosol": 100.0 * 100.0,
+              "thickness_aerosol": 10.0 * 100.0,
+              "amplitude_aerosol": float(als.amplitude_aerosol_prior(np.array([0.0]))[0])}
+
 
 def _solve_window(row_lo: int, row_hi: int):
     # Shadows the module-level `FPA` import for the rest of this function:
@@ -463,7 +496,7 @@ def _solve_window(row_lo: int, row_hi: int):
                                            band_label=band_label,
                                            surface_fields=truth_surface_fields,
                                            surface_positions=anchor_etas,
-                                           kinds=ROW_KINDS)
+                                           kinds=ROW_KINDS, sigmas=ROW_SIGMAS)
         fwd_truth = build_forward_state(FPA, rows_win, anchor_etas, truth_spec, spectrum,
                                         wn_hires, ils, pad=retrieval_pad, state_interp=state_interp,
                                         n_workers=anchor_workers,
@@ -536,7 +569,8 @@ def _solve_window(row_lo: int, row_hi: int):
                                        surface_fields=surface_fields,
                                        prior_anchor_density=prior_anchor_density,
                                        row_sub_bin_anomaly=row_sub_bin_anomaly,
-                                       kinds=ROW_KINDS, gamma=gamma, row_bounds=ROW_BOUNDS)
+                                       kinds=ROW_KINDS, gamma=gamma, row_bounds=ROW_BOUNDS,
+                                       sigmas=ROW_SIGMAS)
         # coarse: scene positions ARE the state positions, so interpolation is
         # the identity regardless of kind -- state_interp is genuinely a no-op here.
         fwd_c = build_forward_state(FPA, rows_win, bin_centers, spec_c, spectrum,
@@ -614,7 +648,8 @@ def _solve_window(row_lo: int, row_hi: int):
                                    row_positions=row_positions,
                                    prior_anchor_density=prior_anchor_density,
                                    row_sub_bin_anomaly=row_sub_bin_anomaly,
-                                   kinds=ROW_KINDS, gamma=gamma, row_bounds=ROW_BOUNDS)
+                                   kinds=ROW_KINDS, gamma=gamma, row_bounds=ROW_BOUNDS,
+                                   sigmas=ROW_SIGMAS)
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
                                 wn_hires, ils, pad=retrieval_pad, state_interp=state_interp,
                                 n_workers=anchor_workers,

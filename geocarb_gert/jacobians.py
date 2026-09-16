@@ -758,6 +758,39 @@ def _map_with_timeout(pool, func, iterable, chunksize: int,
 _ANCHOR_SPECTRA_G: dict = {}
 
 
+def _call_spectrum_jac_picklable(spectrum_jac, p, rows_needed, surf):
+    """Wraps a `spectrum_jac(...)` call so any exception that escapes it is
+    guaranteed picklable before it can reach `Pool`'s internal result queue.
+
+    2026-09-16 (see `PoolHangError`'s own docstring for the original
+    discovery): XRTM's C-level rejection of an invalid physical parameter
+    raises `xrtm.error` (`gert/xrtm/interfaces/xrtm_int_py.c`:
+    `PyErr_NewException("xrtm.error", NULL, NULL)`), which pickles fine on
+    the way OUT of a worker but fails to UNPICKLE in the parent -- `import
+    xrtm; xrtm.error` doesn't reliably resolve outside the one process that
+    called `_ensure_xrtm_importable()` (see `spectrum.py`), so the class
+    lookup pickle's `REDUCE` opcode needs can silently fail. That failure
+    happens inside `Pool`'s own `_handle_results` thread, which has no
+    `except Exception` around it -- so the exception doesn't propagate, it
+    just kills that thread and hangs the pool forever (`PoolHangError`'s
+    900s timeout is the only thing that ever surfaces this). Converting to
+    a plain `RuntimeError` here -- a builtin, always picklable, no import
+    resolution needed -- lets the real XRTM error message reach the caller
+    immediately instead of being inferred after a 15-minute timeout.
+
+    Checked by `__module__` string (`"xrtm"`), not `except xrtm.error`,
+    deliberately: catching by class reference would require importing
+    `xrtm` in every worker on every call, reintroducing the same
+    resolution fragility this exists to route around.
+    """
+    try:
+        return spectrum_jac(p, rows_needed, surf)
+    except Exception as e:
+        if type(e).__module__ == "xrtm":
+            raise RuntimeError(f"XRTM error inside pool worker: {e}") from None
+        raise
+
+
 def _anchor_spectra_one(g):
     """Module-level (picklable, fork-inherited -- same pattern as
     `joint_state._render_one_anchor`) so `anchor_spectra_and_derivs` can
@@ -768,7 +801,8 @@ def _anchor_spectra_one(g):
     per this module's own docstring) are parallelized separately, below."""
     G = _ANCHOR_SPECTRA_G
     surf = G["surface_at_anchor"][g] if G["surface_at_anchor"] else None
-    s, d = G["spectrum_jac"](G["params_at_anchor"][g], G["rows_needed"], surf)
+    s, d = _call_spectrum_jac_picklable(G["spectrum_jac"], G["params_at_anchor"][g],
+                                        G["rows_needed"], surf)
     return g, np.asarray(s, dtype=float), d
 
 
@@ -1075,7 +1109,7 @@ def _anchor_spectra_one_persistent(arg):
     `_ANCHOR_SPECTRA_G` before this (long-lived) worker was forked."""
     g, p, surf, rows_needed = arg
     spectrum_jac = _ANCHOR_SPECTRA_G["spectrum_jac"]
-    s, d = spectrum_jac(p, rows_needed, surf)
+    s, d = _call_spectrum_jac_picklable(spectrum_jac, p, rows_needed, surf)
     return g, np.asarray(s, dtype=float), d
 
 
