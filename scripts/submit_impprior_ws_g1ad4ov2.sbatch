@@ -21,6 +21,24 @@
 #       ("everything" + aerosol retrieved)
 #   c5b c4 + amplitude_aerosol,thickness_aerosol (NOT height_aerosol)  --aerosol
 #       (diagnostic, 2026-09-15 -- see below)
+#   c5x same free set as c5, but --solver xrtm (Phase 6 of the XRTM
+#       integration plan, 2026-09-15 -- see below)
+#
+# c5x: real A/B test of the XRTM solver
+# (geocarb_gert/spectrum.py::_build_solver, method='two_stream') against
+# c5's own SingleScatterSolver-based result -- same free rows, same
+# resolution, only the RT solver differs. Confirms whether XRTM's
+# genuinely smooth analytic height_aerosol/thickness_aerosol Jacobians
+# (validated via scripts/gd_xrtm_aerosol_jacobian_validate.py) actually
+# help GN convergence speed, or whether (as c5b's own diagnostic
+# suggests) the bottleneck lies elsewhere. method='two_stream' (not
+# eig_add) after a direct benchmark found it ~32x cheaper per anchor
+# (3.27s vs eig_add(n_streams=2)'s 105.28s at this band's own ~12353
+# hi-res wavenumber points) -- eig_add even at its own minimum
+# n_streams=2 is still the full discrete-ordinates eigenvalue machinery,
+# not a cheap "2-stream" mode; two_stream is a separate, purpose-built
+# implementation (the same one gert.rt_solver.LSISolver uses as its own
+# "fast" solver).
 #
 # 2026-09-15 (user: "introduce the Gaussian parameters into the state
 # vector instead of a tau_aerosol", matching how they run `gert` in other
@@ -81,7 +99,8 @@ PYTHON=/gpfs/fs1/home/scrowel3/miniforge3/envs/analysis/bin/python
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 
-: "${CONF:?set CONF=c1|c2|c3|c4|c5|c5b via --export=ALL,CONF=...}"
+: "${CONF:?set CONF=c1|c2|c3|c4|c5|c5b|c5x via --export=ALL,CONF=...}"
+SOLVER="single_scatter"
 case "${CONF}" in
   c1) FREE="co2_ppm"; AERO="" ;;
   c2) FREE="co2_ppm,p_surface_hpa"; AERO="" ;;
@@ -89,10 +108,11 @@ case "${CONF}" in
   c4) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo"; AERO="" ;;
   c5) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol,thickness_aerosol"; AERO="--aerosol" ;;
   c5b) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,thickness_aerosol"; AERO="--aerosol" ;;
+  c5x) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol,thickness_aerosol"; AERO="--aerosol"; SOLVER="xrtm" ;;
   *) echo "unknown CONF=${CONF}"; exit 1 ;;
 esac
 
-echo "CONF=${CONF}  FREE=${FREE}  ${AERO}  task ${SLURM_ARRAY_TASK_ID}/58"
+echo "CONF=${CONF}  FREE=${FREE}  ${AERO}  SOLVER=${SOLVER}  task ${SLURM_ARRAY_TASK_ID}/58"
 git rev-parse HEAD
 
 # Same shm safety net as submit_impprior_ws.sbatch -- see that script's
@@ -108,6 +128,7 @@ ${PYTHON} scripts/gd_joint_block_retrieve.py \
     --fpa 2 --prior-fields structural --vary-albedo \
     --anchor-density 4 --surface-positions anchor --frozen-atmosphere-positions anchor \
     --g-ratio 1 --overlap 2 --hires-only --jacobian analytic --gn-verbose \
+    --solver "${SOLVER}" \
     --anchor-workers "${SLURM_CPUS_PER_TASK}" \
     --task-id "${SLURM_ARRAY_TASK_ID}" --n-tasks 58 \
     --free "${FREE}" ${AERO}
