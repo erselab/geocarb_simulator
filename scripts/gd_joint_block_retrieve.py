@@ -796,6 +796,13 @@ def _plot_truth_fn_for(row_name: str, truth: str, match_x_km, band_label: str):
         # there's no sub-anchor structure a resolution-matched
         # reconstruction would need to recover.
         return lambda x_km: als.SURFACE_FIELDS[row_name](x_km, band_label)  # noqa: E731
+    if row_name == "tau_aerosol":
+        # 2026-09-16: legacy row name (retired as a free row 2026-09-15,
+        # Sec.21's Gaussian-parameterization change) -- still needed to
+        # plot any pkl merged before that change. als.tau_aerosol itself
+        # is kept exactly for this (see its own docstring); not in
+        # als.SURFACE_FIELDS any more, so route directly.
+        return lambda x_km: als.tau_aerosol(x_km, band_label)  # noqa: E731
     if truth == "anchor":
         return als.resolution_matched_fields(match_x_km)[row_name]
     return als.STATE_FIELDS[row_name]
