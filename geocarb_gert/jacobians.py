@@ -686,6 +686,79 @@ def make_spectrum_jac(absco, wide_inst, geo, solar, albedo, solver: str = "singl
     return spectrum_jac
 
 
+#: Per-result timeout (2026-09-16) for every `pool.map`/`imap_unordered`
+#: consumption in this module. See `PoolHangError`'s own docstring for
+#: why this exists at all -- 900s is deliberately generous (the slowest
+#: single-anchor call measured directly, XRTM two_stream, is ~3.3s; this
+#: is a "something is genuinely broken" threshold, not a normal-operation
+#: ceiling) so it should never fire under correct operation, only when a
+#: worker's own result truly can't be delivered.
+_POOL_RESULT_TIMEOUT_S = 900.0
+
+
+class PoolHangError(RuntimeError):
+    """Raised by `_imap_unordered_with_timeout`/`_map_with_timeout` in
+    place of hanging forever (2026-09-16, found running the first real
+    XRTM window solve): `multiprocessing.pool.Pool`'s internal
+    `_handle_results` thread unpickles every worker RESULT -- success
+    value or exception -- via `get()` at the top of its own loop, with no
+    `except Exception` around that specific call (only `OSError`/
+    `EOFError`). If a worker's result can't be unpickled in the parent
+    (happened here: XRTM's own C-level rejection of an invalid physical
+    parameter raises an exception type, `xrtm.error`, that isn't a real
+    importable module attribute), that thread dies silently -- and since
+    it's the ONLY thing that ever fires the `threading.Event` every
+    `pool.map()`/`imap_unordered()`/`.get()` caller blocks on, EVERY
+    future call against that same pool hangs forever, with worker
+    processes still alive and still burning CPU on unrelated queued work
+    (confirmed directly: 10+ CPU-hours with zero further progress before
+    being killed manually). A no-op wrapper around `Pool.imap_unordered`/
+    `Pool.map_async().get()` with a timeout turns that silent, unbounded
+    hang into a prompt, loud, diagnosable exception instead -- it cannot
+    prevent the underlying pickling failure (that's a `gert`/XRTM-binding
+    issue, out of this project's control), but it stops one bad result
+    from silently stalling a whole SLURM allocation.
+    """
+
+
+def _imap_unordered_with_timeout(pool, func, iterable, chunksize: int,
+                                 timeout: float = _POOL_RESULT_TIMEOUT_S, label: str = ""):
+    """Drop-in replacement for `for x in pool.imap_unordered(func, iterable,
+    chunksize=chunksize):` that raises `PoolHangError` instead of blocking
+    forever if no result arrives within `timeout` seconds of the previous
+    one. See `PoolHangError`'s own docstring for why this is needed."""
+    import multiprocessing as mp
+    it = pool.imap_unordered(func, iterable, chunksize=chunksize)
+    while True:
+        try:
+            yield it.next(timeout=timeout)
+        except StopIteration:
+            return
+        except mp.TimeoutError as e:
+            raise PoolHangError(
+                f"{label or 'pool.imap_unordered'}: no result in {timeout:.0f}s -- the pool "
+                f"is likely permanently stalled (see PoolHangError's own docstring); check "
+                f"worker stderr for the real underlying error, and treat this pool as unusable."
+            ) from e
+
+
+def _map_with_timeout(pool, func, iterable, chunksize: int,
+                      timeout: float = _POOL_RESULT_TIMEOUT_S, label: str = ""):
+    """Drop-in replacement for `pool.map(func, iterable, chunksize=chunksize)`
+    that raises `PoolHangError` instead of blocking forever. See
+    `PoolHangError`'s own docstring for why this is needed."""
+    import multiprocessing as mp
+    async_result = pool.map_async(func, iterable, chunksize=chunksize)
+    try:
+        return async_result.get(timeout=timeout)
+    except mp.TimeoutError as e:
+        raise PoolHangError(
+            f"{label or 'pool.map'}: no result in {timeout:.0f}s -- the pool is likely "
+            f"permanently stalled (see PoolHangError's own docstring); check worker stderr "
+            f"for the real underlying error, and treat this pool as unusable."
+        ) from e
+
+
 _ANCHOR_SPECTRA_G: dict = {}
 
 
@@ -748,7 +821,8 @@ def anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
     dS: list = [None] * n_anchor
     ctx = mp.get_context("fork")
     with ctx.Pool(min(n_workers, n_anchor)) as pool:
-        for g, s, d in pool.imap_unordered(_anchor_spectra_one, range(n_anchor), chunksize=2):
+        for g, s, d in _imap_unordered_with_timeout(pool, _anchor_spectra_one, range(n_anchor),
+                                                    chunksize=2, label="anchor_spectra_and_derivs"):
             S[g], dS[g] = s, d
     return S, dS
 
@@ -886,7 +960,8 @@ class LinearizePool:
                for g in range(n)]
         S: list = [None] * n
         dS: list = [None] * n
-        for g, s, d in self._anchor_pool.imap_unordered(_anchor_spectra_one_persistent, args, chunksize=2):
+        for g, s, d in _imap_unordered_with_timeout(self._anchor_pool, _anchor_spectra_one_persistent,
+                                                    args, chunksize=2, label="LinearizePool.run_anchor"):
             S[g], dS[g] = s, d
         return S, dS
 
@@ -973,7 +1048,8 @@ class LinearizePool:
             jobs[i] = None   # drop this field the instant it's copied in,
                               # rather than holding the whole batch AND the
                               # shared buffer resident at once
-        cols = self._L_pool.map(_L_worker_shm, range(n), chunksize=1)
+        cols = _map_with_timeout(self._L_pool, _L_worker_shm, range(n), chunksize=1,
+                                 label="LinearizePool.run_L")
         return list(zip(dest_list, cols))
 
     def close(self):
@@ -1171,7 +1247,8 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
                                        scene_etas=scene_etas, ils=ils, pad=pad, jobs=jobs))
             ctx = mp.get_context("fork")
             with ctx.Pool(min(n_workers_eff, len(jobs))) as one_shot_pool:
-                results = one_shot_pool.map(_L_worker, range(len(jobs)), chunksize=1)
+                results = _map_with_timeout(one_shot_pool, _L_worker, range(len(jobs)), chunksize=1,
+                                            label="linearize (one-shot L pool)")
 
     kg_stacks: dict = {name: [None] * dval_dg_by_name[name].shape[1] for name in dval_dg_by_name}
     for dest, col in results:
