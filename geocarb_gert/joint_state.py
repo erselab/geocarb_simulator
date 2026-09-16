@@ -188,6 +188,23 @@ class ParamSpec:
                                      # high-resolution reference profile (2026-08-28);
                                      # None (every row, until one opts in) is a
                                      # byte-identical no-op. See SubBinAnomaly.
+    bounds: "tuple[float | None, float | None] | None" = None  # (2026-09-16)
+                                     # physical range this row's own VALUE (post
+                                     # `.apply()`, not the packed scale/absolute
+                                     # state element) must stay within -- e.g.
+                                     # albedo in [0, 1]. None (every row, until one
+                                     # opts in) is a byte-identical no-op --
+                                     # gauss_newton_state's own trial-step clip is
+                                     # a no-op wherever bounds is None. See that
+                                     # function's own docstring for why an
+                                     # UNCLAMPED trial step is a real crash/hang
+                                     # risk once a solver validates its own inputs
+                                     # (found via XRTM: an invalid negative albedo
+                                     # trial raised an exception type the XRTM
+                                     # Python binding can't re-pickle across a
+                                     # multiprocessing worker boundary, which
+                                     # doesn't just crash -- it hangs the whole
+                                     # pool silently).
 
     def __post_init__(self):
         self.positions = np.atleast_1d(np.asarray(self.positions, dtype=float))
@@ -338,6 +355,49 @@ class StateSpec:
             out[p.name] = slice(i, i + p.n)
             i += p.n
         return out
+
+    def clip_trial(self, x_trial: np.ndarray) -> np.ndarray:
+        """Clamp `x_trial` (a packed state vector, e.g. `x + dx_trial` from
+        a GN/LM trial step) to every free row's own `ParamSpec.bounds`
+        (2026-09-16) -- a no-op wherever `bounds` is `None`, which is every
+        row until one opts in, so this is unconditionally safe to call.
+
+        Clamps in PHYSICAL space (post `.apply()`), not the packed
+        scale/absolute element directly -- a `kind="scale"` row's packed
+        element is a MULTIPLIER on that row's own prior (e.g. albedo's
+        physical value is `prior * xi`), so clamping the raw element to
+        `[0, 1]` would be wrong wherever `prior != 1`. Converts
+        physical-space bounds to per-element packed-space bounds via
+        `.apply()`'s own inverse (`xi = physical / prior` for "scale",
+        `xi = physical` for "absolute"), then clips once with
+        `np.clip` -- cheap, no RT calls, called on every LM trial before
+        `forward()` ever sees it (see `gauss_newton_state`'s own trial
+        loop) so an invalid physical state (e.g. negative albedo) is never
+        even constructed, let alone sent to a solver.
+        """
+        x_trial = np.asarray(x_trial, dtype=float).copy()
+        i = 0
+        for p in self.free_params:
+            sl = slice(i, i + p.n)
+            i += p.n
+            if p.bounds is None:
+                continue
+            lo_phys, hi_phys = p.bounds
+            xi = x_trial[sl]
+            if p.kind == "scale":
+                prior = np.where(p.prior != 0, p.prior, 1.0)
+                lo_xi = -np.inf if lo_phys is None else lo_phys / prior
+                hi_xi = np.inf if hi_phys is None else hi_phys / prior
+                # prior<0 would flip the inequality direction; every row
+                # that currently opts into bounds has a positive prior
+                # (albedo, aerosol loading/width), so this is not handled --
+                # would need per-element min/max(lo_xi, hi_xi) if it arose.
+                x_trial[sl] = np.clip(xi, lo_xi, hi_xi)
+            else:  # "absolute"
+                lo_xi = -np.inf if lo_phys is None else lo_phys
+                hi_xi = np.inf if hi_phys is None else hi_phys
+                x_trial[sl] = np.clip(xi, lo_xi, hi_xi)
+        return x_trial
 
     def unpack(self, x) -> dict:
         """`{name: values at that row's own positions}` for EVERY row --
@@ -652,7 +712,8 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                           surface_fields=None,
                           row_state_interp: dict | None = None,
                           row_sub_bin_anomaly: dict | None = None,
-                          row_positions: dict | None = None) -> StateSpec:
+                          row_positions: dict | None = None,
+                          row_bounds: dict | None = None) -> StateSpec:
     """Build a :class:`StateSpec` whose priors are the truth scene's own
     values at `bin_centers` -- the joint block's existing "local-truth
     nuisance idealization", but now with every quantity present as a real,
@@ -827,7 +888,8 @@ def state_spec_from_scene(bin_centers, fields=None, free=("co2_ppm",),
                          corr_length=float(_corr_for(name, corr_length)),
                          free=(name in free), kind=kinds.get(name, "scale"),
                          prior_form=prior_form, gamma=float(gamma), target=target,
-                         state_interp=row_kind, sub_bin_anomaly=anomaly)
+                         state_interp=row_kind, sub_bin_anomaly=anomaly,
+                         bounds=(row_bounds or {}).get(name))
 
     _row_positions = row_positions or {}
     rows = [_row(name, fn,
@@ -1070,17 +1132,28 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
         for _try in range(lm_max_tries):
             A_damped = A + lam * np.diag(diagA)
             dx_trial = np.linalg.solve(A_damped, b)
-            x_trial = x + dx_trial
+            x_trial = spec.clip_trial(x + dx_trial)
+            # 2026-09-16: clip_trial (StateSpec, above) clamps any row
+            # that opted into ParamSpec.bounds (e.g. albedo in [0, 1]) to
+            # its own physical range BEFORE forward() ever sees it --
+            # found via XRTM: a negative-albedo trial raised an exception
+            # type its Python binding can't re-pickle across a
+            # multiprocessing worker boundary, which doesn't just crash,
+            # it HANGS the whole pool silently (the worker's own error
+            # never makes it back). A no-op for any row that doesn't set
+            # bounds, so this is unconditionally safe.
+            #
             # 2026-09-14 (c5/impprior_ws: a p_surface_hpa/height_aerosol
             # trial step landed outside AtmosphericProfile's own valid
             # range -- p_levels non-monotonic -- and crashed the whole
             # window's solve with an uncaught ValueError, discarding
-            # every already-converged iteration. x_trial is otherwise
-            # unbounded (no clamp on any free row), so an unlucky trial
-            # -- one this same damping ladder would have rejected on
-            # J_trial's own merits anyway, had it been able to evaluate
-            # one -- must be treated the same as a worse-objective trial:
-            # reject it and damp harder, not propagate the exception.
+            # every already-converged iteration). clip_trial only covers
+            # rows that opted into explicit bounds -- p_surface_hpa/
+            # height_aerosol haven't (their valid range depends on the
+            # whole profile, not a fixed physical interval), so this
+            # try/except stays as the general-purpose backstop for
+            # whatever isn't (or can't be) bounded this way: reject an
+            # invalid trial and damp harder, not propagate the exception.
             try:
                 resid_trial = y_true - forward(x_trial)
             except ValueError:

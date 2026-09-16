@@ -313,6 +313,27 @@ SUB_BIN_ANOMALY_ORACLES = {"truth": _oracle_g_truth, "prior": _oracle_g_prior}
 ROW_KINDS = {"t_offset_k": "absolute", "height_aerosol": "absolute",
             "amplitude_aerosol": "absolute", "thickness_aerosol": "absolute"}
 
+#: Row name -> ParamSpec `bounds` override (2026-09-16), same "harmless
+#: unless a run actually frees/freezes the row" convention as ROW_KINDS --
+#: passed to every `state_spec_from_scene` call whose result gets trial-
+#: stepped (coarse/hires, not `truth_spec`, which is always frozen).
+#: `StateSpec.clip_trial` clamps a GN/LM trial to these BEFORE `forward()`
+#: ever sees it. Found necessary via XRTM (2026-09-15): an unbounded
+#: trial step drove `albedo` negative, and unlike gert's own p_levels
+#: ValueError (Sec.22, still caught by the try/except in joint_state.py),
+#: XRTM's own C-level rejection of the invalid value raises an exception
+#: type its Python binding can't re-pickle across a multiprocessing
+#: worker boundary -- which doesn't just crash the window's solve, it
+#: HANGS the whole pool silently (confirmed: 10+ CPU-hours with no further
+#: progress before being killed manually). albedo in [0, 1] is a real
+#: physical constraint regardless of solver; amplitude_aerosol/
+#: thickness_aerosol get a small positive floor (not literally 0) since
+#: both feed a division (`tau_aerosol = amplitude*thickness*sqrt(2*pi)`,
+#: `aer_frac`'s own normalization) that would produce NaN/inf, not just a
+#: wrong-but-finite value, right at 0.
+ROW_BOUNDS = {"albedo": (0.0, 1.0), "amplitude_aerosol": (1e-8, None),
+              "thickness_aerosol": (100.0, None)}
+
 
 def _solve_window(row_lo: int, row_hi: int):
     # Shadows the module-level `FPA` import for the rest of this function:
@@ -515,7 +536,7 @@ def _solve_window(row_lo: int, row_hi: int):
                                        surface_fields=surface_fields,
                                        prior_anchor_density=prior_anchor_density,
                                        row_sub_bin_anomaly=row_sub_bin_anomaly,
-                                       kinds=ROW_KINDS, gamma=gamma)
+                                       kinds=ROW_KINDS, gamma=gamma, row_bounds=ROW_BOUNDS)
         # coarse: scene positions ARE the state positions, so interpolation is
         # the identity regardless of kind -- state_interp is genuinely a no-op here.
         fwd_c = build_forward_state(FPA, rows_win, bin_centers, spec_c, spectrum,
@@ -593,7 +614,7 @@ def _solve_window(row_lo: int, row_hi: int):
                                    row_positions=row_positions,
                                    prior_anchor_density=prior_anchor_density,
                                    row_sub_bin_anomaly=row_sub_bin_anomaly,
-                                   kinds=ROW_KINDS, gamma=gamma)
+                                   kinds=ROW_KINDS, gamma=gamma, row_bounds=ROW_BOUNDS)
     fwd_h = build_forward_state(FPA, rows_win, anchor_etas, spec_h, spectrum,
                                 wn_hires, ils, pad=retrieval_pad, state_interp=state_interp,
                                 n_workers=anchor_workers,
