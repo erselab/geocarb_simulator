@@ -356,6 +356,48 @@ class StateSpec:
             i += p.n
         return out
 
+    def dx_scale(self) -> np.ndarray:
+        """Per-element characteristic scale for the packed step vector, same
+        length/order as :meth:`x0`/:meth:`slices` -- each free row's own
+        ``sigma``, broadcast across that row's ``n`` elements.
+
+        2026-09-17 (user, comparing single_scatter/XRTM convergence once
+        `amplitude_aerosol`/`height_aerosol`/`thickness_aerosol` were all
+        free): `gauss_newton_state`'s own ``np.linalg.norm(dx) < tol``
+        convergence check used the RAW packed ``dx``, which mixes wildly
+        different natural scales across rows in the SAME vector -- O(1)
+        dimensionless multipliers for every `kind="scale"` row, but O(1e4)
+        Pa for `height_aerosol`/`thickness_aerosol`, O(1) Kelvin for
+        `t_offset_k`, O(1e-6) for `amplitude_aerosol` (all `kind=
+        "absolute"`). A single unweighted L2 norm over that vector is
+        dominated entirely by whichever row has the largest RAW magnitude
+        -- with `height_aerosol`/`thickness_aerosol` free, `tol=1e-5`
+        effectively demands THEIR OWN step shrink to ~1e-5 Pa (an absurd,
+        physically meaningless precision) before the whole vector can
+        pass, regardless of how converged every other row already is.
+        Dividing `dx` by each row's own `sigma` before taking the norm
+        converts the check to "how many prior-sigmas' worth of step
+        remains" -- dimensionless and comparable across rows regardless
+        of physical units -- the standard fix for a mixed-unit
+        convergence criterion.
+
+        **Any row added to the state vector in the future inherits this
+        automatically** (`sigma` is already a required `ParamSpec` field),
+        but a row given a badly-scaled `sigma` will silently reintroduce
+        the same problem in a different form: too small makes that row's
+        own `dx/sigma` ratio artificially huge (never looks converged even
+        once it truly has), too large makes it artificially tiny (looks
+        converged while barely having moved at all) -- see
+        `scripts/gd_joint_block_retrieve.py`'s own `ROW_SIGMAS` docstring
+        for exactly this failure mode discovered the same week. Choosing
+        `sigma` is therefore not just a regularization-strength decision
+        any more -- it is now ALSO the convergence criterion's own unit
+        system, for every row, not only the ones that happen to look
+        obviously mis-scaled.
+        """
+        blocks = [np.full(p.n, max(float(p.sigma), 1e-300)) for p in self.free_params]
+        return np.concatenate(blocks) if blocks else np.zeros(0)
+
     def clip_trial(self, x_trial: np.ndarray) -> np.ndarray:
         """Clamp `x_trial` (a packed state vector, e.g. `x + dx_trial` from
         a GN/LM trial step) to every free row's own `ParamSpec.bounds`
@@ -1076,6 +1118,13 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
         raise ValueError("no free parameters -- every row is frozen")
     Sa_inv = spec.Sa_inv()
     Sy_inv_diag = np.asarray(Sy_inv_diag, dtype=float)
+    # `dx`/`dx_cheap` below are convergence-tested as dx/dxs (each element in
+    # units of its own row's sigma), not raw dx -- see StateSpec.dx_scale's
+    # own docstring for why: a raw mixed-unit norm is dominated by whichever
+    # row has the largest natural physical scale (Pa-valued height_aerosol/
+    # thickness_aerosol vs. O(1) scale-kind rows), making `tol` effectively
+    # unreachable for large-scale rows regardless of true convergence.
+    dxs = spec.dx_scale()
 
     def _objective(resid, x):
         dxp = x - x_a
@@ -1120,9 +1169,10 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
         # is unaffected -- this only short-circuits when the cheapest
         # trial was ALREADY going to be tiny.
         dx_cheap = np.linalg.solve(A + lam * np.diag(diagA), b)
-        if np.linalg.norm(dx_cheap) < tol:
+        if np.linalg.norm(dx_cheap / dxs) < tol:
             if verbose:
-                print(f"  [{label}] iter {it}: |dx_cheap|={np.linalg.norm(dx_cheap):.3e} < tol "
+                print(f"  [{label}] iter {it}: |dx_cheap/sigma|={np.linalg.norm(dx_cheap / dxs):.3e} "
+                     f"(raw |dx_cheap|={np.linalg.norm(dx_cheap):.3e}) < tol "
                      f"-- converged, skipping the {lm_max_tries}-try inner search "
                      f"(no forward() calls spent)", flush=True)
             break
@@ -1169,7 +1219,8 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
             lam *= lm_up
         if verbose:
             rms = float(np.sqrt(np.mean(resid ** 2)))
-            print(f"  [{label}] iter {it}: |dx|={np.linalg.norm(dx):.3e} "
+            print(f"  [{label}] iter {it}: |dx/sigma|={np.linalg.norm(dx / dxs):.3e} "
+                  f"(raw |dx|={np.linalg.norm(dx):.3e}) "
                   f"rms_resid={rms:.4g} J={J_cur:.6g} lam={lam:.3g} "
                   f"accepted={accepted}", flush=True)
         if not accepted:
@@ -1179,7 +1230,7 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
             # this (unchanged) x, exactly what the post-loop return block
             # below needs.
             break
-        if np.linalg.norm(dx) < tol:
+        if np.linalg.norm(dx / dxs) < tol:
             # Recompute K/A undamped at the newly-accepted x for the
             # returned covariance/AVK, mirroring what the pre-LM code did
             # every iteration regardless of convergence.

@@ -2423,3 +2423,213 @@ resubmission before any cross-config comparison is meaningful again --
 in progress: `--mem`/`--time` already updated per Sec.25, c5b and c5x
 being resubmitted as full 58-window sweeps (not a narrow resubmit of
 just the previously-failed windows).
+
+## 27. Fresh c5b/c5x resubmission (sigma fix in place): a NEW, real degeneracy -- `amplitude_aerosol`/`thickness_aerosol` are near-exactly aliased through their own product, independent of solver (2026-09-17)
+
+Both c5b (job 1926232) and c5x (job 1926233) resubmitted as full 58-window
+sweeps with Sec.26's sigma fix. Result was worse than the earlier
+(buggy) run, not better: 46/52 (88%) of c5b's solved windows and 50/51
+(98%) of c5x's hit `max_iter=15` genuinely UNCONVERGED (`|dx|` at the
+final iteration was 50-320, nowhere near `tol` -- confirmed by sampling
+several windows directly, not inferred from the iteration count alone).
+Per-row posterior RMS was frequently WORSE than the prior for both
+solvers (c5x: `co2_ppm` 1.46->6.73, `p_surface_hpa` 2.28->15.61,
+`height_aerosol` 5097->15310, `thickness_aerosol` 1326->5827) -- genuine
+divergence, not merely slow convergence.
+
+Root cause, confirmed via the posterior covariance: full-matrix
+condition number ~1.2e25 for c5x's own aerosol+pressure sub-block at a
+representative window (a 4x4 sub-block alone: ~9.6e17) -- both
+numerically singular at float64 precision. Traced to the forward
+model's own construction (`geocarb_gert/spectrum.py::_build_aerosol_
+kwargs`, shared by BOTH solvers, unconditionally): `tau_aerosol =
+amplitude_aerosol * thickness_aerosol * sqrt(2*pi)` is the ONLY aerosol-
+loading quantity `gert.ForwardModel.run` ever receives -- `amplitude_
+aerosol` and `thickness_aerosol` enter the dominant (AOD-scaling) term
+of the radiance ONLY through their product. Along the level set
+`amplitude * thickness = const`, `d(log amplitude) = -d(log thickness)`
+EXACTLY -- a perfect anti-correlation in log-space, not merely a
+strong one, along what is very close to the Fisher information
+matrix's own null direction. XRTM's real per-layer `K_tau_lay`/
+`K_ssa_lay` (vs. `single_scatter`'s `K_ssa_lay==0`) does give a genuine,
+non-zero SECOND-ORDER handle on this via the vertical-reshaping term
+(`thickness_aerosol_dI_dparam_xrtm`), but this rides on top of, and is
+much weaker than, the shared first-order construction -- empirically
+confirmed: XRTM's condition number (1.2e25) was NOT meaningfully better
+than single_scatter's (6.9e23, c5b) -- same order of magnitude. This is
+NOT a solver defect, and no amount of Jacobian smoothness on either
+solver's part changes it -- the forward model itself provides no way to
+separate the two parameters beyond a weak second-order term.
+
+Practical fix (user, 2026-09-17): revert to a single retrieved aerosol-
+loading parameter. `amplitude_aerosol` alone (with `thickness_aerosol`/
+`height_aerosol` both fixed) converged cleanly on a direct single-window
+test -- 13 iterations, genuinely decaying `|dx|`, no divergence.
+`height_aerosol` itself is NOT part of this exact algebraic degeneracy
+(it enters the Gaussian weight shape on its own, not multiplied against
+amplitude) -- real correlation with amplitude (~0.79 at one representative
+window) but nowhere near the ~1e17-level singularity thickness/amplitude
+share, so it can likely stay free without reintroducing catastrophic
+conditioning. c4/c5/c5b/c5x's whole cross-config comparison is retired
+by this finding -- superseded by Sec.30's cleaner, unconfounded
+`amplitude_aerosol + height_aerosol` (thickness fixed) design.
+
+## 28. Two more real, independent methodological gaps found chasing the degeneracy above, both fixed (2026-09-17)
+
+**Mixed-unit convergence criterion** (`geocarb_gert/joint_state.py`):
+`gauss_newton_state`'s own `np.linalg.norm(dx) < tol` check used the RAW
+packed step vector, which mixes wildly different natural scales in the
+SAME vector -- O(1) dimensionless multipliers for every `kind="scale"`
+row, but O(1e4) Pa for `height_aerosol`/`thickness_aerosol`, O(1) Kelvin
+for `t_offset_k`, O(1e-6) for `amplitude_aerosol` (all `kind=
+"absolute"`). A single unweighted L2 norm is dominated entirely by
+whichever row has the largest RAW magnitude -- with a Pa-valued row
+free, `tol=1e-5` effectively demanded THAT row's own step shrink to
+~1e-5 Pa (an absurd, physically meaningless precision) before the whole
+vector could pass, regardless of how converged every other row already
+was. Fixed with new `StateSpec.dx_scale()` -- each free row's own
+`sigma`, broadcast across its own elements, same packed order as
+`x0()`/`slices()` -- and both `tol` comparisons in `gauss_newton_state`
+now check `dx / dx_scale()`, dimensionless and comparable across rows
+regardless of physical units. **Any row added to the state vector in
+the future inherits this automatically** (`sigma` is a required
+`ParamSpec` field), but a row given a badly-scaled `sigma` will
+silently reintroduce the same problem in a different form -- see
+`dx_scale`'s own docstring; this is exactly why `sigma` choices are no
+longer just a regularization-strength decision, they are ALSO the
+convergence criterion's own unit system now, for every row.
+
+**Missing `correlation_length_eta` entries** (`input/retrieval_
+defaults.yml`): `amplitude_aerosol`/`thickness_aerosol` (2026-09-15's
+redesign) were never given entries, silently falling through to
+`joint_state._corr_for`'s literal `0.05` (~70 km) fallback. Found
+checking why even the well-posed `amplitude_aerosol`-alone state still
+had a poorly-conditioned posterior covariance (cond~2.6e16, though
+nowhere near the 1e25 catastrophe above): isolating the PRIOR block
+alone (no Jacobian/data at all) showed cond~593 at a real production
+window's actual bin spacing (~3 km) -- correlation length ~22x the bin
+spacing means neighboring bins' priors are nearly perfectly correlated
+by construction, a real but SECONDARY contributor (the Jacobian's own
+share of that 2.6e16 is ~13 orders of magnitude larger -- the
+instrument's spatial resolution genuinely can't distinguish this row's
+bins that finely, a real information-content limit, not a bug). Fixed
+per the user's own explicit direction ("The correlations should look
+like the gas correlation length scales" -- reaffirming this file's own
+2026-09-12 note that aerosol "behaves much more like a gas than the
+surface"): `amplitude_aerosol: 0.0714` (~100 km, matches `ch4_ppb`/
+`co_ppb`'s own broad-plume width -- amplitude_aerosol's truth profile is
+a haze event of comparable physical width, see `tau_aerosol`'s own
+along_slit_scene.py docstring); `thickness_aerosol: 0.357` (~500 km,
+matches `h2o_surface_vmr`/`t_offset_k`'s own smooth synoptic drift).
+Both explicitly placeholder/order-of-magnitude, same as `ROW_SIGMAS`.
+
+## 29. `two_stream` vs. `eig_add`: NOT the same algorithm at reduced resolution -- traced directly into XRTM's own C source (2026-09-17)
+
+Investigating whether XRTM's own solver choice affects the amplitude/
+thickness degeneracy (Sec.27) or the `height_aerosol` Jacobian defect
+(Sec.30) led to reading `gert/xrtm/src/` directly, not just `gert`'s own
+Python wrapper. Two real, code-verified findings:
+
+* **Identical inputs, different algorithms.** `gert/rt_solver.py`
+  passes the SAME `max_coef` (default 64) Legendre phase-function
+  moments, same optical properties, same `n_layers` to XRTM regardless
+  of `method`. The only things that differ: `n_quad` (forced to `1` for
+  `two_stream`, hard XRTM requirement, vs. `n_streams` -- default 8 --
+  for `eig_add`), the `'sfi'` option (needed only by `two_stream` to
+  reconstruct radiance at a specific output angle from its flux-only
+  solution -- `eig_add` doesn't need it, "can evaluate the eigensolution
+  at an arbitrary output angle" directly per `rt_solver.py`'s own
+  comment), and which C solver routine actually consumes that data.
+* **`two_stream` is mathematically incapable of seeing phase-function
+  detail beyond the asymmetry parameter.** `xrtm_two_stream.c`'s own
+  `rtm_two_stream` only ever reads `coef[i][0][1]` (Fourier order 0,
+  Legendre moment 1 = χ₁ = `g` for Henyey-Greenstein) -- no other
+  moment index appears anywhere in the file. `eig_add` (`xrtm_model.c`'s
+  own solver dispatch, `rtm_eig_rts` + the shared layer-adding
+  machinery) genuinely uses the higher-order moments it's given. So
+  `two_stream` isn't a coarser version of `eig_add`'s physics -- it's a
+  categorically different, much simpler algorithm (classical two-stream
+  flux equations, LAPACK-solved as one coupled system across all layers
+  at once) that literally cannot represent anything about the
+  scattering phase function beyond one scalar, regardless of how many
+  moments it's fed.
+
+Practical implication: any apparent "XRTM doesn't help much" result
+measured under `method='two_stream'` specifically should NOT be taken
+as evidence the underlying physical signal is absent -- `two_stream`'s
+own architecture is structurally blind to exactly the kind of subtle
+angular/multi-scattering fingerprint (e.g., a broad-dilute vs. narrow-
+dense aerosol layer at fixed total AOD) that would need `eig_add`'s
+real multi-angle resolution to show up at all. Not yet tested directly
+(a real cost tradeoff -- `eig_add` was already ~32x costlier than
+`two_stream` in the original solver-choice benchmark) -- open follow-up.
+
+## 30. `height_aerosol` isolated: real, substantial observational sensitivity (815:1 over the prior) that `single_scatter`'s own Jacobian simply fails to convey -- XRTM needed for correctness, not efficiency (2026-09-17)
+
+Direct head-to-head, same window (rows 225-239) both times, `amplitude_
+aerosol + height_aerosol` free (`thickness_aerosol` fixed, per Sec.27's
+own resolution of the degeneracy), corrected `sigma`/`corr_length`/
+convergence-criterion (Sec.28) in place -- the first genuinely clean,
+unconfounded comparison in this whole investigation:
+
+* **`single_scatter`**: ran all 15 iterations (`max_iter` cap), `|dx/
+  sigma|` still 0.066 at the end -- NOT converged, but smoothly and
+  monotonically decreasing the whole way (no oscillation, no
+  divergence). Direct inspection of the retrieved state: `height_
+  aerosol` is flat at EXACTLY 85000.0 (the prior) across all 15 bins,
+  unchanged to the printed precision -- zero bias closed, not merely
+  slow. Every bit of the slow cost improvement came from `amplitude_
+  aerosol` (and tiny `co2_ppm`/`p_surface_hpa` adjustments); `height_
+  aerosol` contributed nothing at all.
+* **`xrtm` (`two_stream`)**: converged genuinely, `|dx/sigma|=3.36e-12`
+  by iteration 7 (8 iterations total) -- many orders of magnitude past
+  `tol`.
+
+**Isolation experiment** (a standalone script, not the GN loop itself):
+holding every OTHER row at its exact truth value and evaluating the
+forward model with ONLY `height_aerosol` wrong (at the 85000 Pa prior
+vs. this window's true ~81100-85000 Pa) gives a REAL, substantial
+noise-weighted data-misfit term of 140.74 (comparable in scale to the
+whole window's own converged cost, ~195-203) against a prior-penalty
+term of only 0.173 for correcting it -- a ratio of ~815:1 favoring the
+correction. So the true forward model has strong, real sensitivity to
+`height_aerosol` here; `single_scatter`'s own analytic Jacobian
+(`height_aerosol_dI_dparam`, degenerate via `K_ssa_lay==0`) simply
+fails to convey information that is genuinely present in the data --
+not a fundamental information-content limit of this measurement, a
+real defect in that specific linearization.
+
+**Cost reality check** (user, catching an overstatement): XRTM's fewer
+iterations do NOT make it cheaper in total wall-clock here --
+`single_scatter`'s 15 (unconverged) iterations took 2843s total
+(~190s/iter); XRTM's 8 (converged) iterations took 4112s total
+(~514s/iter, well above this project's own earlier ~350s/iter general
+estimate). XRTM was SLOWER in raw wall-clock for this window, not
+faster. The case for using it is correctness, not efficiency: `single_
+scatter`'s 2843s produces a wrong, non-converged answer for `height_
+aerosol`; XRTM's 4112s produces a genuinely correct one. Any future
+`--time`/`--mem` budget for an aerosol sweep with `height_aerosol` free
+needs to reflect XRTM's real, HIGHER total cost, not an assumed
+efficiency win.
+
+**Emerging policy** (user, 2026-09-17, not yet finalized -- see the
+open confirmation test noted below): XRTM should be the DEFAULT
+whenever `height_aerosol` and/or `thickness_aerosol` are free retrieval
+parameters -- `single_scatter` is demonstrably broken there, not merely
+costlier. `thickness_aerosol_dI_dparam`'s own docstring already
+documents the same `K_ssa_lay==0` root cause degrading its own
+reshaping term under `single_scatter`, so this generalizes beyond
+`height_aerosol` specifically. For a config that retrieves aerosol
+LOADING only (`amplitude_aerosol` alone, shape fixed), `single_scatter`
+converged cleanly on its own (Sec.27's amplitude-only test, 13
+iterations) -- no evidence XRTM is needed there, and it remains the
+cheaper default for that narrower case.
+
+**Open, in-progress confirmation** (as of this writing): a follow-up
+test repeats the same head-to-head with `height_aerosol` FROZEN AT ITS
+EXACT TRUTH VALUE (not free, not at the structural prior) instead of
+free -- isolating whether `single_scatter`'s problem here is specific
+to RETRIEVING `height_aerosol` itself (expected, and would fully
+confirm the policy above) or reflects something broader that leaks into
+the rest of the state even with `height_aerosol` perfectly known. Not
+yet complete -- update this section once it lands.

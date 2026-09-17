@@ -63,6 +63,33 @@ correlation_length_eta:
   height_aerosol: 0.357     # ~500 km -- broad synoptic drift, same scale as
                             # t_offset_k/h2o_surface_vmr (unlike tau_aerosol's
                             # own localized haze-event scale above)
+  # 2026-09-17: amplitude_aerosol/thickness_aerosol (2026-09-15's Gaussian-
+  # profile redesign, replacing tau_aerosol -- see along_slit_scene.py's own
+  # docstrings) were never given entries here, silently falling through to
+  # `joint_state._corr_for`'s literal 0.05 (~70 km) fallback -- found the
+  # same week checking why a reduced (amplitude_aerosol-only) state's
+  # posterior covariance was still poorly conditioned (cond~2.6e16):
+  # isolating the PRIOR block alone (no Jacobian/data) showed cond~593 at a
+  # real production window's bin spacing (~3 km) -- a real, if secondary,
+  # contributor next to the Jacobian's own much larger share of that number
+  # (closely-spaced bins whose along-slit variation is smoother than the
+  # instrument's own footprint resolution -- see ROW_SIGMAS' own docstring
+  # in scripts/gd_joint_block_retrieve.py for the sibling sigma-override gap
+  # this mirrors). Both values below (user, 2026-09-17, reaffirming this
+  # file's own 2026-09-12 note above that aerosol "behaves much more like a
+  # gas than the surface") are matched directly to a GAS row's own scale,
+  # not re-derived from data -- placeholders in the same sense ROW_SIGMAS'
+  # own values are, expected to need real tuning:
+  amplitude_aerosol: 0.0714  # ~100 km -- matches ch4_ppb/co_ppb's own
+                            # broad-plume width; amplitude_aerosol's truth
+                            # profile is a haze event of comparable physical
+                            # width (see along_slit_scene.tau_aerosol's own
+                            # docstring, deliberately wider than a CO2/CO
+                            # hot spot), same reasoning tau_aerosol used above
+  thickness_aerosol: 0.357  # ~500 km -- matches h2o_surface_vmr/t_offset_k's
+                            # own smooth, broad-scale, no-localized-structure
+                            # synoptic drift, the same gas-scale reasoning
+                            # height_aerosol used above
 
 # source: scripts/gd_joint_block_whole_slit_sweep.py --n-lookup-samples /
 # --out-root's own documented conditional defaults (400/results under
