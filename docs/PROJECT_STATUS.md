@@ -2612,12 +2612,11 @@ aerosol`; XRTM's 4112s produces a genuinely correct one. Any future
 needs to reflect XRTM's real, HIGHER total cost, not an assumed
 efficiency win.
 
-**Emerging policy** (user, 2026-09-17, not yet finalized -- see the
-open confirmation test noted below): XRTM should be the DEFAULT
-whenever `height_aerosol` and/or `thickness_aerosol` are free retrieval
-parameters -- `single_scatter` is demonstrably broken there, not merely
-costlier. `thickness_aerosol_dI_dparam`'s own docstring already
-documents the same `K_ssa_lay==0` root cause degrading its own
+**Policy (2026-09-17, now CONFIRMED, not just emerging)**: XRTM is the
+DEFAULT whenever `height_aerosol` and/or `thickness_aerosol` are free
+retrieval parameters -- `single_scatter` is demonstrably broken there,
+not merely costlier. `thickness_aerosol_dI_dparam`'s own docstring
+already documents the same `K_ssa_lay==0` root cause degrading its own
 reshaping term under `single_scatter`, so this generalizes beyond
 `height_aerosol` specifically. For a config that retrieves aerosol
 LOADING only (`amplitude_aerosol` alone, shape fixed), `single_scatter`
@@ -2625,11 +2624,38 @@ converged cleanly on its own (Sec.27's amplitude-only test, 13
 iterations) -- no evidence XRTM is needed there, and it remains the
 cheaper default for that narrower case.
 
-**Open, in-progress confirmation** (as of this writing): a follow-up
-test repeats the same head-to-head with `height_aerosol` FROZEN AT ITS
-EXACT TRUTH VALUE (not free, not at the structural prior) instead of
-free -- isolating whether `single_scatter`'s problem here is specific
-to RETRIEVING `height_aerosol` itself (expected, and would fully
-confirm the policy above) or reflects something broader that leaks into
-the rest of the state even with `height_aerosol` perfectly known. Not
-yet complete -- update this section once it lands.
+**Confirmation test** (same window, `height_aerosol` FROZEN AT ITS
+EXACT TRUTH VALUE instead of free -- isolating whether `single_
+scatter`'s problem above is specific to RETRIEVING `height_aerosol`
+itself, or something broader leaking into the rest of the state even
+with `height_aerosol` perfectly known): both solvers now converge
+cleanly, confirming the former. `single_scatter`: 15 iterations,
+`|dx/sigma|=2.384e-05` (technically still hit `max_iter`, but J and
+rms_resid were completely flat from iteration 9 onward -- converged in
+every practical sense, a world away from the height-free case's
+permanent stall at 0.066). `xrtm`: genuinely converged at iteration 9
+(10 total), `|dx/sigma|=3.5e-08`, many orders of magnitude past `tol`.
+Final `rms_resid` landed close for both (`single_scatter` 0.000304,
+`xrtm` 0.000359) -- once `height_aerosol`'s own error is removed from
+the picture, the two solvers behave equivalently on everything else, as
+expected. Cost confirms the earlier finding too: `xrtm`'s 10 iterations
+took ~5000-5500s total at this window's ~500-550s/iteration rate (the
+first attempt at this same test hit a `--time=1:00:00` TIMEOUT at
+iteration 8, `|dx/sigma|=7.489e-05`, purely a wall-clock budgeting
+miss, not a convergence problem -- resubmitted at `--time=2:00:00` to
+get this final number) -- well above `single_scatter`'s own ~2850s for
+15 (admittedly slightly pricier per-iteration) steps. XRTM remains the
+costlier solver even when both converge cleanly; it is worth that cost
+specifically when `height_aerosol`/`thickness_aerosol` must be
+retrieved, not as a general-purpose upgrade.
+
+This closes out the whole investigation arc that started with the
+sigma-bug fix (Sec.26): the FINAL, settled picture is that `single_
+scatter` is fine for the entire joint-block state EXCEPT `height_
+aerosol`/`thickness_aerosol` specifically, where its own analytic
+Jacobian is genuinely, demonstrably broken (`K_ssa_lay==0`) rather than
+merely weaker or slower -- XRTM is REQUIRED there for a correct answer
+at all, at a real, measurably higher computational cost, not a free
+upgrade. Any future config that frees either of those two rows should
+default to `--solver xrtm`; any config that doesn't can keep using the
+cheaper `single_scatter`.
