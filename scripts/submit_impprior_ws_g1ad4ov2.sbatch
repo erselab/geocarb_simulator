@@ -114,7 +114,7 @@ PYTHON=/gpfs/fs1/home/scrowel3/miniforge3/envs/analysis/bin/python
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 
-: "${CONF:?set CONF=c1|c2|c3|c4|c5|c5b|c5x via --export=ALL,CONF=...}"
+: "${CONF:?set CONF=c1|c2|c3|c4|c5|c5b|c5x|c5y via --export=ALL,CONF=...}"
 SOLVER="single_scatter"
 case "${CONF}" in
   c1) FREE="co2_ppm"; AERO="" ;;
@@ -124,6 +124,18 @@ case "${CONF}" in
   c5) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol,thickness_aerosol"; AERO="--aerosol" ;;
   c5b) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,thickness_aerosol"; AERO="--aerosol" ;;
   c5x) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol,thickness_aerosol"; AERO="--aerosol"; SOLVER="xrtm" ;;
+  # 2026-09-17: c5/c5x's amplitude_aerosol+thickness_aerosol combination is
+  # near-exactly degenerate (they enter gert's forward model ONLY through
+  # their product, tau_aerosol = amplitude*thickness*sqrt(2*pi) -- posterior
+  # covariance condition numbers 1e17-1e25, independent of solver -- see
+  # docs/PROJECT_STATUS.md Sec.27). c5y drops thickness_aerosol (fixed at
+  # its own along_slit_scene.py default) and keeps height_aerosol free --
+  # NOT part of that exact algebraic degeneracy, and requires XRTM
+  # specifically (single_scatter's own height_aerosol Jacobian is
+  # genuinely broken, K_ssa_lay==0 -- Sec.30) -- this is the validated,
+  # well-conditioned design from Sec.30's own head-to-head/confirmation
+  # tests, now run at full production scale for the first time.
+  c5y) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol"; AERO="--aerosol"; SOLVER="xrtm" ;;
   *) echo "unknown CONF=${CONF}"; exit 1 ;;
 esac
 
