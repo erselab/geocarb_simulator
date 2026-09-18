@@ -114,9 +114,10 @@ PYTHON=/gpfs/fs1/home/scrowel3/miniforge3/envs/analysis/bin/python
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 
-: "${CONF:?set CONF=c1|c2|c3|c4|c5|c5b|c5x|c5y|o5x via --export=ALL,CONF=...}"
+: "${CONF:?set CONF=c1|c2|c3|c4|c5|c5b|c5x|c5y|o5x|o5y via --export=ALL,CONF=...}"
 SOLVER="single_scatter"
 FPA="2"
+N_TASKS="58"
 case "${CONF}" in
   c1) FREE="co2_ppm"; AERO="" ;;
   c2) FREE="co2_ppm,p_surface_hpa"; AERO="" ;;
@@ -147,10 +148,19 @@ case "${CONF}" in
   # design. XRTM required for height_aerosol per Sec.30's own settled
   # policy.
   o5x) FREE="p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol,thickness_aerosol"; AERO="--aerosol"; SOLVER="xrtm"; FPA="0" ;;
+  # 2026-09-18: o5y = o5x minus thickness_aerosol. The o5x band-0 smoke test
+  # (rows 523-535) reproduced the amplitude*thickness degeneracy exactly
+  # (cond(cov)=9e22; thickness_aerosol pushed 44 Pa -> 2031 Pa off truth), so
+  # band 0 gets the same fix as c5y. Band 0 has 63 windows (not 58) and its
+  # widest windows are at the START of the slit (window 0 = 47 rows), so
+  # N_TASKS=63 -- with 58, task 0 would get windows 0 AND 58 (47+29 rows).
+  # Submit with --array=0-62 and a larger --cpus-per-task/--mem/--time: that
+  # smoke test cost ~786 s/iteration on a width-13 window at 4 CPUs.
+  o5y) FREE="p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol"; AERO="--aerosol"; SOLVER="xrtm"; FPA="0"; N_TASKS="63" ;;
   *) echo "unknown CONF=${CONF}"; exit 1 ;;
 esac
 
-echo "CONF=${CONF}  FREE=${FREE}  ${AERO}  SOLVER=${SOLVER}  task ${SLURM_ARRAY_TASK_ID}/58"
+echo "CONF=${CONF}  FREE=${FREE}  ${AERO}  SOLVER=${SOLVER}  task ${SLURM_ARRAY_TASK_ID}/${N_TASKS}"
 git rev-parse HEAD
 
 # Same shm safety net as submit_impprior_ws.sbatch -- see that script's
@@ -168,5 +178,5 @@ ${PYTHON} scripts/gd_joint_block_retrieve.py \
     --g-ratio 1 --overlap 2 --hires-only --jacobian analytic --gn-verbose \
     --solver "${SOLVER}" \
     --anchor-workers "${SLURM_CPUS_PER_TASK}" \
-    --task-id "${SLURM_ARRAY_TASK_ID}" --n-tasks 58 \
+    --task-id "${SLURM_ARRAY_TASK_ID}" --n-tasks "${N_TASKS}" \
     --free "${FREE}" ${AERO}
