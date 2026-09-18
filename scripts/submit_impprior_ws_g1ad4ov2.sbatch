@@ -114,8 +114,9 @@ PYTHON=/gpfs/fs1/home/scrowel3/miniforge3/envs/analysis/bin/python
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 
-: "${CONF:?set CONF=c1|c2|c3|c4|c5|c5b|c5x|c5y via --export=ALL,CONF=...}"
+: "${CONF:?set CONF=c1|c2|c3|c4|c5|c5b|c5x|c5y|o5x via --export=ALL,CONF=...}"
 SOLVER="single_scatter"
+FPA="2"
 case "${CONF}" in
   c1) FREE="co2_ppm"; AERO="" ;;
   c2) FREE="co2_ppm,p_surface_hpa"; AERO="" ;;
@@ -136,6 +137,16 @@ case "${CONF}" in
   # well-conditioned design from Sec.30's own head-to-head/confirmation
   # tests, now run at full production scale for the first time.
   c5y) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol"; AERO="--aerosol"; SOLVER="xrtm" ;;
+  # 2026-09-18 (user): first production config on the O2-A band (fpa=0,
+  # molecules=[o2,h2o] per input/geocarb_instrument.yml -- co2_ppm/ch4_ppb/
+  # co_ppb are meaningless here, dropped from FREE entirely, not just left
+  # frozen). All three aerosol shape parameters free (including thickness_
+  # aerosol, deliberately reintroducing the amplitude*thickness degeneracy
+  # from Sec.27/c5-c5x to see whether it behaves differently in this band)
+  # -- unlike c5y, which dropped thickness_aerosol for the FPA2 production
+  # design. XRTM required for height_aerosol per Sec.30's own settled
+  # policy.
+  o5x) FREE="p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol,thickness_aerosol"; AERO="--aerosol"; SOLVER="xrtm"; FPA="0" ;;
   *) echo "unknown CONF=${CONF}"; exit 1 ;;
 esac
 
@@ -152,7 +163,7 @@ find /dev/shm -maxdepth 1 -user "${USER}" -name 'geocarb_L_*' -mmin +30 2>/dev/n
     | while read -r f; do fuser "$f" >/dev/null 2>&1 || rm -f "$f"; done
 
 ${PYTHON} scripts/gd_joint_block_retrieve.py \
-    --fpa 2 --prior-fields structural --vary-albedo \
+    --fpa "${FPA}" --prior-fields structural --vary-albedo \
     --anchor-density 4 --surface-positions anchor --frozen-atmosphere-positions anchor \
     --g-ratio 1 --overlap 2 --hires-only --jacobian analytic --gn-verbose \
     --solver "${SOLVER}" \
