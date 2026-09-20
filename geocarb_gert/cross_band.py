@@ -1,4 +1,11 @@
-"""Cross-band ground co-registration: pairing rows of two GeoCarb bands (FPAs)
+"""NOTE (2026-09-20): the pipeline's ``eta`` is now slit-image normalized
+(``gd_polynomials.eta_of_s``): centred and scaled per FPA so equal ``eta`` is the
+same fractional position along the shared slit in every band. The pairing below
+is still keyed on REAL slit angle ``s`` and assumes the absolute ``s``
+calibrations are comparable across FPAs, which the user has questioned (the
+differences may be misalignment/defocus); pairing on ``eta`` is the alternative.
+
+Cross-band ground co-registration: pairing rows of two GeoCarb bands (FPAs)
 that see the same true along-slit position, for a multi-band joint retrieval.
 
 See KEYSTONE_SMILE_BIAS_PLAN.md Sec. 11 for the full plan and rationale --
@@ -23,8 +30,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .gd_polynomials import N_PX, xy_to_wavelength_slit
-from .gd_render import s_max as _s_max  # noqa: F401  (re-exported for convenience)
+from .gd_polynomials import N_PX, eta_of_s, xy_to_wavelength_slit
 
 
 def real_s_of_row(fpa: int, rows=None, col: float | None = None) -> np.ndarray:
@@ -53,16 +59,26 @@ def real_s_of_row(fpa: int, rows=None, col: float | None = None) -> np.ndarray:
     return s
 
 
+def eta_of_row(fpa: int, rows=None, col: float | None = None) -> np.ndarray:
+    """Slit-image ``eta`` (``gd_polynomials.eta_of_s``) at each of `fpa`'s rows,
+    evaluated at the same fixed representative column as :func:`real_s_of_row`.
+    ``eta`` is the pipeline's shared along-slit coordinate: every scene/state
+    variable is a function of ``eta`` (``x_km = eta * SLIT_HALF_KM``), so rows
+    of different bands with equal ``eta`` see the same atmosphere and surface."""
+    return eta_of_s(fpa, real_s_of_row(fpa, rows, col))
+
+
 def nearest_row_pairing(fpa_a: int, fpa_b: int, rows_a=None) -> dict:
-    """For each row of `fpa_a`, find the real row of `fpa_b` closest in true
-    slit angle `s` -- the co-registration mechanism from
-    KEYSTONE_SMILE_BIAS_PLAN.md Sec. 11c/11d item 3 (nearest-native-row, the
-    simpler first cut ahead of PSF-area-weighted combination).
+    """For each row of `fpa_a`, find the real row of `fpa_b` closest in slit-image
+    ``eta`` (2026-09-20; was real slit angle ``s`` -- see the module note above) --
+    the co-registration mechanism from KEYSTONE_SMILE_BIAS_PLAN.md Sec. 11c/11d
+    item 3 (nearest-native-row, the simpler first cut ahead of PSF-area-weighted
+    combination).
 
     No interpolation of either band's spectrum -- this only decides *which*
     already-real row of `fpa_b` to pair with each already-real row of
-    `fpa_a`. Rows of `fpa_a` whose real angle falls outside `fpa_b`'s own
-    covered range are dropped, not extrapolated.
+    `fpa_a`. Rows of `fpa_a` whose ``eta`` falls outside `fpa_b`'s own covered
+    range are dropped, not extrapolated.
 
     Parameters
     ----------
@@ -75,41 +91,46 @@ def nearest_row_pairing(fpa_a: int, fpa_b: int, rows_a=None) -> dict:
     dict with:
         rows_a : ndarray[int]          -- input rows of fpa_a (valid only)
         rows_b : ndarray[int]          -- matched rows of fpa_b
-        s_a, s_b : ndarray[float]      -- each row's own real slit angle [deg]
-        mismatch_deg : ndarray[float]  -- s_b - s_a, real angle residual
-        mismatch_rows : ndarray[float] -- mismatch_deg / fpa_b's mean row spacing
+        eta_a, eta_b : ndarray[float]  -- each row's own slit-image eta
+        mismatch_eta : ndarray[float]  -- eta_b - eta_a (the pairing residual)
+        mismatch_rows : ndarray[float] -- mismatch_eta / fpa_b's mean row spacing in eta
+        s_a, s_b : ndarray[float]      -- each row's real slit angle [deg] (diagnostic)
+        mismatch_deg : ndarray[float]  -- s_b - s_a in REAL angle (diagnostic only: it
+                                          is nonzero by design, since the pairing is on eta)
         n_dropped : int                -- rows_a outside fpa_b's covered range
     """
     if rows_a is None:
         rows_a = np.arange(N_PX, dtype=float)
     rows_a = np.asarray(rows_a, dtype=float)
 
-    s_a = real_s_of_row(fpa_a, rows_a)
+    eta_a = eta_of_row(fpa_a, rows_a)
     rows_b_all = np.arange(N_PX, dtype=float)
-    s_b_all = real_s_of_row(fpa_b, rows_b_all)
+    eta_b_all = eta_of_row(fpa_b, rows_b_all)
 
-    lo, hi = min(s_b_all.min(), s_b_all.max()), max(s_b_all.min(), s_b_all.max())
-    in_range = (s_a >= lo) & (s_a <= hi)
+    lo, hi = min(eta_b_all.min(), eta_b_all.max()), max(eta_b_all.min(), eta_b_all.max())
+    in_range = (eta_a >= lo) & (eta_a <= hi)
     n_dropped = int((~in_range).sum())
 
     # Brute-force nearest-neighbour: |difference| matrix, at most N_PX x N_PX
-    # (~1e6 entries, trivial) -- doesn't assume s_b_all is monotonic in row
+    # (~1e6 entries, trivial) -- doesn't assume eta_b_all is monotonic in row
     # (it should be globally, but this doesn't rely on it).
-    diff = np.abs(s_a[in_range, None] - s_b_all[None, :])
+    diff = np.abs(eta_a[in_range, None] - eta_b_all[None, :])
     best = np.argmin(diff, axis=1)
 
     rows_a_valid = rows_a[in_range].astype(int)
     rows_b_matched = rows_b_all[best].astype(int)
-    s_a_valid = s_a[in_range]
-    s_b_matched = s_b_all[best]
-    mismatch_deg = s_b_matched - s_a_valid
+    eta_a_valid = eta_a[in_range]
+    eta_b_matched = eta_b_all[best]
+    mismatch_eta = eta_b_matched - eta_a_valid
+    row_spacing_b = float(np.abs(np.diff(eta_b_all)).mean())
 
-    row_spacing_b = float(np.abs(np.diff(s_b_all)).mean())
-    mismatch_rows = mismatch_deg / row_spacing_b
+    s_a = real_s_of_row(fpa_a, rows_a_valid.astype(float))
+    s_b = real_s_of_row(fpa_b, rows_b_matched.astype(float))
 
     return dict(rows_a=rows_a_valid, rows_b=rows_b_matched,
-               s_a=s_a_valid, s_b=s_b_matched,
-               mismatch_deg=mismatch_deg, mismatch_rows=mismatch_rows,
+               eta_a=eta_a_valid, eta_b=eta_b_matched,
+               mismatch_eta=mismatch_eta, mismatch_rows=mismatch_eta / row_spacing_b,
+               s_a=s_a, s_b=s_b, mismatch_deg=s_b - s_a,
                n_dropped=n_dropped)
 
 
@@ -149,6 +170,7 @@ def nearest_row_pairing_multi(fpas, rows_ref=None) -> dict:
         rows : dict[int, ndarray[int]]     -- per-FPA matched row, same
                                                length/order for every FPA
         s : dict[int, ndarray[float]]      -- per-FPA real slit angle [deg]
+        eta : dict[int, ndarray[float]]    -- per-FPA slit-image eta (the pairing key)
         mismatch_deg : dict[int, ndarray]  -- vs. reference, 0 for fpas[0]
         mismatch_rows : dict[int, ndarray] -- vs. reference, 0 for fpas[0]
         n_dropped : int                    -- reference rows dropped by the
@@ -170,6 +192,7 @@ def nearest_row_pairing_multi(fpas, rows_ref=None) -> dict:
 
     rows = {ref: valid_rows_ref}
     s = {ref: real_s_of_row(ref, valid_rows_ref.astype(float))}
+    eta = {ref: eta_of_row(ref, valid_rows_ref.astype(float))}
     mismatch_deg = {ref: np.zeros(len(valid_rows_ref))}
     mismatch_rows = {ref: np.zeros(len(valid_rows_ref))}
 
@@ -178,8 +201,9 @@ def nearest_row_pairing_multi(fpas, rows_ref=None) -> dict:
         sel = np.array([idx_of[r] for r in valid_rows_ref], dtype=int)
         rows[fpa] = p["rows_b"][sel]
         s[fpa] = p["s_b"][sel]
+        eta[fpa] = p["eta_b"][sel]
         mismatch_deg[fpa] = p["mismatch_deg"][sel]
         mismatch_rows[fpa] = p["mismatch_rows"][sel]
 
-    return dict(fpas=fpas, rows=rows, s=s, mismatch_deg=mismatch_deg,
+    return dict(fpas=fpas, rows=rows, s=s, eta=eta, mismatch_deg=mismatch_deg,
                mismatch_rows=mismatch_rows, n_dropped=n_dropped)

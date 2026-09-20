@@ -58,7 +58,7 @@ is always the along-slit position reference for pairing and plots):
                      gd_joint_undistorted_dispersion_diag.py`) that has
                      nothing to do with atmospheric retrieval quality.
   "rectified"    -- each band rectified independently (gd_render.rectify)
-                     onto ONE SHARED cross-band `s_grid` (real degrees,
+                     onto ONE SHARED cross-band `eta_grid` (slit-image eta;
                      N-way-intersection-clipped to every band's valid
                      coverage) -- the ORIGINAL co-registration mechanism
                      Sec. 11b/11c proposed and then set aside in favor of
@@ -67,7 +67,7 @@ is always the along-slit position reference for pairing and plots):
                      already-quantified single-band interpolation bias
                      (Sec. 9l/9m) show up here too, on top of any real
                      cross-band mismatch? Rows are aligned by construction
-                     (same `s_grid` index for every band) -- no separate
+                     (same `eta_grid` index for every band) -- no separate
                      pairing needed for this pipeline. Coverage shrinks
                      (never grows) as more bands are added, since it's an
                      N-way intersection of ranges.
@@ -107,9 +107,10 @@ from geocarb_gert import gert_root  # noqa: E402
 from geocarb_gert import gd_render, build_geocarb_instrument
 from geocarb_gert import (RADIOMETRIC_SPEC_BY_FPA, geocarb_noise_model,
                           geocarb_noise_model_multi)
-from geocarb_gert.cross_band import fpas_tag, nearest_row_pairing_multi, real_s_of_row
+from geocarb_gert.cross_band import eta_of_row, fpas_tag, nearest_row_pairing_multi, real_s_of_row
 from geocarb_gert.gd_polynomials import real_wavenumber_range, xy_to_wavelength_slit
-from geocarb_gert.gd_render import available_cpus, s_max, _diagonal_ils_convolve
+from geocarb_gert.gd_render import available_cpus, _diagonal_ils_convolve
+from geocarb_gert.gd_polynomials import eta_of_s, s_of_eta
 from geocarb_gert.spectrum import simulate_spectrum
 
 import gert
@@ -278,8 +279,7 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
 
     cols_center = np.full(1024, 512.0)
     _, s_of_row = xy_to_wavelength_slit(fpa, cols_center, np.arange(1024.0))
-    sm = s_max(fpa)
-    x_km_of_row = (s_of_row / sm) * als.SLIT_HALF_KM
+    x_km_of_row = eta_of_s(fpa, s_of_row) * als.SLIT_HALF_KM
     xtrue_x_km = np.zeros(1024) if (uniform or barcode) else x_km_of_row
 
     h2o_mean_prior_ppm = float(np.mean(atm_center.gases["h2o"])) * 1e6
@@ -293,7 +293,21 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
                fwhm_cm=fwhm_cm, albedo=albedo, A=A, wn_hires=wn_hires, radiance=radiance,
                ils=wide_win.ils, wn_grid=wn_grid, noise_n0=noise_n0, noise_n1=noise_n1,
                noise_i_max=noise_i_max, sat_mask=sat_mask, noise_arr=noise_arr,
-               x_km_of_row=x_km_of_row, xtrue_of_row=xtrue_of_row)
+               x_km_of_row=x_km_of_row, xtrue_of_row=xtrue_of_row,
+               h2o_mean_prior_ppm=h2o_mean_prior_ppm, flat_truth=bool(uniform or barcode))
+
+
+def _xtrue_at_eta(band: dict, eta) -> dict:
+    """Truth state at slit-image `eta` -- the same formulas `_band_setup` uses per
+    native row, but evaluated at an arbitrary eta. Needed by the rectified
+    pipeline, whose row `k` is the SHARED-grid position `eta_grid[k]`, not any
+    band's native row `k` (2026-09-20). Uniform/barcode scenes have no along-slit
+    truth (x_km = 0), exactly as in `_band_setup`."""
+    eta = np.atleast_1d(np.asarray(eta, dtype=float))
+    x_km = np.zeros_like(eta) if band["flat_truth"] else eta * als.SLIT_HALF_KM
+    ratio = als.h2o_surface_vmr(x_km) / als.h2o_surface_vmr(0.0)
+    return {"co2": als.xco2_ppm(x_km), "ch4": als.xch4_ppb(x_km), "co": als.xco_ppb(x_km),
+            "h2o": band["h2o_mean_prior_ppm"] * ratio, "p_surface": als.p_surface_hpa(x_km)}
 
 
 def _band_setup_cached(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_samples: int,
@@ -376,15 +390,17 @@ def _band_setup_cached(fpa: int, atm_center, absco, geo, solar, snr: float, n_lo
     return cacheable
 
 
-def _shared_s_grid(fpas, n: int = 1024) -> np.ndarray:
-    """Real slit-angle grid [deg] spanning the N-way intersection of every
-    band's covered range -- the target grid for the "rectified" pipeline.
-    Same real-`s` convention as Sec. 11f's nearest_row_pairing, never eta."""
+def _shared_eta_grid(fpas, n: int = 1024) -> np.ndarray:
+    """Slit-image ``eta`` grid spanning the N-way intersection of every band's
+    covered range -- the target grid for the "rectified" pipeline. Keyed on
+    ``eta`` (2026-09-20; was real slit angle ``s``), so grid index ``k`` is the
+    SAME scene position for every band; each band is rectified at
+    ``s_of_eta(fpa, eta_grid)`` in its own angle units."""
     los, his = [], []
     for fpa in fpas:
-        s = real_s_of_row(fpa)
-        los.append(min(s.min(), s.max()))
-        his.append(max(s.min(), s.max()))
+        e = eta_of_row(fpa)
+        los.append(min(e.min(), e.max()))
+        his.append(max(e.min(), e.max()))
     return np.linspace(max(los), min(his), n)
 
 
@@ -548,15 +564,20 @@ def _worker(task):
     bands = g["bands"]
     xtrue_rows = []
     for b, r in zip(bands, rows):
-        xt = {gas: float(b["xtrue_of_row"][gas][r]) for gas in ("co2", "ch4", "co", "h2o")}
-        xt["p_surface"] = float(b["xtrue_of_row"]["p_surface"][r])
+        if pipeline == "rectified":
+            # row k is the shared-grid position eta_grid[k], not native row k
+            xa = _xtrue_at_eta(b, g["eta_grid"][r])
+            xt = {gas: float(xa[gas][0]) for gas in ("co2", "ch4", "co", "h2o", "p_surface")}
+        else:
+            xt = {gas: float(b["xtrue_of_row"][gas][r]) for gas in ("co2", "ch4", "co", "h2o")}
+            xt["p_surface"] = float(b["xtrue_of_row"]["p_surface"][r])
         xtrue_rows.append(xt)
     try:
         if pipeline == "native":
             nus, ys = zip(*[_native_row(b, r) for b, r in zip(bands, rows)])
         elif pipeline == "undistorted":
             nus, ys = zip(*[_undistorted_row(b, r) for b, r in zip(bands, rows)])
-        else:  # rectified -- rows are all the shared s_grid index by construction
+        else:  # rectified -- rows are all the shared eta_grid index by construction
             pairs = [_rectified_row(b, Rimg, r) for b, Rimg, r in zip(bands, g["Rimgs"], rows)]
             if any(nu is None for nu, _ in pairs):
                 return (pipeline, order, rows), {"_chi2": np.nan, "_conv": False, "off_detector": True}
@@ -652,13 +673,14 @@ def main() -> int:
                 tasks.append(("undistorted", 2, rows))
 
     if "rectified" in pipelines:
-        s_grid_shared = _shared_s_grid(FPAS)
-        Rimgs = [gd_render.rectify(fpa, b["A"], s_grid_shared, b["wn_grid"])
+        eta_grid_shared = _shared_eta_grid(FPAS)
+        Rimgs = [gd_render.rectify(fpa, b["A"], s_of_eta(fpa, eta_grid_shared), b["wn_grid"])
                 for fpa, b in zip(FPAS, bands)]
         _G["Rimgs"] = Rimgs
-        grid_idx = np.arange(0, len(s_grid_shared), max(args.row_step, 1))
-        print(f"rectified shared s_grid: {len(s_grid_shared)} pts, "
-             f"[{s_grid_shared[0]:.3f},{s_grid_shared[-1]:.3f}] deg, "
+        _G["eta_grid"] = eta_grid_shared
+        grid_idx = np.arange(0, len(eta_grid_shared), max(args.row_step, 1))
+        print(f"rectified shared eta_grid: {len(eta_grid_shared)} pts, "
+             f"[{eta_grid_shared[0]:.4f},{eta_grid_shared[-1]:.4f}], "
              f"{len(grid_idx)} indices tested", flush=True)
         for k in grid_idx:
             tasks.append(("rectified", 2, tuple(int(k) for _ in FPAS)))

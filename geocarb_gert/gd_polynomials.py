@@ -197,6 +197,46 @@ def rows_crossed(fpa: int, row) -> np.ndarray:
     return np.abs(s_hi - s_lo) / deg_per_row
 
 
+@lru_cache(maxsize=N_FPA)
+def slit_eta_reference(fpa: int) -> tuple:
+    """``(s_center, s_half)`` [deg]: the slit-image centre and half-length that
+    define this FPA's ``eta`` (2026-09-20).
+
+    ``eta = (s - s_center) / s_half`` so that ``eta = -1 / +1`` are the two
+    ends of the slit image and ``eta = 0`` its centre -- for EVERY FPA, so equal
+    ``eta`` means the same fractional position along the (shared) physical slit
+    in every band. Replaces the earlier ``eta = s / s_max(fpa)``, which used
+    each FPA's own larger edge ``|s|`` and so put the two slit ends at different
+    ``eta`` on every FPA (only the wider end reached +/-1) and did not centre on
+    the slit image.
+
+    Assumptions (user, 2026-09-20, for these experiments): the slit image fills
+    the FPA rows 0..1023 at the LONG-WAVELENGTH end of the band (so the
+    reference column is whichever of column 0 / 1023 has the longer wavelength
+    -- 1023 for FPA0 and FPA2, 0 for FPA1 and FPA3), and the keystone mapping
+    ``s(row, col)`` itself is taken as perfect. The absolute ``s`` calibration
+    is NOT assumed comparable across FPAs (differences are attributed to
+    misalignment/defocus), which is why each band is centred and scaled by its
+    own slit image rather than by a shared ``s``.
+    """
+    lam, _ = xy_to_wavelength_slit(fpa, np.array([0.0, N_PX - 1.0]), np.full(2, N_PX / 2 - 0.5))
+    col_long = 0.0 if lam[0] > lam[1] else N_PX - 1.0
+    _, s_ends = xy_to_wavelength_slit(fpa, np.full(2, col_long), np.array([0.0, N_PX - 1.0]))
+    return float(np.mean(s_ends)), float(abs(s_ends[1] - s_ends[0]) / 2.0)
+
+
+def eta_of_s(fpa: int, s):
+    """Real slit angle ``s`` [deg] -> ``eta`` (see :func:`slit_eta_reference`)."""
+    c, h = slit_eta_reference(fpa)
+    return (np.asarray(s, dtype=float) - c) / h
+
+
+def s_of_eta(fpa: int, eta):
+    """Inverse of :func:`eta_of_s`."""
+    c, h = slit_eta_reference(fpa)
+    return c + h * np.asarray(eta, dtype=float)
+
+
 def wavelength_slit_to_xy(fpa: int, wavelength, s):
     """Project (wavelength, slit position) to detector pixel coordinates.
 
@@ -312,8 +352,7 @@ def perturbed_coeffs(fpa: int, wn_bias_cm1: float = 0.0, wn_noise_rms_cm1: float
     lam_c, _ = xy_to_wavelength_slit(fpa, np.array([N_PX / 2]), np.array([N_PX / 2]))
     lam_c = float(lam_c[0])
     um_per_cm1 = lam_c ** 2 / 1.0e4             # |dlambda/dnu| at band centre
-    _, s_edge = xy_to_wavelength_slit(fpa, np.full(2, N_PX / 2 - 0.5), np.array([0.0, N_PX - 1.0]))
-    sm = float(np.abs(s_edge).max())            # same definition as gd_render.s_max
+    _, sm = slit_eta_reference(fpa)             # slit-image half-length [deg] <-> slit_half_km
     deg_per_km = sm / slit_half_km
 
     wn_bias_um = -wn_bias_cm1 * um_per_cm1      # wavenumber up -> wavelength down

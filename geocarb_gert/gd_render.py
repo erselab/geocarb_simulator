@@ -29,9 +29,11 @@ worth of per-pixel true slit positions is evaluated in one vectorized call),
 with ``eta`` on the standard ``[-1, 1]`` convention (see :func:`uniform_scene`,
 :func:`edge_scene`, :func:`random_scene`, :func:`geocarb_gert.focalplane.
 barcode_scene`). Real slit angle ``s`` [deg] is mapped to this convention via
-``eta = s / s_max(fpa)``, where ``s_max(fpa)`` is that FPA's own real ``|s|``
-at the detector edge (row 0 or 1023) -- so ``eta = -1`` and ``eta = +1``
-always correspond to the true top and bottom of that FPA's slit.
+:func:`geocarb_gert.gd_polynomials.eta_of_s` (2026-09-20): centred on and scaled
+by each FPA's own slit image, so ``eta = -1`` / ``+1`` are the two ends of that
+FPA's slit image and ``eta = 0`` its centre (see
+:func:`geocarb_gert.gd_polynomials.slit_eta_reference`). The earlier
+``eta = s / s_max(fpa)`` convention was removed.
 """
 from __future__ import annotations
 
@@ -46,7 +48,7 @@ import numpy as np
 from gert.instrument import ILS
 
 from .focalplane import gaussian_blur_rows
-from .gd_polynomials import N_FPA, N_PX, wavelength_slit_to_xy, xy_to_wavelength_slit
+from .gd_polynomials import N_FPA, N_PX, eta_of_s, wavelength_slit_to_xy, xy_to_wavelength_slit
 
 
 def available_cpus() -> int:
@@ -59,17 +61,6 @@ def available_cpus() -> int:
         return os.cpu_count() or 1
 
 
-@lru_cache(maxsize=N_FPA)
-def s_max(fpa: int) -> float:
-    """This FPA's real |slit angle| [deg] at the detector edge (row 0 or 1023).
-
-    Used to map real slit angle to the standard ``eta in [-1, 1]`` scene
-    convention: ``eta = s / s_max(fpa)``.
-    """
-    _, s = xy_to_wavelength_slit(fpa, np.full(2, N_PX / 2 - 0.5), np.array([0.0, N_PX - 1.0]))
-    return float(np.abs(s).max())
-
-
 def real_row_eta(fpa: int) -> np.ndarray:
     """Each detector row's real slit position, in the ``eta in [-1, 1]`` convention.
 
@@ -79,7 +70,7 @@ def real_row_eta(fpa: int) -> np.ndarray:
     """
     y = np.arange(N_PX, dtype=float)
     _, s = xy_to_wavelength_slit(fpa, np.full(N_PX, N_PX / 2 - 0.5), y)
-    return s / s_max(fpa)
+    return eta_of_s(fpa, s)
 
 
 def _diagonal_ils_convolve(wn_hires: np.ndarray, S_row: np.ndarray,
@@ -209,7 +200,7 @@ def _render_row(i: int):
     g = _G_RENDER
     lam_row, s_row = xy_to_wavelength_slit(g["fpa"], g["cols"], np.full(N_PX, float(i)))
     nu_row = 1.0e4 / lam_row                      # microns -> cm-1
-    eta_row_true = s_row / g["sm"]                # true slit position per column
+    eta_row_true = eta_of_s(g["fpa"], s_row)      # true slit position per column
     S_row = np.asarray(g["radiance"](eta_row_true), dtype=float)   # (N_PX, n_hires)
     return i, _diagonal_ils_convolve(g["wn_hires"], S_row, nu_row, g["ils"])
 
@@ -276,7 +267,6 @@ def image(
         "docs/PROJECT_STATUS.md Sec.13.1/13.2).",
         DeprecationWarning, stacklevel=2)
     cols = np.arange(N_PX, dtype=float)
-    sm = s_max(fpa)
 
     if n_workers is None:
         n_workers = available_cpus()
@@ -290,11 +280,11 @@ def image(
         for i in range(N_PX):
             lam_row, s_row = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i)))
             nu_row = 1.0e4 / lam_row                      # microns -> cm-1
-            eta_row_true = s_row / sm                     # true slit position per column
+            eta_row_true = eta_of_s(fpa, s_row)           # true slit position per column
             S_row = np.asarray(radiance(eta_row_true), dtype=float)   # (N_PX, n_hires)
             A[i] = _diagonal_ils_convolve(wn_hires, S_row, nu_row, ils)
     else:
-        _G_RENDER.update(dict(fpa=fpa, cols=cols, sm=sm, wn_hires=wn_hires,
+        _G_RENDER.update(dict(fpa=fpa, cols=cols, wn_hires=wn_hires,
                               radiance=radiance, ils=ils))
         ctx = mp.get_context("fork")
         with ctx.Pool(n_workers) as pool:
@@ -360,14 +350,13 @@ def predict_neighborhood(
     row_lo, row_hi = int(rows.min()) - pad, int(rows.max()) + pad
     rows_padded = np.arange(max(0, row_lo), min(N_PX, row_hi + 1))
     cols = np.arange(N_PX, dtype=float)
-    sm = s_max(fpa)
 
     A_pad = np.empty((len(rows_padded), N_PX), dtype=float)
     for k, i in enumerate(rows_padded):
         if footprint:
             _, s_a = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i) - 0.5))
             _, s_b = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i) + 0.5))
-            eta_a, eta_b = s_a / sm, s_b / sm
+            eta_a, eta_b = eta_of_s(fpa, s_a), eta_of_s(fpa, s_b)
             eta_row_lo, eta_row_hi = np.minimum(eta_a, eta_b), np.maximum(eta_a, eta_b)
             # nu at this pixel's own CENTER row (unaffected by the
             # footprint-averaging change -- the spectral/ILS axis is
@@ -378,7 +367,7 @@ def predict_neighborhood(
         else:
             lam_row, s_row = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i)))
             nu_row = 1.0e4 / lam_row
-            eta_row_true = s_row / sm
+            eta_row_true = eta_of_s(fpa, s_row)
             S_row = np.asarray(radiance(eta_row_true), dtype=float)
         A_pad[k] = _diagonal_ils_convolve(wn_hires, S_row, nu_row, ils)
 

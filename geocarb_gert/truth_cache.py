@@ -53,7 +53,11 @@ from .paths import REPO_ROOT
 #: along_slit_scene.build_lookup_radiance, the GD polynomial CSV/loader,
 #: focalplane.py's spatial PSF convolution, ...) -- this is the only guard
 #: against silently serving a stale cached render after such a change.
-TRUTH_CACHE_VERSION = 3  # 2026-09-09: (a) Sec.11 bug 4 + Sec.12 both changed the
+TRUTH_CACHE_VERSION = 4  # 2026-09-20: eta convention changed (gd_polynomials.eta_of_s,
+                         # slit-image centred/scaled; was s/s_max) -- every rendered
+                         # image places the scene at different detector rows, so every
+                         # version-3 entry is stale and must not be served.
+                         # (v3) 2026-09-09: (a) Sec.11 bug 4 + Sec.12 both changed the
                          # deterministic truth-render path (aerosol threading, the
                          # simulate_spectrum consolidation) without bumping this;
                          # (b) _band_setup's aerosol pull is now opt-in via

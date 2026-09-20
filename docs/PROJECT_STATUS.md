@@ -2881,3 +2881,75 @@ retrieve`) but is not wired into the StateSpec pipeline.
   since aerosol is the largest confound and the hardest to separate from
   keystone-related errors. The T-frozen/h2o-frozen tests (Sec.31) do not yet
   have their aerosol arm.
+
+
+## 33. `eta` redefined per band from the slit image (replaces `s / s_max`); cross-band pairing moved to `eta`; render cache invalidated (2026-09-20)
+
+**Why.** Multi-band retrieval needs every band's atmosphere/surface variables at
+exactly the same scene location for the same `eta`. Under the old convention
+`eta = s / s_max(fpa)`, `s_max` was each FPA's larger edge `|s|`, so only the
+wider end of each FPA reached +/-1 (row 0 of FPA0 sat at -0.981, row 1023 of FPA2
+at +0.965), the slit image was not centred, and equal `eta` meant different real
+slit angles per band (up to 3.4 rows FPA1 vs FPA2). The user's judgement (2026-09-20):
+the real-`s` calibrations are not necessarily comparable across FPAs (the lab test
+fed a laser spot through the slit while rotating the N-S scan mirror, so residual
+differences are likely misalignment/defocus), so each band should be centred and
+scaled by its own slit image instead.
+
+**New definition** (`gd_polynomials.slit_eta_reference / eta_of_s / s_of_eta`):
+`eta = (s - s_center) / s_half`, with `s_center`, `s_half` taken from rows 0 and
+1023 at the LONG-WAVELENGTH column of the band (column 1023 for FPA0/FPA2, 0 for
+FPA1/FPA3). Assumptions stated by the user for these experiments: the slit image
+fills the FPA at the long-wavelength end; the keystone mapping `s(row, col)` is
+perfect (so eta at other columns still comes from the polynomial); and the image
+is centred on the slit-image centre. `s_max` is REMOVED everywhere (`gd_render`,
+`gd_polynomials` perturbation calibration, `gd_joint_block_retrieve._eta_of`,
+`gd_per_row_retrieve`); there is no flag for the old convention.
+
+| FPA | s_center [deg] | s_half [deg] | shift of eta=0 vs old (rows) |
+|---|---|---|---|
+| 0 | +0.0246 | 2.2479 | +5.5 |
+| 1 | -0.0411 | 2.2197 | -9.3 |
+| 2 | -0.0523 | 2.2443 | -11.8 |
+| 3 | -0.0328 | 2.2454 | -7.4 |
+
+**Consequences.**
+- Scene positions move by 5-12 rows (up to ~2.3% of the half-slit, ~33 km for
+  FPA2) relative to the old convention, so results are NOT window-for-window
+  comparable with earlier runs. Every new run's output directory now carries an
+  `_etaslit` suffix (and the pickle records `eta_convention`), so it cannot be
+  mistaken for an earlier untagged run.
+- At equal `eta` the bands still differ in ROW at the centre column by up to
+  5.6 rows (FPA0 vs FPA2; 0.6 for FPA0 vs FPA1), because keystone differs between
+  bands away from the long-wavelength reference column. That is real geometry, not a
+  normalisation error; a joint multi-band state needs per-pixel `eta`, not row pairing.
+
+**Audit result: scene variables map to the same location in every band.**
+Every state prior/truth/scene field is evaluated at `eta * SLIT_HALF_KM` (one
+constant, band-independent); albedo is evaluated from the same km grid for every
+band label (`albedo_at`), differing only spectrally. Two places did NOT honour
+that and were fixed: (1) `cross_band.nearest_row_pairing[_multi]` paired rows on
+real `s` -- it is now keyed on `eta` (new `eta_of_row`; residual <= half a row,
+real-angle mismatch returned as a diagnostic only); (2) `gd_per_row_retrieve`'s
+"rectified" pipeline used a shared real-`s` grid and scored grid index k against
+each band's NATIVE row k truth -- it now uses a shared `eta` grid rectified at
+`s_of_eta(fpa, eta_grid)` and evaluates truth at the shared `eta`. The per-row
+multi-band script was only checked piecewise, not re-run end to end.
+
+**Stale-cache hazard found and closed.** `truth_cache` keys rendered truth on
+inputs, not code, and the driver's default path uses it. The eta change alters
+every render, so `TRUTH_CACHE_VERSION` was bumped 3 -> 4; the first runs
+re-render truth once. (A first end-to-end test job submitted before the bump was
+cancelled because it could have served old-convention renders.)
+
+**Regression check:** `scripts/check_eta_consistency.py` (all pass): slit ends at
+eta -1/+1 on all FPAs; `eta_of_s`/`s_of_eta` round trip; gas/p/h2o/T priors
+identical across bands at equal eta; pairing residual <= half a row for the five
+band pairs tried.
+
+**End-to-end test** (c4, FPA2, single_scatter, band tasks window 25-37, new
+convention): converged in 5 iterations, `|dx/sigma| = 5.2e-7`, rms_resid 2.9e-4,
+759 s -- with CO2/p/T errors of 0.016 ppm / 0.020 hPa / 0.0058 K, the same
+magnitude as the same window under the old convention (0.036 / 0.056 / 0.0050).
+`cross_band.py` still notes that its real-`s` helpers assume comparable `s`
+calibrations, which the user questioned.

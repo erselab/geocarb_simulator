@@ -81,7 +81,8 @@ from geocarb_gert.joint_state import (build_forward_state, gauss_newton_state,  
                                       default_pad_for_psf)
 from geocarb_gert.spectrum import simulate_spectrum  # noqa: E402
 from geocarb_gert.gd_polynomials import rows_crossed  # noqa: E402
-from geocarb_gert.gd_render import available_cpus, s_max  # noqa: E402
+from geocarb_gert.gd_render import available_cpus  # noqa: E402
+from geocarb_gert.gd_polynomials import eta_of_s  # noqa: E402
 from geocarb_gert import jacobians as jac  # noqa: E402
 from geocarb_gert.mission_config import RetrievalDefaults  # noqa: E402
 from geocarb_gert.radiometry import geocarb_noise_model  # noqa: E402
@@ -113,7 +114,7 @@ FPA = RetrievalDefaults.from_yaml().default_fpa[0]
 
 def _eta_of(fpa, cols, rows):
     _, s = xy_to_wavelength_slit(fpa, cols, rows)
-    return s / s_max(fpa)
+    return eta_of_s(fpa, s)
 
 
 def band_basics(fpa, atm_center, absco, geo, solar):
@@ -2025,6 +2026,10 @@ def main() -> int:
     # single_scatter run) keep their original directory names.
     if args.solver == "xrtm" and not with_aerosol:
         suffix += "_xrtm"
+    # 2026-09-20: eta convention changed (slit-image centred/scaled; was s/s_max). Every
+    # new run gets this tag so its results can never be mistaken for the earlier
+    # (untagged) s/s_max runs, whose scene positions differ by up to ~10 rows.
+    suffix += "_etaslit"
     if args.run_tag:
         suffix += f"_{args.run_tag}"
     if args.retrieval_psf_fwhm_px != 1.5:
@@ -2056,7 +2061,7 @@ def main() -> int:
               "vary_albedo": args.vary_albedo, "sub_bin_anomaly": args.sub_bin_anomaly,
               "anchor_workers": args.anchor_workers,
               "retrieval_psf_fwhm_px": args.retrieval_psf_fwhm_px,
-              "with_aerosol": with_aerosol}
+              "with_aerosol": with_aerosol, "eta_convention": "slit_image_long_wl"}
     if args.task_id is not None:
         payload.update(task_id=args.task_id, n_tasks=args.n_tasks)
         out_dir = REPO_ROOT / out_root / f"gd_joint_block_whole_slit_fpa{fpa}{suffix}_parts"
