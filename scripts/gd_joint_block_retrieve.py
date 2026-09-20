@@ -1579,6 +1579,11 @@ def main() -> int:
                          "reconstructed at the same fine resolution the forward model already "
                          "renders from, instead of piecewise-linear between (coarser) bin "
                          "centers. Only affects the hires solve; coarse mode is unaffected.")
+    ap.add_argument("--run-tag", default="",
+                    help="optional label appended to the output directory/file name "
+                         "(e.g. 'sigmafix'), so a re-run of an otherwise identical config "
+                         "under changed code writes to its OWN directory instead of "
+                         "overwriting the earlier results (2026-09-19).")
     ap.add_argument("--retrieval-psf-fwhm-px", type=float, default=1.5,
                     help="along-slit (N/S) PSF FWHM [detector pixels] the RETRIEVAL's own "
                          "forward model assumes (2026-09-06, user: defocus experiments -- "
@@ -2012,6 +2017,16 @@ def main() -> int:
         suffix += f"_rmgr{args.resolution_matched_g_ratio_bins:g}"
     if with_aerosol:
         suffix += "_aero"
+    # 2026-09-18: a NON-aerosol xrtm run of a free set already run under
+    # single_scatter (c4/c4t/c4h) would otherwise write into the SAME _parts
+    # directory and overwrite the single_scatter results (same task ids).
+    # Deliberately NOT applied when with_aerosol: the existing c5x/c5y/o5y
+    # xrtm runs (all aerosol, and never shared a free set with a
+    # single_scatter run) keep their original directory names.
+    if args.solver == "xrtm" and not with_aerosol:
+        suffix += "_xrtm"
+    if args.run_tag:
+        suffix += f"_{args.run_tag}"
     if args.retrieval_psf_fwhm_px != 1.5:
         # 2026-09-06 (defocus experiments): without this, two configs that
         # differ ONLY in --retrieval-psf-fwhm-px (e.g. matched vs mismatched

@@ -2659,3 +2659,225 @@ at all, at a real, measurably higher computational cost, not a free
 upgrade. Any future config that frees either of those two rows should
 default to `--solver xrtm`; any config that doesn't can keep using the
 cheaper `single_scatter`.
+
+
+## 31. FPA2 frozen-variable experiments (c4t/c4h), their XRTM counterparts, and a retracted "solver artifact" conclusion -- the old c4 was a pre-sigma-fix outlier (2026-09-18/20)
+
+**Motivation** (user, looking at the c2-c4 plots): the results "change
+significantly in character once we add h2o and temperature" -- pretty
+systematic errors correlated among CO2, p, T and h2o for every bin that
+doesn't have near-zero albedo. On the 10-window subset below the old c4's
+first PCA mode carried 88% of the error variance (mode-1 loadings CO2 +0.45,
+p -0.52, h2o +0.51, T +0.51; p-T -0.95, p-h2o -0.94, h2o-T +0.94).
+
+**Experiment design.** Same FPA2 config as c4 (`g_ratio=1`, `--anchor-density
+4`, `--overlap 2`, structural prior, varying albedo, no aerosol), on a
+10-window subset spread across the slit (band tasks 3, 9, 12, 19, 26, 33, 38,
+44, 49, 53: 3 high-albedo, 1 mixed, 5 low-albedo, 1 near-zero-albedo):
+
+| Config | Free set | Solver |
+|---|---|---|
+| c4  | co2, p, h2o, T, albedo | single_scatter (original, pre-fix) |
+| c4t | co2, p, h2o, albedo (T frozen at truth) | single_scatter |
+| c4h | co2, p, T, albedo (h2o frozen at truth) | single_scatter |
+| c4x/c4tx/c4hx | as c4/c4t/c4h | xrtm (`two_stream`) |
+| c4r | as c4, RE-RUN under current code (`--run-tag sigmafix`) | single_scatter |
+
+`scripts/gd_frozen_var_compare.py` (new) and `scripts/gd_c4_sigmafix_compare.py`
+(new) do the comparison; figures are in `plots/frozen_var_compare_c4_c4t_c4h_
+{single_scatter,xrtm}.png` and `plots/c4_sigmafix_solver_compare.png`.
+
+**Tooling changes made for this** (all in `gd_joint_block_retrieve.py`):
+- Output directory names did NOT include the solver, so a non-aerosol xrtm
+  run of an already-run free set would have written into the SAME `_parts`
+  directory and overwritten the single_scatter results (same task ids).
+  Non-aerosol xrtm runs now get an `_xrtm` suffix. Aerosol runs (c5x/c5y/o5y)
+  are deliberately unchanged so their existing directory names stay valid.
+- New `--run-tag LABEL` appends `_LABEL` to the directory/file name, so a
+  re-run of an identical config under changed code (c4r) doesn't overwrite
+  the earlier results.
+- sbatch CONF cases added: `c4t`, `c4h`, `c4x`, `c4tx`, `c4hx`, `c4r`, `o5n`.
+
+**Result with the fixed code (c4r, c4t, c4h; xrtm gives the same)**:
+
+| (222 bins, 10 windows) | c4 (all free) | c4t (T frozen) | c4h (h2o frozen) |
+|---|---|---|---|
+| CO2 rms [ppm] | 0.316 | 0.311 | 0.303 |
+| p rms [hPa] | 0.230 | 0.206 | 0.092 |
+| T rms [K] | 0.020 | frozen | 0.020 |
+| h2o rms (vmr) | 1.2e-5 | 1.1e-5 | frozen |
+| first-mode variance | 50% | 62% | 39% |
+| p-h2o corr | -0.69 | -0.66 | -- |
+| p-T corr | -0.32 | -- | -0.16 |
+
+With the current code the p-T-h2o mode is mostly gone. The one coupling that
+survives is p-h2o (about -0.69). Freezing T barely changes the p error
+(0.230 -> 0.206); freezing h2o cuts it to 0.092 with no dominant mode left
+(pairwise correlations -0.11 to -0.16). So h2o, not T, is what still limits p
+in this band once the sigma bug is out of the picture. Near-zero-albedo bins
+(24 of 222) keep a CO2 error of about 0.84 ppm in every run -- a separate,
+signal-limited effect, not this degeneracy.
+
+**RETRACTED interim conclusion, and what actually happened.** The first
+XRTM comparison (c4x vs the ORIGINAL c4) showed the strong mode collapsing
+under XRTM (first mode 88% -> 50%, T rms 0.126 -> 0.020, p-T -0.95 -> -0.32),
+and I reported it as "the T-linked degeneracy is mostly a single_scatter
+artifact". The user questioned it directly ("are the absorption codes in
+XRTM and single scattering different? they should be using the same
+absorption coefficients"), which led to two checks:
+
+1. *Direct solver test* (one FPA2 anchor, no aerosol, both solvers). Both
+   solvers receive identical per-layer gas optical depths from the same ABSCO
+   tables. `SingleScatterSolver` with no aerosol is pure Beer-Lambert on the
+   surface reflection (Rayleigh only adds extinction); XRTM `two_stream` also
+   includes Rayleigh scattering (path radiance, surface-atmosphere multiple
+   reflection). Spectra agree to 0.19% (mean ratio 0.998). Each solver's
+   analytic Jacobian matches its OWN central finite difference to ~1e-5
+   (CO2 4e-7, p 2.9e-5, h2o 1.8e-5, T 6.4e-5); the two solvers' Jacobians
+   differ from each other by only ~0.1% (1.0e-3 to 1.7e-3). A 0.1-0.2%
+   physics difference cannot produce the change first reported.
+2. *What actually differed*: the original c4 was merged 2026-09-13/14, BEFORE
+   the Sec.26 state-vector sigma fix and the Sec.28 dx/sigma convergence fix.
+   Its `t_offset_k` prior sigma is stored in the pickle as **0.1 K**; c4x ran
+   with **5.0 K**. c4t/c4h had also run after the fix, which is why they
+   matched xrtm almost exactly and c4 was the lone outlier.
+
+The c4r re-run (single_scatter, current code) then settled it: it reproduces
+the xrtm c4x numbers to three significant figures on every statistic (rms,
+PCA variance/loadings, all six pairwise correlations). **The solver does not
+matter for these no-aerosol FPA2 runs; single_scatter is adequate there.**
+The strong CO2/p/T/h2o mode in the original c4 came from the pre-fix
+state-vector setup (a 0.1 K T prior pinning T ~2-3 K wrong so p/h2o/CO2 had to
+compensate, plus the old convergence check), not from the RT solver.
+Caveat: the sigma fix and the convergence fix shipped together, so this does
+not separate the two contributions.
+
+**Consequence for older results.** Every whole-slit c2/c3/c4 result predates
+the sigma fix; their error patterns (including the ones that motivated this
+section) should be read as pre-fix.
+
+**Cost note** (XRTM without aerosol, 4 CPUs): 22-39 min per window at the
+first windows versus 10-20 min for single_scatter; not needed for accuracy
+here.
+
+
+## 32. Band 0 (O2-A, fpa=0): smoke test, wide-window cost probe, the full o5y aerosol sweep, and a no-aerosol control (2026-09-17/20)
+
+**Setup.** o5x/o5y/o5n use `--fpa 0`, `--solver xrtm` (aerosol) or
+single_scatter (no aerosol), same g_ratio/anchor-density/overlap as the FPA2
+sweeps. Band 0 tiles into 63 windows (`--n-tasks 63`, widest at the ends of
+the slit, 13-47 rows). `p_surface_hpa`, `h2o_surface_vmr`, `t_offset_k`,
+`albedo` free; CO2 not free (no O2-A sensitivity). o5y adds `amplitude_aerosol`
+and `height_aerosol`; `thickness_aerosol` is dropped (Sec.27 degeneracy).
+
+**Smoke test (o5x, width 13, 4 workers, all three aerosol rows).** ~786 s per
+iteration, 11792 s total, final rms_resid 0.0052.
+
+**Wide-window probe (o5y task 0, width 47, 16 workers, 300G, 12h).**
+Completed in 4h54m (17634 s), all 15 iterations (0-14), ~1150 s/iteration
+after setup; final |dx/sigma| = 0.556, rms_resid 0.00404, J 762. The fit was
+essentially converged by iteration 7 (rms 0.0055, J 777) and gained only
+~27% in rms afterwards; it stopped at the iteration cap, not the tolerance.
+Cost grew faster than linearly with width (3.6x width, 4x workers, 1.46x
+wall per iteration = ~5.9x core-seconds; roughly width^1.4).
+**Memory (read from the cgroup, not sstat/sacct):** peak 85.9 GB at ~25 min
+rising exactly linearly ~+8.6 GB per iteration with no plateau, 198.3 GB at
+iteration 13 (last direct reading; the cgroup was gone by the end, projecting
+~207 GB). Because it is linear in iterations, a max_iter cap also caps
+memory. **Correction to Sec.25:** the "MaxRSS 78-107GB" figures there came
+from sstat/sacct, which sum per-process RSS and overcount shared pages; the
+cgroup `memory.peak` is the real number.
+
+**Full o5y sweep (63/63 solved, 0 errored)**, run as three width tiers to fit
+`--mem`/`--time`:
+
+| Tier | Tasks | Width | CPUs | Mem | Time |
+|---|---|---|---|---|---|
+| A | 1-9, 57-61 (task 0 = probe) | 27-47 | 16 | 300G | 8h |
+| B | 10-17, 49-56 | 17-25 | 8 | 200G | 6h |
+| C | 18-48, 62 | 13-15 | 4 | 180G | 8h |
+
+RMS error, retrieved vs prior:
+
+| | Tier A (15) | Tier B (16) | Tier C (32) |
+|---|---|---|---|
+| p [hPa] | 1.17 / 2.12 | 1.16 / 1.66 | 5.16 / 2.41 |
+| h2o (vmr) | 1.6e-4 / 1.5e-3 | 6.2e-4 / 1.4e-3 | 5.7e-4 / 1.2e-3 |
+| T [K] | 0.014 / 2.03 | 0.011 / 1.68 | 0.035 / 2.45 |
+| albedo | 0.0065 / 0.040 | 0.017 / 0.038 | 0.030 / 0.040 |
+| amplitude | 1.2e-6 / 3.4e-7 | 1.4e-6 / 3.5e-7 | 3.2e-6 / 5.8e-6 |
+| height | 1.1e4 / 5.7e3 | 1.2e4 / 7.0e3 | 6.8e3 / 4.4e3 |
+
+Windows where the retrieval is worse than the prior: p 4/15, 6/16, 19/32;
+amplitude 15/15, 16/16, 10/32; height 12/15, 14/16, 27/32. T, h2o and albedo
+beat the prior nearly everywhere (T recovered to 0.01-0.04 K against 1.7-2.5 K
+prior error).
+
+**A silent failure class found and fixed.** o5y tasks 1 and 2 (widths 45/43)
+hit the 900 s `PoolHangError` guard on their FIRST `run_L` (~1270 s elapsed)
+with nothing actually broken: one `pool.map` call covers a window's WHOLE
+anchor set, so its duration scales with width (~200 anchors at width 47), and
+the width-47 probe had only just squeaked under 900 s. Because the driver
+records the error in the part file and exits 0, Slurm reported COMPLETED and
+the status checks based on `sacct` alone missed it for a while. `_POOL_RESULT_
+TIMEOUT_S` (`geocarb_gert/jacobians.py`) was raised 900 -> 3600 s; both tasks
+were re-run cleanly. **Always scan part files for a recorded `error` key, not
+just the Slurm state.**
+
+**The tier-C p errors are an aerosol degeneracy, not a narrow-window effect.**
+In tier C the p error is large in one contiguous block (tasks ~23-35, 2.5-8 hPa
+against a prior error of 1.5-2.7 hPa) and in three near-zero-albedo windows
+(tasks 41-43, 6-12 hPa). The prior pressure gradient is NOT larger there
+(correlation of retrieved p error with |prior gradient| is only -0.32; the
+worst windows have the smallest gradients). What does correlate: over the 48
+windows with albedo > 0.1, retrieved p rms correlates **0.95** with the true
+aerosol amplitude. The scene has a plume across tasks ~22-36 (peaking near
+1.3e-5); the amplitude prior is flat at 2e-6, and the retrieved amplitude comes
+out ~40-45% low there while p is biased LOW by 5-8 hPa -- the single-band
+aerosol/surface-pressure degeneracy (too little aerosol OD traded for too
+little pressure). Windows outside the plume (e.g. tasks 46-48) get p within
+0.6 hPa.
+
+**No-aerosol control (o5n; truth AND retrieval have no aerosol; single_
+scatter; 10 windows: 3, 12, 20, 24, 28, 30, 34, 38, 42, 46).** Task 3 (width
+39) took 1h21m and converged in 5 iterations (rms_resid 0.00228). Against o5y
+on the same windows:
+
+| rms | no aerosol (o5n) | aerosol (o5y) | prior |
+|---|---|---|---|
+| p [hPa] | 0.14 | 4.6 | 2.4 |
+| T [K] | 0.025 | 0.031 | 2.3 |
+| h2o (vmr) | 3.8e-4 | 5.5e-4 | 1.0e-3 |
+| albedo | 0.023 | 0.027 | 0.041 |
+
+In the plume windows (24, 28, 30, 34) the p bias goes from -3.5..-7.7 hPa with
+aerosol to 0.00..0.02 hPa without; task 42 (albedo ~0.04) goes from 9.3 to
+0.45 hPa. So the near-zero-albedo p error was also mostly aerosol, not
+signal-to-noise, though 0.45 hPa is still the largest no-aerosol p error.
+Caveats: single band, perfect model; the o5y arm is xrtm and the o5n arm
+single_scatter (Sec.31 shows that difference is immaterial without aerosol);
+the two arms have different truth scenes on the same windows.
+
+**Cost context and options (none applied).** For scale, the operational ACOS
+single-row 4-band retrievals are ~5-7 min at ~1 min/iteration with a cutoff
+around 7 iterations; ours do ~200 anchors per width-47 window, so ~20x is not
+surprising. Options discussed: cap `max_iter` at ~7-8 (rms/J essentially
+converged by then and it also caps the linear memory growth), narrower windows
+via `--window-scale` (cost is superlinear in width), lower `--anchor-density`
+(currently 4 => 201 anchors at width 47), and an NN RT emulator per anchor (a
+1D problem, no need to build the keystone projection into it) -- profile
+`run_anchor` vs `run_L` vs the LM-trial forward first. Multi-band
+infrastructure exists (`cross_band.py`, `gd_per_row_retrieve.py::_joint_
+retrieve`) but is not wired into the StateSpec pipeline.
+
+**Working conventions adopted this session.**
+- *Node footprint:* keep concurrent atmos usage small (currently capped at
+  6 distinct nodes); size each array's `%N` throttle from tasks per node (180G
+  and 200G tasks fit 2/node, 300G fits 1). Lowering an array's throttle with
+  `scontrol update JobId=... ArrayTaskThrottle=N` stops new tasks without
+  killing running ones.
+- *Paired experiments:* every experimental config change should be run as a
+  matched pair, one no-aerosol and one with-aerosol arm, on the same windows,
+  since aerosol is the largest confound and the hardest to separate from
+  keystone-related errors. The T-frozen/h2o-frozen tests (Sec.31) do not yet
+  have their aerosol arm.

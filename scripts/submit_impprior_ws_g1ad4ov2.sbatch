@@ -114,8 +114,9 @@ PYTHON=/gpfs/fs1/home/scrowel3/miniforge3/envs/analysis/bin/python
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 
-: "${CONF:?set CONF=c1|c2|c3|c4|c5|c5b|c5x|c5y|o5x|o5y via --export=ALL,CONF=...}"
+: "${CONF:?set CONF=c1|c2|c3|c4|c4t|c4h|c4x|c4tx|c4hx|c4r|o5n|c5|c5b|c5x|c5y|o5x|o5y via --export=ALL,CONF=...}"
 SOLVER="single_scatter"
+RUN_TAG=""
 FPA="2"
 N_TASKS="58"
 case "${CONF}" in
@@ -123,6 +124,21 @@ case "${CONF}" in
   c2) FREE="co2_ppm,p_surface_hpa"; AERO="" ;;
   c3) FREE="co2_ppm,p_surface_hpa,albedo"; AERO="" ;;
   c4) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo"; AERO="" ;;
+  # c4t / c4h (2026-09-18): c4 with ONE of the two correlated-mode suspects
+  # frozen at truth, to test which of T / h2o drives the 83%-variance
+  # CO2/p/T/h2o error mode seen in c4. No aerosol, single_scatter (c2-c4 were
+  # single_scatter too, so the comparison against c4 is like-for-like).
+  # Intended for a subset: --array=3,9,12,19,26,33,38,44,49,53
+  c4t) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,albedo"; AERO="" ;;
+  c4h) FREE="co2_ppm,p_surface_hpa,t_offset_k,albedo"; AERO="" ;;
+  # c4x / c4tx / c4hx (2026-09-18): the same three free sets with the XRTM
+  # solver (no aerosol) on the same 10-window subset, to check whether the
+  # p/h2o/T degeneracy seen under single_scatter is a solver artifact.
+  # Output dirs get an "_xrtm" suffix (gd_joint_block_retrieve.py) so they do
+  # not overwrite the single_scatter parts.
+  c4x) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo"; AERO=""; SOLVER="xrtm" ;;
+  c4tx) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,albedo"; AERO=""; SOLVER="xrtm" ;;
+  c4hx) FREE="co2_ppm,p_surface_hpa,t_offset_k,albedo"; AERO=""; SOLVER="xrtm" ;;
   c5) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol,thickness_aerosol"; AERO="--aerosol" ;;
   c5b) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,thickness_aerosol"; AERO="--aerosol" ;;
   c5x) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol,thickness_aerosol"; AERO="--aerosol"; SOLVER="xrtm" ;;
@@ -156,6 +172,19 @@ case "${CONF}" in
   # N_TASKS=63 -- with 58, task 0 would get windows 0 AND 58 (47+29 rows).
   # Submit with --array=0-62 and a larger --cpus-per-task/--mem/--time: that
   # smoke test cost ~786 s/iteration on a width-13 window at 4 CPUs.
+  # o5n (2026-09-19): band-0 (O2-A) with NO aerosol at all -- neither in the
+  # truth nor in the retrieval (no --aerosol) -- to test whether the p errors
+  # seen under o5y (correlated 0.95 with the true aerosol plume amplitude)
+  # vanish when aerosol is removed. single_scatter (no aerosol => adequate).
+  # Free set = o5y's minus the aerosol rows; CO2 not free (no O2-A sensitivity).
+  # Intended subset: --array=3,12,20,24,28,30,34,38,42,46
+  # c4r (2026-09-19): c4 (single_scatter, all free) RE-RUN under the current
+  # code. The original c4 predates the state-vector sigma fix (T-offset
+  # sigma 0.1 K then, 5 K now) and the dx/sigma convergence fix, so it is
+  # not comparable to the later c4t/c4h/c4x. Output dir gets "_sigmafix" so the
+  # original c4 parts are not overwritten. Subset: --array=3,9,12,19,26,33,38,44,49,53
+  c4r) FREE="co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo"; AERO=""; RUN_TAG="sigmafix" ;;
+  o5n) FREE="p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo"; AERO=""; FPA="0"; N_TASKS="63" ;;
   o5y) FREE="p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol"; AERO="--aerosol"; SOLVER="xrtm"; FPA="0"; N_TASKS="63" ;;
   *) echo "unknown CONF=${CONF}"; exit 1 ;;
 esac
@@ -179,4 +208,4 @@ ${PYTHON} scripts/gd_joint_block_retrieve.py \
     --solver "${SOLVER}" \
     --anchor-workers "${SLURM_CPUS_PER_TASK}" \
     --task-id "${SLURM_ARRAY_TASK_ID}" --n-tasks "${N_TASKS}" \
-    --free "${FREE}" ${AERO}
+    --free "${FREE}" ${AERO} ${RUN_TAG:+--run-tag "${RUN_TAG}"}

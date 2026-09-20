@@ -693,7 +693,15 @@ def make_spectrum_jac(absco, wide_inst, geo, solar, albedo, solver: str = "singl
 #: is a "something is genuinely broken" threshold, not a normal-operation
 #: ceiling) so it should never fire under correct operation, only when a
 #: worker's own result truly can't be delivered.
-_POOL_RESULT_TIMEOUT_S = 900.0
+#:
+#: 2026-09-19: raised 900 -> 3600. The 900s figure was NOT generous for the
+#: widest band-0 windows: one `pool.map` call is the WHOLE window's anchor
+#: set, so its duration scales with window width (~200 anchors at width 47),
+#: and o5y tasks 1 and 2 (widths 45/43, 16 workers, xrtm) both tripped it on
+#: their first `run_L` at ~1270s elapsed even though nothing was broken (the
+#: width-47 probe, 1933871, squeaked under it). A genuinely dead pool is
+#: still caught, just after an hour instead of 15 minutes.
+_POOL_RESULT_TIMEOUT_S = 3600.0
 
 
 class PoolHangError(RuntimeError):
