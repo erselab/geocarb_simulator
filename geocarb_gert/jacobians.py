@@ -892,6 +892,7 @@ def _g_anomaly_sensitivity(p: ParamSpec, scene_etas, W, state_interp):
 
 
 _LINEARIZE_L_G: dict = {}
+_LINEARIZE_POOLS_CREATED = 0   # per-process count of LinearizePool shared buffers; see run_L's naming
 
 
 def _L_worker(idx):
@@ -1057,6 +1058,17 @@ class LinearizePool:
             # depending on this process (or its resource_tracker) surviving
             # long enough to do it itself.
             shm_name = f"geocarb_L_{os.environ.get('SLURM_JOB_ID', 'nojob')}_{os.environ.get('SLURM_ARRAY_TASK_ID', '0')}"
+            # 2026-09-20 (multi-band): a process can now hold SEVERAL LinearizePool instances at once
+            # (one per band). They all derived the SAME name from the SLURM ids, so the second pool
+            # unlinked the first pool's buffer and re-created the name, and close() then failed with
+            # FileNotFoundError on the second unlink -- AFTER the solve but BEFORE its results were
+            # saved. The first instance in a process keeps the historical name (so existing traps and
+            # single-band behaviour are unchanged); later ones get a numeric suffix. Sbatch traps
+            # remove `${SHM_NAME}*`.
+            global _LINEARIZE_POOLS_CREATED
+            if _LINEARIZE_POOLS_CREATED > 0:
+                shm_name = f"{shm_name}_{_LINEARIZE_POOLS_CREATED}"
+            _LINEARIZE_POOLS_CREATED += 1
             try:
                 shared_memory.SharedMemory(name=shm_name).unlink()
             except FileNotFoundError:
@@ -1101,7 +1113,10 @@ class LinearizePool:
             self._L_pool = None
         if self._shm is not None:
             self._shm.close()
-            self._shm.unlink()
+            try:
+                self._shm.unlink()
+            except FileNotFoundError:   # already removed (e.g. by a job-level trap); nothing to clean
+                pass
             self._shm = None
 
     def __enter__(self):

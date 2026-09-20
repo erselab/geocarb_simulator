@@ -197,7 +197,7 @@ git rev-parse HEAD
 # own cleanup; this covers both "this task's own segment" and "any
 # stale segment of ours left on this node").
 SHM_NAME="/dev/shm/geocarb_L_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
-trap 'rm -f "${SHM_NAME}"' EXIT
+trap 'rm -f "${SHM_NAME}"*' EXIT
 find /dev/shm -maxdepth 1 -user "${USER}" -name 'geocarb_L_*' -mmin +30 2>/dev/null \
     | while read -r f; do fuser "$f" >/dev/null 2>&1 || rm -f "$f"; done
 

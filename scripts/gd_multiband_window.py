@@ -51,7 +51,7 @@ def load_inputs():
 def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields="structural",
                            g_ratio=None, anchor_density=4, anchor_mode="cover", solver="single_scatter",
                            state_interp=None, prior_form=None, gamma=None, anchor_workers=1,
-                           psf_fwhm_px=1.5, verbose=True) -> dict:
+                           psf_fwhm_px=1.5, verbose=True, hook=None):
     """Joint hi-res solve of one window.
 
     rows_by_fpa : {fpa: (row_lo, row_hi)}; the FIRST entry is the reference band (sets G).
@@ -152,6 +152,10 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
         jac_joint = mb.stack_linearize(lins)
         y = np.concatenate([y_true[f].ravel() for f in fpas])
         Sy_inv = mb.stack_Sy_inv_diag([Sy[f] for f in fpas])
+        if hook is not None:       # e.g. the finite-difference Jacobian check: hand over the built problem
+            return hook(dict(mb=mb, forward=fwd, linearize=jac_joint, y=y, Sy_inv=Sy_inv, fpas=fpas,
+                             B=B, bin_centers=bin_centers, anchor_etas=anchor_etas, G=G,
+                             n_data_by_band={f: y_true[f].size for f in fpas}))
         t0 = time.time()
         label = "+".join(f"FPA{f}[{rows_by_fpa[f][0]}-{rows_by_fpa[f][1]}]" for f in fpas)
         x, S_ret, avk = gauss_newton_state(fwd, y, mb.joint, Sy_inv, label=label, verbose=verbose,
