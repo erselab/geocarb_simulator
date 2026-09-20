@@ -94,6 +94,17 @@ for k in range(J.n_free):
 check("stacked analytic Jacobian matches finite difference of the stacked forward",
       np.allclose(Jan, Jfd, atol=1e-7), f"max |diff|={np.abs(Jan - Jfd).max():.2e}")
 
+# 5b -- the (y, K, K_g) form the solver consumes
+lin = [(lambda xv, f=fwd[i], g=jac[i]: (f(xv), g(xv), {})) for i in range(2)]
+yl, Kl, Kgl = mb.stack_linearize(lin)(x)
+check("stack_linearize returns (stacked y, stacked K, {})",
+      np.allclose(yl, y) and np.allclose(Kl, Jan) and Kgl == {})
+try:
+    mb.stack_linearize([lambda xv: (fwd[0](xv), jac[0](xv), {"albedo": np.zeros((3, 2))}), lin[1]])(x)
+    check("non-empty K_g is rejected, not silently dropped", False)
+except NotImplementedError:
+    check("non-empty K_g is rejected, not silently dropped", True)
+
 # 6 -- independence of the albedo rows
 sl = J.slices()
 for i, b in enumerate(bands):

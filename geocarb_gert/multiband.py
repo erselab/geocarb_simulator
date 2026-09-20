@@ -138,6 +138,26 @@ class MultiBandState:
                               for b, (jf, i) in enumerate(zip(jacobian_fns, idxs))])
         return jacobian_joint
 
+    def stack_linearize(self, lin_fns: Sequence[Callable]) -> Callable:
+        """The ``jacobian_fn`` form ``gauss_newton_state`` consumes: each band's
+        ``lin_b(x_b) -> (y_b, K_b, K_g_b)`` (what ``jacobians.linearize`` returns)
+        becomes ``(concat y, embedded-and-stacked K, {})``. Sub-bin anomaly
+        sensitivities (``K_g``) are not supported across bands yet: a non-empty
+        ``K_g`` from any band raises rather than being silently dropped."""
+        idxs = [self.index_map(b) for b in range(len(self.bands))]
+
+        def linearize_joint(x):
+            x = np.asarray(x, dtype=float)
+            ys, Ks = [], []
+            for b, (lf, i) in enumerate(zip(lin_fns, idxs)):
+                y_b, K_b, Kg_b = lf(x[i])
+                if Kg_b:
+                    raise NotImplementedError("sub-bin anomaly (K_g) is not supported in multi-band solves yet")
+                ys.append(np.asarray(y_b, dtype=float).ravel())
+                Ks.append(self.embed_columns(b, K_b))
+            return np.concatenate(ys), np.vstack(Ks), {}
+        return linearize_joint
+
     @staticmethod
     def stack_Sy_inv_diag(Sy_inv_diags: Sequence[np.ndarray]) -> np.ndarray:
         """Block-diagonal inverse noise covariance (diagonal): no cross-band noise
