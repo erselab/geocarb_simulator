@@ -103,7 +103,7 @@ be applied consistently for both bands). XRTM is required whenever height is fre
 |---|---|---|
 | 0 | Freeze decisions (Sec.7) | user sign-off |
 | 1 | Data model: band list, `StateSpec` views, per-band albedo rows, stacked `Sy_inv` -- **DONE 2026-09-20**: `geocarb_gert/multiband.py`, gate = `scripts/check_multiband_state.py` (all pass) | unit tests: view round-trips, column embedding |
-| 2 | Geometry: shared-eta tiling from BOTH bands' keystone maxima (4.3); per-band row ranges; extend `check_eta_consistency.py` | each band's row range covers every pixel whose keystone trace touches the window; window never narrower than either band's max crossing |
+| 2 | Geometry: shared-eta tiling from BOTH bands' keystone maxima (4.3); per-band row ranges -- **DONE 2026-09-20**: `geocarb_gert/multiband_geometry.py`, gate = `scripts/check_multiband_geometry.py` (all pass; FPA0+FPA2 -> 33 windows) | each band's row range covers every pixel whose keystone trace touches the window; window never narrower than either band's max crossing |
 | 3 | Composite forward + Jacobian | (a) N=1 reproduces the existing single-band result exactly (use the `_etaslit` c4 window 25-37 test: 5 iterations, rms_resid 2.9e-4); (b) stacked analytic J vs finite difference |
 | 4 | Driver: `--fpas 0,2`, dir tag `_fpa0-2`, sbatch CONF, record bands in pickle | 2-band single-window run converges (perfect model, no aerosol) |
 | 5 | Cost/memory probe on ONE window (cgroup `memory.peak`, s/iteration) | sizing table for tiers before any sweep (ask before submitting) |
