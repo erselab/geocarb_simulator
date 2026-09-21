@@ -265,8 +265,9 @@ def _layer_mid(a):
 
 def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6,
                         absco=None, wide_inst=None, geo=None, solar=None,
-                        alb=None, slope=None, tau_aer=None, height_aer=None,
-                        thickness_aer=None, h_rel_rt: float = 1e-3):
+                        alb=None, slope=None, tau_aer=None, height_aer=None, aer_props=None,
+                        thickness_aer=None, h_rel_rt: float = 1e-3,
+                        surface=None, solver=None, aerosol_type="smoke"):
     """``dI_hires/d(p_surface_hpa)`` -- dispatches to the fast analytic
     composition (`_p_surface_dI_dparam_analytic`) when no aerosol row is
     present (`tau_aer is None` -- every existing caller, zero behavior
@@ -306,7 +307,19 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6,
     p_sfc_hpa = float(params["p_surface_hpa"])
     n_wn = len(wide_inst.windows[0].wn_hires)
     h = h_rel_rt * p_sfc_hpa
-    p_aer_val = als.aerosol_phase_hg(als.AEROSOL_G, np.cos(geo.scattering_angle))
+    if solver is not None and surface is not None:
+        # 2026-09-21: finite difference of the SAME forward model the retrieval uses (solver and
+        # per-band aerosol properties), not the hard-coded single-scatter one below -- under XRTM
+        # that mismatch left 5-18% error (multiple scattering). Two extra RT calls, as before.
+        from .spectrum import simulate_spectrum
+
+        def _I_sim(p_sfc):
+            return np.asarray(simulate_spectrum({**params, "p_surface_hpa": p_sfc}, surface, absco,
+                                                wide_inst, geo, solar, aerosol_type=aerosol_type,
+                                                solver=solver).I_hires, dtype=float)
+        return (_I_sim(p_sfc_hpa + h) - _I_sim(p_sfc_hpa - h)) / (2.0 * h)
+    a_ssa, a_g = aer_props if aer_props is not None else (als.AEROSOL_SSA, als.AEROSOL_G)
+    p_aer_val = als.aerosol_phase_hg(a_g, np.cos(geo.scattering_angle))
 
     def _I(p_sfc):
         atm = als.atmosphere_from_params(**{**params, "p_surface_hpa": p_sfc})
@@ -317,8 +330,8 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6,
                      aerosol_profile_shape="gaussian",
                      thickness_aerosol=(thickness_aer if thickness_aer is not None
                                         else als.AEROSOL_THICKNESS_PA),
-                     ssa_aerosol=[np.full(n_wn, als.AEROSOL_SSA)],
-                     g_aerosol=[als.AEROSOL_G],
+                     ssa_aerosol=[np.full(n_wn, a_ssa)],
+                     g_aerosol=[a_g],
                      qext_aerosol=[np.full(n_wn, als.AEROSOL_QEXT_NORM)],
                      P_aerosol=[np.full(n_wn, p_aer_val)])
         return np.asarray(res_.I_hires[0], dtype=float)

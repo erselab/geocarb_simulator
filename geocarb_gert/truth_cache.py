@@ -53,7 +53,7 @@ from .paths import REPO_ROOT
 #: along_slit_scene.build_lookup_radiance, the GD polynomial CSV/loader,
 #: focalplane.py's spatial PSF convolution, ...) -- this is the only guard
 #: against silently serving a stale cached render after such a change.
-TRUTH_CACHE_VERSION = 6  # 2026-09-21 (later): terrain-following aerosol height (p_surface - offset) and an urban
+TRUTH_CACHE_VERSION = 7  # 2026-09-21 (later): terrain-following aerosol height (p_surface - offset) and an urban
                          # AOD bump at the -500 km CO2 plume -- both change every aerosol render; v5 entries are stale.
                          # (v5) 2026-09-21: the truth aerosol height is now capped >= 100 m above the surface
                          # (along_slit_scene.height_aerosol), so every aerosol render changes; v4 entries are stale.

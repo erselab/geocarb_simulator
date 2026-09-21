@@ -35,7 +35,8 @@ from gert.forward_model import ForwardModel
 from gert.rt_solver import SingleScatterSolver, XRTMSolver
 
 from . import along_slit_scene as als
-from .aerosol_defaults import aerosol_scalars_for
+from .aerosol_defaults import (aerosol_scalars_for, aerosol_band_props,
+                               band_slot_for_wavelength_um)
 
 #: 2026-09-15 (Phase 2 of the XRTM integration plan): the one place a
 #: `solver="single_scatter"|"xrtm"` string resolves to an actual gert
@@ -104,8 +105,18 @@ class SpectrumResult:
     aerosol_kwargs: dict           # what was passed to fm.run for aerosol (empty if none)
 
 
+def aerosol_band_for(wide_inst, aerosol_type: str) -> tuple[float, float, float]:
+    """`(ssa, g, tau_scale)` for the band of `wide_inst`'s first window
+    (2026-09-21: per-band GERT scalars; O2-A uses registry slot 0 with tau
+    scaled by qext_norm[0]/qext_norm[1], every longer-wavelength band slot 1
+    and scale 1 -- so FPA1-3 results are unchanged)."""
+    wn = np.asarray(wide_inst.windows[0].wn_hires, dtype=float)
+    return aerosol_band_props(aerosol_type,
+                              band_slot_for_wavelength_um(1e4 / float(wn.mean())))
+
+
 def _build_aerosol_kwargs(surface: Optional[dict], n_wn: int, geo,
-                          aerosol_type: str) -> dict:
+                          aerosol_type: str, band_props=None) -> dict:
     """`{}` when neither `tau_aerosol` nor `height_aerosol` is present in
     `surface` -- matches every existing call site's `.get(...)` convention:
     `amplitude_aerosol=None` is treated the same as `gert.ForwardModel.run`'s
@@ -130,8 +141,13 @@ def _build_aerosol_kwargs(surface: Optional[dict], n_wn: int, geo,
     thickness_aer = (surface or {}).get("thickness_aerosol", als.AEROSOL_THICKNESS_PA)
     if amp_aer is None:
         return {}
-    tau_aer = float(amp_aer) * float(thickness_aer) * np.sqrt(2.0 * np.pi)
-    ssa, g, qext_norm = aerosol_scalars_for(aerosol_type)
+    if band_props is None:
+        ssa, g, qext_norm = aerosol_scalars_for(aerosol_type)
+        tau_scale = 1.0
+    else:
+        ssa, g, tau_scale = band_props
+        qext_norm = 1.0
+    tau_aer = float(amp_aer) * float(thickness_aer) * np.sqrt(2.0 * np.pi) * tau_scale
     p_aer_val = als.aerosol_phase_hg(g, np.cos(geo.scattering_angle))
     return dict(
         tau_aerosol=tau_aer,
@@ -176,7 +192,8 @@ def simulate_spectrum(atm_params: dict, surface: Optional[dict], absco, wide_ins
     alb = float(surface.get("albedo", 0.0))
     slope = float(surface.get("albedo_slope", 0.0))
     n_wn = len(wide_inst.windows[0].wn_hires)
-    aer_kwargs = _build_aerosol_kwargs(surface, n_wn, geo, aerosol_type)
+    aer_kwargs = _build_aerosol_kwargs(surface, n_wn, geo, aerosol_type,
+                                       band_props=aerosol_band_for(wide_inst, aerosol_type))
 
     fm = ForwardModel(atm, absco, wide_inst, geo,
                       solver=_build_solver(solver, jacobians),
@@ -224,7 +241,8 @@ def spectrum_and_jacobian(atm_params: dict, rows, absco, wide_inst, geo, solar,
     # recomputed (not re-derived from `res`) since `p_surface_dI_dparam`'s
     # own RT-fallback FD path (jacobians.py) needs it as a plain kwarg to
     # rebuild a perturbed `ForwardModel.run()` call, same as before.
-    tau_aer = (float(amp_aer) * float(thickness_aer) * np.sqrt(2.0 * np.pi)
+    a_ssa, a_g, a_scale = aerosol_band_for(wide_inst, aerosol_type)
+    tau_aer = (float(amp_aer) * float(thickness_aer) * np.sqrt(2.0 * np.pi) * a_scale
               if amp_aer is not None else None)
 
     d = {}
@@ -235,20 +253,22 @@ def spectrum_and_jacobian(atm_params: dict, rows, absco, wide_inst, geo, solar,
                       jac.height_aerosol_dI_dparam(res, atm, float(height_aer),
                                                    thickness_aerosol=thickness_aer))
         elif row == "amplitude_aerosol":
-            d[row] = jac.amplitude_aerosol_dI_dparam(res, float(thickness_aer))
+            d[row] = jac.amplitude_aerosol_dI_dparam(res, float(thickness_aer)) * a_scale
         elif row == "thickness_aerosol":
             d[row] = (jac.thickness_aerosol_dI_dparam_xrtm(
-                        res, atm, float(height_aer), float(thickness_aer), float(amp_aer))
+                        res, atm, float(height_aer), float(thickness_aer), float(amp_aer) * a_scale)
                       if solver == "xrtm" else
                       jac.thickness_aerosol_dI_dparam(
-                        res, atm, float(height_aer), float(thickness_aer), float(amp_aer)))
+                        res, atm, float(height_aer), float(thickness_aer), float(amp_aer) * a_scale))
         elif row in jac.SURFACE_ROW_JACOBIAN:
             d[row] = jac.surface_dI_dparam(res, row)
         elif row == "p_surface_hpa":
             d[row] = jac.p_surface_dI_dparam(res, atm_params, absco=absco, wide_inst=wide_inst,
                                              geo=geo, solar=solar, alb=alb, slope=slope,
                                              tau_aer=tau_aer, height_aer=height_aer,
-                                             thickness_aer=thickness_aer)
+                                             thickness_aer=thickness_aer,
+                                             aer_props=(a_ssa, a_g), surface=surface,
+                                             solver=solver, aerosol_type=aerosol_type)
         elif row == "t_offset_k":
             d[row] = jac.t_offset_dI_dparam(res)
         elif row in jac.GAS_ROW_MOLECULE:

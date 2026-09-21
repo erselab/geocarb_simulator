@@ -33,3 +33,29 @@ def aerosol_scalars_for(aerosol_type: str) -> tuple[float, float, float]:
     return (float(scalars["ssa"][_BAND_INDEX]),
             float(scalars["g"][_BAND_INDEX]),
             float(scalars["qext_norm"][_BAND_INDEX]))
+
+
+#: Reference slot: `amplitude_aerosol` is the extinction-per-Pa at this slot's
+#: wavelength (the CO2 1.6 um band -- what the project's original single
+#: band-1 convention meant). Other bands scale tau by
+#: `qext_norm[slot]/qext_norm[_BAND_INDEX]` (gert only normalises qext
+#: WITHIN one run, so a one-window Instrument always sees ratio 1).
+_REF_SLOT = _BAND_INDEX
+
+
+def band_slot_for_wavelength_um(wl_um: float) -> int:
+    """gert registry slot for a band centred at `wl_um`: 0 = O2-A (<1 um),
+    1 = CO2 weak/strong (1.6-2.1 um, also the reference), 2 = CH4 (1.63-1.7 um
+    is folded into 1 unless it is the CH4 window, so CH4 must be requested
+    explicitly through `slot=`)."""
+    return 0 if wl_um < 1.0 else 1
+
+
+@lru_cache(maxsize=None)
+def aerosol_band_props(aerosol_type: str, slot: int) -> tuple[float, float, float]:
+    """`(ssa, g, tau_scale)` for registry `slot`; `tau_scale` multiplies the
+    reference-wavelength column tau."""
+    sc = get_aerosol_scalars(aerosol_type)
+    q = sc["qext_norm"]
+    return (float(sc["ssa"][slot]), float(sc["g"][slot]),
+            float(q[slot]) / float(q[_REF_SLOT]))

@@ -51,7 +51,7 @@ def load_inputs():
 def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields="structural",
                            g_ratio=None, anchor_density=4, anchor_mode="cover", solver="single_scatter",
                            state_interp=None, prior_form=None, gamma=None, anchor_workers=1,
-                           psf_fwhm_px=1.5, verbose=True, hook=None):
+                           psf_fwhm_px=1.5, verbose=True, hook=None, aerosol=False):
     """Joint hi-res solve of one window.
 
     rows_by_fpa : {fpa: (row_lo, row_hi)}; the FIRST entry is the reference band (sets G).
@@ -103,7 +103,8 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
         raise ValueError(f"anchor_mode must be 'nominal' or 'cover', got {anchor_mode!r}")
 
     # ---- truth per band (the retrieval's own forward model at a fully frozen state) ----
-    truth_surface = {k: v for k, v in als.SURFACE_FIELDS.items() if k not in _NO_AEROSOL}
+    strip = () if aerosol else _NO_AEROSOL     # aerosol arm: the truth scene carries the aerosol layer
+    truth_surface = {k: v for k, v in als.SURFACE_FIELDS.items() if k not in strip}
     y_true, Sy = {}, {}
     for f in fpas:
         b = B[f]
@@ -123,8 +124,12 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
     imperfect_surface = als.SURFACE_PRIOR_FIELD_SETS.get(prior_fields, als.SURFACE_FIELDS)
     prior_fields_resolved = {n: (fn if n in free_set else als.STATE_FIELDS[n]) for n, fn in imperfect.items()}
     surface_resolved = {n: (fn if n in free_set else als.SURFACE_FIELDS[n]) for n, fn in imperfect_surface.items()
-                        if n not in _NO_AEROSOL}
+                        if n not in strip}
     row_positions = {n: anchor_etas for n in prior_fields_resolved if n not in free_set}
+    if aerosol:     # aerosol is gas-like (broad scale): free aerosol rows ride the coarse eta bins, as in the single-band driver
+        for n in ("amplitude_aerosol", "height_aerosol"):
+            if n in free_set:
+                row_positions[n] = bin_centers
     bands = [BandRef(f, B[f]["label"]) for f in fpas]
     mb = joint_spec_from_scene(bin_centers, bands, free=free, corr_length=None, prior_form=prior_form,
                                uniform=False, fields=prior_fields_resolved, surface_fields=surface_resolved,
@@ -183,7 +188,7 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
     sizes = [y_true[f].size for f in fpas]
     splits = np.cumsum([0] + sizes)
     return dict(fpas=fpas, rows_by_fpa={f: tuple(rows_by_fpa[f]) for f in fpas}, G=G, bin_centers=bin_centers,
-                anchor_etas=anchor_etas, anchor_mode=anchor_mode, free=free, solver=solver,
+                anchor_etas=anchor_etas, anchor_mode=anchor_mode, free=free, solver=solver, aerosol=aerosol,
                 joint=mb.joint.snapshot(x, resid=resid, resid_rms=float(np.sqrt(np.mean(resid ** 2))),
                                         cov=S_ret, avk=avk, dof=float(np.trace(avk))),
                 x=x, resid=resid, resid_rms=float(np.sqrt(np.mean(resid ** 2))),
@@ -208,6 +213,9 @@ def main():
                     help="named prior set (als.PRIOR_FIELD_SETS); 'realistic' = ACOS-like climatological gases + "
                          "reanalysis-like T/p/h2o/aerosol, never exactly the truth (2026-09-21)")
     ap.add_argument("--overlap", type=int, default=2)
+    ap.add_argument("--aerosol", action="store_true",
+                    help="truth scene and retrieval include the Gaussian aerosol layer (rows in --free are retrieved, "
+                         "the rest frozen at truth); default off = no aerosol")
     ap.add_argument("--out", default=None, help="output pickle (default under results/realistic_prior/multiband/)")
     a = ap.parse_args()
     fpas = [int(t) for t in a.fpas.split(",")]
@@ -221,10 +229,11 @@ def main():
     else:
         ap.error("give --rows or --tile")
     res = solve_window_multiband(rows, a.free.split(","), g_ratio=a.g_ratio, anchor_density=a.anchor_density,
-                                 anchor_mode=a.anchor_mode, solver=a.solver, anchor_workers=a.anchor_workers, prior_fields=a.prior_fields)
+                                 anchor_mode=a.anchor_mode, solver=a.solver, anchor_workers=a.anchor_workers, prior_fields=a.prior_fields,
+                                 aerosol=a.aerosol)
     name = f"mb_fpa{'-'.join(map(str, fpas))}_" + "_".join(f"r{f}-{rows[f][0]}-{rows[f][1]}" for f in fpas) \
         + f"_free-{'-'.join(t.split('_')[0] for t in a.free.split(','))}_{a.anchor_mode}_g{a.g_ratio if a.g_ratio is not None else 'cfg'}_etaslit" \
-        + ("" if a.prior_fields == "structural" else f"_prior-{a.prior_fields}")
+        + ("" if a.prior_fields == "structural" else f"_prior-{a.prior_fields}") + ("_aero" if a.aerosol else "")
     out = Path(a.out) if a.out else REPO / "results/realistic_prior/multiband" / f"{name}.pkl"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "wb") as fh:
