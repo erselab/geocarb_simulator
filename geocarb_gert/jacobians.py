@@ -128,7 +128,7 @@ from __future__ import annotations
 import numpy as np
 
 from . import gd_render
-from .focalplane import footprint_average_scene
+from .focalplane import footprint_active_fn, footprint_average_scene
 from .joint_state import ParamSpec, StateSpec
 
 #: State row -> the `gert` molecule whose optical depth it scales. A row
@@ -892,6 +892,61 @@ def _g_anomaly_sensitivity(p: ParamSpec, scene_etas, W, state_interp):
 
 
 _LINEARIZE_L_G: dict = {}
+
+#: 2026-09-21: apply the detector operator to a Jacobian column's field SPARSELY (skip the pixels
+#: that are exactly zero because the field is nonzero only near a few anchors). Exact -- see
+#: `focalplane.footprint_active_fn`. Profile of a two-band tile: the per-column operator was 96% of an
+#: iteration (docs/PROJECT_STATUS.md Sec.34). ON by default since 2026-09-21 (bit-identical to the dense
+#: path on the real tile-12 Jacobian and end to end); `GEOCARB_SPARSE_L=0` restores the dense path
+#: (regression checks). Read at import, so it is inherited by forked pool workers.
+import os as _os
+SPARSE_L = _os.environ.get("GEOCARB_SPARSE_L", "1") != "0"
+
+#: 2026-09-21: store each Jacobian column's field as its NONZERO anchor rows only (`SparseField`)
+#: instead of a dense (n_anchor, n_hires) array -- the dense per-column fields were the bulk of the
+#: shared-memory buffer (~40 GB for the widest two-band tile) and of the parent's transient `jobs`
+#: list, yet a column is nonzero at only 1 (albedo) to ~8 (gas) anchors. Values are the same products as
+#: the dense fields' nonzero rows, so results are bit-identical. ON by default since 2026-09-21;
+#: `GEOCARB_SPARSE_STORE=0` restores dense storage. Read at import, inherited by forked pool workers.
+SPARSE_STORE = _os.environ.get("GEOCARB_SPARSE_STORE", "1") != "0"
+
+
+class SparseField:
+    """A per-anchor hi-res field that is nonzero only at anchors `idx`: ``dense[idx] = rows``
+    (all other anchors exactly zero). ``n_scene`` is the number of anchors of the dense field."""
+    __slots__ = ("idx", "rows", "n_scene")
+
+    def __init__(self, idx, rows, n_scene):
+        self.idx = np.asarray(idx, dtype=np.intp)
+        self.rows = rows
+        self.n_scene = int(n_scene)
+
+    def to_dense(self):
+        out = np.zeros((self.n_scene, self.rows.shape[1]), dtype=float)
+        out[self.idx] = self.rows
+        return out
+
+
+def apply_detector_operator(fpa, rows_win, wn_hires, scene_etas, field, ils, pad):
+    """``L(field)`` raveled: the footprint-averaged, ILS-convolved, PSF-blurred detector image of a
+    per-anchor hi-res `field`, skipping exactly-zero pixels when `SPARSE_L` (bit-identical result)."""
+    active = None
+    if isinstance(field, SparseField):
+        sparse_nz = np.zeros(field.n_scene, dtype=bool)
+        sparse_nz[field.idx[np.any(field.rows != 0.0, axis=1)]] = True
+        field = field.to_dense()
+    else:
+        sparse_nz = None
+    if SPARSE_L:
+        nz = sparse_nz if sparse_nz is not None else np.any(np.asarray(field) != 0.0, axis=1)
+        if not nz.any():
+            return np.zeros(len(np.asarray(rows_win)) * gd_render.N_PX, dtype=float)
+        if not nz.all():
+            active = footprint_active_fn(scene_etas, nz)
+    return gd_render.predict_neighborhood(
+        fpa, rows_win, wn_hires, footprint_average_scene(scene_etas, field), ils, pad=pad,
+        footprint=True, active_fn=active).ravel()
+
 _LINEARIZE_POOLS_CREATED = 0   # per-process count of LinearizePool shared buffers; see run_L's naming
 
 
@@ -919,9 +974,8 @@ def _L_worker(idx):
     from .focalplane import footprint_average_scene
     G = _LINEARIZE_L_G
     dest, field = G["jobs"][idx]
-    col = gd_render.predict_neighborhood(
-        G["fpa"], G["rows_win"], G["wn_hires"], footprint_average_scene(G["scene_etas"], field),
-        G["ils"], pad=G["pad"], footprint=True).ravel()
+    col = apply_detector_operator(G["fpa"], G["rows_win"], G["wn_hires"], G["scene_etas"], field,
+                                  G["ils"], G["pad"])
     return dest, col
 
 
@@ -1027,8 +1081,19 @@ class LinearizePool:
         if self.n_workers <= 1 or len(jobs) < 4:
             return None
         n = len(jobs)
-        first_field = np.asarray(jobs[0][1], dtype=np.float64)
-        shape = (n,) + first_field.shape
+        sparse = isinstance(jobs[0][1], SparseField)
+        if sparse:
+            # ragged storage: one shared 2-D buffer of every job's nonzero anchor rows, stacked; the small
+            # per-job (index, offset) tables ride in the fork-inherited global (see `_L_worker_shm`).
+            idxs = [j[1].idx for j in jobs]
+            ms = np.array([len(i) for i in idxs], dtype=np.intp)
+            offsets = np.concatenate([[0], np.cumsum(ms)])
+            n_hires_f = int(jobs[0][1].rows.shape[1])
+            shape = (max(int(offsets[-1]), 1), n_hires_f)
+            first_field = np.zeros(1, dtype=np.float64)
+        else:
+            first_field = np.asarray(jobs[0][1], dtype=np.float64)
+            shape = (n,) + first_field.shape
         if self._L_pool is None:
             # First L() batch this window has ever needed -- only now do we
             # know its fixed job shape, so allocate the shared buffer and
@@ -1080,6 +1145,9 @@ class LinearizePool:
                                        scene_etas=scene_etas, ils=ils, pad=pad,
                                        shm_name=self._shm.name, shm_shape=self._shm_shape,
                                        shm_dtype=self._shm_dtype))
+            _LINEARIZE_L_G.pop("sparse", None)
+            if sparse:
+                _LINEARIZE_L_G["sparse"] = dict(idxs=idxs, offsets=offsets, n_scene=jobs[0][1].n_scene)
             ctx = mp.get_context("fork")
             self._L_pool = ctx.Pool(self.n_workers)
         elif shape != self._shm_shape:
@@ -1091,9 +1159,15 @@ class LinearizePool:
                 f"iterations")
         buf = np.ndarray(self._shm_shape, dtype=self._shm_dtype, buffer=self._shm.buf)
         dest_list: list = [None] * n
+        if sparse and not all(np.array_equal(a, b) for a, b in zip(idxs, _LINEARIZE_L_G["sparse"]["idxs"])):
+            raise RuntimeError("LinearizePool.run_L: a sparse job's nonzero-anchor pattern changed mid-window "
+                               "(it must depend only on the fixed state-to-anchor weights)")
         for i in range(n):
             dest, field = jobs[i]
-            buf[i] = field
+            if sparse:
+                buf[int(offsets[i]):int(offsets[i + 1])] = field.rows
+            else:
+                buf[i] = field
             dest_list[i] = dest
             jobs[i] = None   # drop this field the instant it's copied in,
                               # rather than holding the whole batch AND the
@@ -1155,10 +1229,14 @@ def _L_worker_shm(idx):
         shm = shared_memory.SharedMemory(name=name)
         _L_WORKER_SHM_CACHE[name] = shm
     fields = np.ndarray(G["shm_shape"], dtype=G["shm_dtype"], buffer=shm.buf)
-    return gd_render.predict_neighborhood(
-        G["fpa"], G["rows_win"], G["wn_hires"],
-        footprint_average_scene(G["scene_etas"], fields[idx]),
-        G["ils"], pad=G["pad"], footprint=True).ravel()
+    sp = G.get("sparse")
+    if sp is None:
+        field = fields[idx]
+    else:                                     # ragged storage: this job's nonzero anchor rows
+        off = int(sp["offsets"][idx])
+        field = SparseField(sp["idxs"][idx], fields[off:off + len(sp["idxs"][idx])], sp["n_scene"])
+    return apply_detector_operator(G["fpa"], G["rows_win"], G["wn_hires"], G["scene_etas"], field,
+                                   G["ils"], G["pad"])
 
 
 def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
@@ -1244,9 +1322,7 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
         rms_resid=0.045 here -- a pure Jacobian-vs-forward-model
         inconsistency, not a real residual.
         """
-        return gd_render.predict_neighborhood(
-            fpa, rows_win, wn_hires, footprint_average_scene(scene_etas, field),
-            ils, pad=pad, footprint=True).ravel()
+        return apply_detector_operator(fpa, rows_win, wn_hires, scene_etas, field, ils, pad)
 
     y = L(S)
     K = np.empty((y.size, spec.n_free))
@@ -1264,6 +1340,9 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
     import multiprocessing as mp
     n_workers_eff = 1 if mp.current_process().daemon else n_workers
     jobs: list = []          # (dest, field) -- dest is ("K", col_idx) or ("Kg", name, m)
+    # sparse storage only when no row needs the dense sub-bin-anomaly (K_g) jobs
+    use_sparse_store = SPARSE_STORE and not any(p.sub_bin_anomaly is not None and p.sub_bin_anomaly.g_cov is not None
+                                                for p in free)
     dval_dg_by_name: dict = {}
     for p in free:
         W = spec.interp_weights(scene_etas, p.name, state_interp=state_interp)  # (n_scene, p.n)
@@ -1277,7 +1356,12 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
             # mirrored here exactly so this module's d(value)/dx factor never
             # silently disagrees with what apply() actually computes).
             dval_dx = p.prior[k] if p.kind == "scale" else 1.0
-            jobs.append((("K", sl.start + k), dS_row * (W[:, k] * dval_dx)[:, None]))
+            if use_sparse_store:
+                w_k = W[:, k] * dval_dx
+                nzi = np.flatnonzero(w_k != 0.0)
+                jobs.append((("K", sl.start + k), SparseField(nzi, dS_row[nzi] * w_k[nzi][:, None], W.shape[0])))
+            else:
+                jobs.append((("K", sl.start + k), dS_row * (W[:, k] * dval_dx)[:, None]))
         if p.sub_bin_anomaly is not None and p.sub_bin_anomaly.g_cov is not None:
             dval_dg = _g_anomaly_sensitivity(p, scene_etas, W, state_interp)
             dval_dg_by_name[p.name] = dval_dg

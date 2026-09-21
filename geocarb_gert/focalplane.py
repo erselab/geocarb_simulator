@@ -421,6 +421,35 @@ def footprint_average_scene(bin_centers: np.ndarray, spectra: list,
     return radiance
 
 
+def footprint_active_fn(bin_centers: np.ndarray, nonzero) -> Callable:
+    """``active(eta_lo, eta_hi) -> bool mask``: which footprints can have a NONZERO
+    :func:`footprint_average_scene` value when only the anchors flagged in `nonzero`
+    carry a nonzero spectrum (2026-09-21, sparse Jacobian operator).
+
+    A footprint's average is ``(F(eta_hi) - F(eta_lo)) / width`` where ``F`` reads only
+    the zones ``idx_lo .. idx_hi`` (the clipped ``searchsorted`` indices computed exactly as
+    in `footprint_average_scene._F`) -- the cumulative sum below them cancels identically in
+    the difference (equal floats, not merely close). So the average is EXACTLY zero unless
+    some nonzero anchor lies in ``[idx_lo, idx_hi]``; this mask is exact, not a
+    conservative approximation, and therefore skipping the masked-out pixels reproduces the
+    dense result bit for bit. Note the FIRST and LAST anchors are never read (their zones
+    are the semi-infinite edge zones, which `_F` clips onto zones 1 and G-2), same here.
+    """
+    bc = np.asarray(bin_centers, dtype=float)
+    G = len(bc)
+    nz = np.asarray(nonzero, dtype=bool)
+    mid = 0.5 * (bc[:-1] + bc[1:])
+    cnt = np.concatenate([[0], np.cumsum(nz)])          # cnt[i] = # nonzero anchors with index < i
+    hi_clip = G - 2 if G > 2 else 1
+
+    def active(eta_lo, eta_hi) -> np.ndarray:
+        i_lo = np.clip(np.searchsorted(mid, np.asarray(eta_lo, dtype=float)), 1, hi_clip)
+        i_hi = np.clip(np.searchsorted(mid, np.asarray(eta_hi, dtype=float)), 1, hi_clip)
+        a, b = np.minimum(i_lo, i_hi), np.maximum(i_lo, i_hi)
+        return (cnt[b + 1] - cnt[a]) > 0
+    return active
+
+
 def gaussian_blur_rows(A: np.ndarray, fwhm_px: float) -> np.ndarray:
     """Blur ``A`` along axis 0 (rows) by a normalized Gaussian of FWHM ``fwhm_px``.
 

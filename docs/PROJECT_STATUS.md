@@ -2953,3 +2953,129 @@ convention): converged in 5 iterations, `|dx/sigma| = 5.2e-7`, rms_resid 2.9e-4,
 magnitude as the same window under the old convention (0.036 / 0.056 / 0.0050).
 `cross_band.py` still notes that its real-`s` helpers assume comparable `s`
 calibrations, which the user questioned.
+
+
+## 34. Where a multi-band iteration's time goes, and an exact 16x speedup: sparse detector operator + sparse field storage (2026-09-21)
+
+**Question** (user): can the wavelengths each anchor's RT runs over be tailored, since it looked as if not
+every wavelength of an anchor is used by its bin? Profiling first showed RT is not the cost at all.
+
+**Profile** (`scripts/profile_multiband_iteration.py`, tile 12 = 23 rows/band, 8 workers, on a node shared
+with sweep tasks so absolute times are inflated but the shares are robust): one linearization = 966 s, of
+which the per-state-column **detector operator (`LinearizePool.run_L`) = 926.7 s = 95.9%**, anchor RT +
+per-layer derivatives (`run_anchor`) = 10.7 s = 1.1%, everything else 3%. One forward evaluation = 26 s
+(operator 87%, anchor RT 13%). An LM iteration (1 linearization + 1-3 trial forwards) was ~17 min. The
+operator cost is n_columns x (one full-window render): each column's field was pushed through the whole
+padded window even though it is nonzero only near its own anchor.
+
+**Unused wavelengths** (measured from the pixel geometry: per anchor, the union of the ILS windows of every
+pixel whose footprint overlaps the anchor's zone, padded rows included): an anchor needs on average only
+67-81% of the band (FPA0 0.78-0.81, FPA2 0.67-0.73 across tiles 0/12/31; edge anchors often <50%, a few
+unused). Part is the 10 cm-1 hi-res margin no pixel reads (7% of the FPA0 band, 16% of FPA2), the rest is
+keystone. Trimming each anchor's RT to that interval is exact, but since RT is ~1% of a linearization it
+is worth ~1-2% of an iteration -- its value would be memory only. Not implemented.
+
+**Sparse detector operator** (exact; the big win). A footprint's `footprint_average_scene` value is
+`(F(eta_hi) - F(eta_lo))/width` where `F` reads only zones `idx_lo..idx_hi` (clipped `searchsorted`
+indices) and the cumulative sums below them cancel identically, so the average is EXACTLY zero unless a
+nonzero anchor lies in that zone range. `focalplane.footprint_active_fn(bin_centers, nonzero)` builds that
+per-pixel mask (the first/last anchors are never read -- their zones clip onto zones 1 and G-2);
+`gd_render.predict_neighborhood(..., active_fn=...)` skips inactive pixels (whole rows when none is
+active) and leaves exact zeros; active pixels run the identical code on identical inputs, so the result is
+bit-for-bit the dense one. `jacobians.apply_detector_operator` is the single entry point used by the local
+`L`, `_L_worker` and `_L_worker_shm`. Per column on real tile-12 geometry: albedo-type (1 anchor) 25x
+faster (FPA2 4.45 -> 0.18 s, FPA0 11.56 -> 0.45 s), gas-type (8 anchors) 10.6x. Whole tile-12
+linearization: **582 s -> 64 s (9.1x), K and y bit-identical**.
+
+**Sparse field storage.** The shared-memory buffer held one DENSE (n_anchor x n_hires) array per Jacobian
+column (n_cols x n_anchor x n_hires x 8 B: 13.9/5.8 GB for tile 6's two bands -- the 13G/6G `/dev/shm`
+segments seen), plus a transient dense copy of every field in the parent. `jacobians.SparseField` now stores
+only the nonzero anchor rows (`dense[idx] = rows`); `run_L` stacks them in one 2-D buffer with a small
+per-job index/offset table in the fork-inherited global (`_LINEARIZE_L_G["sparse"]`), and the worker
+rebuilds the dense field for its own column on demand. Values are the same products as the dense fields'
+nonzero rows (bit-identical); falls back to dense storage when a row needs the sub-bin-anomaly `K_g`
+jobs. Tile 12: shared buffers 10.90 -> 0.38 GB, job memory rise during the linearization 27.2 -> 7.5 GB,
+64 -> 57 s, K/y bit-identical.
+
+**End to end** (tile 12, both switches on, full Gauss-Newton solve): the iteration log, state vector `x`
+(np.array_equal, max |dx| = 0), residual and rms_resid are IDENTICAL to the dense solve; solve time
+**6377 s (dense sweep run, contended node) -> 389 s (16.4x)**.
+
+**Switches.** `GEOCARB_SPARSE_L` and `GEOCARB_SPARSE_STORE` (module flags `jacobians.SPARSE_L` /
+`SPARSE_STORE`, read at import so forked workers inherit them): both **ON by default since 2026-09-21**;
+`=0` restores the dense path for regression checks.
+
+**Gates** (`scripts/check_sparse_operator.py`): `synthetic` -- 144 cases (both bands, rows with different
+keystone, single/edge/block/none/all anchor patterns), sparse == dense bitwise (60 non-trivial);
+`tile --only-storage` / `tile` -- the real two-band Jacobian compared bitwise across dense/sparse
+operator and dense/sparse storage, with timings and cgroup/`/dev/shm` memory sampling.
+
+**Workflow lesson.** Pending array tasks read the WORKING TREE when they start, so a half-tested change
+can leak into a running sweep. The sparse operator was added to the repo behind a default-OFF flag; the
+sparse storage was developed and gated in an isolated copy of the code and copied in only after it
+passed; the defaults were flipped only after the end-to-end solve matched. Sweep tasks that started
+before the flip ran the dense path -- results are identical either way.
+
+**What this changes.** The multi-band cost model of Sec.32 (~580 core-hours, 50-70 min/iteration on packed
+nodes) is now mostly obsolete for anything started after the flip: the linearization drops ~10x and an
+iteration ~7-16x, and per-task memory falls (the shared buffers were up to ~40 GB for the widest tile).
+Anchor-RT wavelength trimming and any approximate RT (LSI etc.) are now second-order.
+
+
+## 35. A "realistic" prior that never equals the truth, and a terrain-following aerosol scene with an urban AOD bump (2026-09-21)
+
+**Why.** The final multi-band sweep (33/33 tiles, `scripts/summarize_multiband_sweep.py`) reported CO2 retrieved
+WORSE than the prior in 24/33 tiles. Analysis of the CO2 field (`plots/co2_multiband_prior_truth_posterior.png`):
+truth = background + a -500 km plume (6 ppm, 60 km wide) + hot spots at -1100 km (5 ppm, 10 km) and +1050 km
+(4 ppm, 9 km); the `structural` prior = the background ONLY, i.e. exactly the truth away from the features
+(prior error 0.007 ppm rms there). Near the features the posterior recovers 97-101% of the enhancement
+(rms 0.19 ppm vs prior 4.88); away from them the posterior adds 0.30 ppm rms of error (worse than the exact
+prior in 99% of bins), concentrated over a dark surface (+300..+700 km, albedo down to 0.011: 0.54 ppm rms;
+0.89 for albedo < 0.08), at the slit ends (0.53) and at tile edges (0.46 vs 0.24 interior). The same holds for the
+other rows: the `structural` prior is within 0.15 ppm of the CO2 truth over 85% of the slit (CH4 82%, CO 86%),
+and T/p/h2o/aerosol errors cross zero. So "the retrieval is worse than the prior" was an artifact of a perfect prior
+(user, 2026-09-21: avoid that; mimic ACOS -- climatological CO2/CH4/CO, reanalysis-based T/humidity/surface
+pressure/aerosol -- and never match the truth anywhere).
+
+**`realistic` prior** (`als.PRIOR_FIELD_SETS["realistic"]`, `SURFACE_PRIOR_FIELD_SETS["realistic"]`; select with
+`--prior-fields realistic`, now also on `gd_multiband_window.py`, output tag `_prior-realistic`):
+- CO2/CH4/CO: climatological curve = the truth's smooth background with a bias and a mis-scaled, phase-shifted wave;
+  no plume, hot spots or synoptic term (CO2: -1.2 + 1.5 sin(..+0.5) ppm about 415 vs truth +2.0 sin).
+- T, p_surface, h2o: the TRUTH plus a smooth sign-definite error (T +0.35..+0.85 K, p -0.6..-1.4 hPa, h2o +5..+9%).
+- aerosol: amplitude x(0.70 +- 0.08) (reanalysis AOD low), thickness x(1.25 +- 0.10), height 2300..4700 Pa
+  HIGHER above the surface than the truth; albedo = structural patch layout x(1.25 +- 0.05).
+Every error is `offset + smaller sinusoid`, so it is sign-definite. `scripts/check_realistic_prior.py` (passes)
+requires a minimum |error| over a 0.5 km grid for every row (CO2 0.21 ppm, CH4 7.5 ppb, CO 4.1 ppb, T 0.35 K,
+p 0.6 hPa, h2o 5%, aerosol amplitude 22%, height 2400 Pa, thickness 15%). Albedo cannot be made strictly
+sign-definite (the truth has ~10% random fine-scale texture): +25% bias leaves 2.3% of the slit within 4% of the truth
+(bias 0.08 -> 24%, 0.15 -> 13%, 0.35 -> 0.2%). Sizes are stated defaults, not measurements. Frozen rows still use the
+EXACT truth (driver rule); only free rows get the imperfect prior. The prior sigmas are unchanged (still much wider
+than these errors -- to be tuned). Plots: `scripts/plot_realistic_prior.py` -> `plots/realistic_prior_{fields,err}.png`.
+
+**Test (tile 12, two bands, realistic prior):** converged in 5 iterations, rms_resid 3.2e-3, 470 s; posterior errors are
+essentially the same as with the structural prior although the prior errors are larger (p 1.36 -> 0.029 hPa,
+CO2 2.40 -> 0.128 ppm, T 0.38 -> 0.011 K, h2o 4.6e-4 -> 1.9e-6): the data dominate, so the posterior error floor is
+set by degeneracy/regularization, not the prior. A full 33-tile rerun with this prior was proposed (not yet run).
+
+**Aerosol scene changes (truth and priors):**
+1. *Terrain-following height.* The layer centre was an absolute pressure (85000 Pa + drift) and sat BELOW the surface
+   over the mountain (x = -308..-192 km: up to 20 hPa; realistic prior 6.6% of the slit, structural 10.1%).
+   First capped at >= 100 m above the surface (`aerosol_height_cap_pa`: p_surface * exp(-100 m / 8.4 km)), then
+   (user: "I like your alternative plan") redefined relative to the surface: centre = p_surface - offset with
+   offset = 15000 - drift Pa (7000..23000), each prior against its OWN surface pressure. Over flat terrain it is within
+   ~10 hPa of the old field; over the mountain the layer follows the terrain (520 hPa centre at 750 hPa surface). Minimum
+   height above the surface: truth 609 m, structural 1365 m, realistic 1045 m (the 100 m cap remains as a guard that
+   never binds). The RETRIEVED `height_aerosol` stays an absolute pressure (user chose "scene only, for now"; retrieving
+   the offset or the ACOS-style p/p_surface fraction would need Jacobian changes: the p_surface Jacobian gains a term
+   through the aerosol height and the height Jacobian flips sign -- not done).
+2. *Urban AOD bump* (user): a Gaussian AOD enhancement co-located with the large CO2 plume (x0 -500 km, width 60 km,
+   amp 0.08 at the O2-A reference wavelength; `URBAN_AOD_*`), so AOD there is 0.13 vs the 0.05 background (the +200 km
+   haze peaks at 0.35); the amplitude row is 2.6x its background there. The realistic prior's amplitude keeps the
+   bump at ~70% (reanalysis sees urban aerosol but underestimates it); the structural prior has none.
+3. `TRUTH_CACHE_VERSION` 4 -> 5 -> 6 (every aerosol render changed).
+**Older aerosol results (c5x/c5y/o5y) used the uncapped fixed-pressure truth without the urban bump** -- they differ from
+this scene over the mountain (4% of the slit) and near -500 km.
+
+**Also from this session (recorded in Sec.34):** the sweep's final pooled rms error, retrieved/prior (structural prior):
+p 0.124/2.12 hPa, h2o 1.0e-5/1.4e-3, T 0.0156/2.12 K, CO2 0.277/1.29 ppm, albedo O2-A 0.0209/0.0395, CO2_strong
+0.0124/0.0255; 4 of 33 tiles ran the sparse path and 29 the dense one (bit-identical results).

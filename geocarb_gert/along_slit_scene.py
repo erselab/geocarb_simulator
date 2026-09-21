@@ -390,6 +390,13 @@ def albedo_for_label_prior_fine(x_km, label):
     return float(out[0]) if scalar else out
 
 
+#: 2026-09-21 (user): urban aerosol enhancement co-located with the large CO2 plume (see `xco2_ppm`: x0 -500 km,
+#: width 60 km). AOD is at the O2-A reference wavelength like every `tau_aerosol` value.
+URBAN_AOD_X0_KM = -500.0
+URBAN_AOD_WIDTH_KM = 60.0
+URBAN_AOD_AMP = 0.08
+
+
 def tau_aerosol(x_km, label=None):
     """Total aerosol optical depth AT THE O2-A REFERENCE WAVELENGTH
     (matching `gert.ForwardModel.run`'s own `tau_aerosol` convention --
@@ -410,7 +417,11 @@ def tau_aerosol(x_km, label=None):
     """
     background = 0.05
     haze = _gauss(x_km, x0=200.0, width=120.0, amp=0.30)
-    return np.clip(background + haze, 0.0, None)
+    # 2026-09-21 (user): a modest AOD increase co-located with the large CO2 hot spot (the -500 km plume,
+    # 6 ppm, 60 km wide) to represent an urban aerosol signal. Same centre and width as that plume;
+    # amplitude URBAN_AOD_AMP (peak AOD ~0.13 vs the 0.05 background).
+    urban = _gauss(x_km, x0=URBAN_AOD_X0_KM, width=URBAN_AOD_WIDTH_KM, amp=URBAN_AOD_AMP)
+    return np.clip(background + haze + urban, 0.0, None)
 
 
 def tau_aerosol_prior(x_km, label=None):
@@ -419,6 +430,36 @@ def tau_aerosol_prior(x_km, label=None):
     the localized haze event.
     """
     return np.full_like(np.asarray(x_km, dtype=float), 0.05)
+
+
+#: 2026-09-21 (user): an aerosol layer's Gaussian centroid must be at least this far ABOVE the surface,
+#: for the truth AND every prior. Converted to a pressure ceiling with an isothermal scale height
+#: (R*T/(M*g) at ~288 K = 8.4 km): cap = p_surface * exp(-h/H) (~1.2% below the surface pressure,
+#: 9 hPa at 750 hPa, 12 hPa at 1000 hPa).
+AEROSOL_MIN_HEIGHT_ABOVE_SURFACE_M = 100.0
+_AIR_SCALE_HEIGHT_M = 8400.0
+
+
+#: Terrain-following aerosol layer (2026-09-21): centre pressure = p_surface - offset, offset in Pa.
+AEROSOL_OFFSET_BG_PA = 15000.0        # background layer centre ~150 hPa above the surface (1.3 km at 1000 hPa)
+
+
+def aerosol_offset_pa(x_km):
+    """Truth offset [Pa] of the aerosol layer centre ABOVE the surface, as a pressure difference: p_surface - centre pressure.
+    `AEROSOL_OFFSET_BG_PA - drift`, with the same drift the fixed-pressure field had (8000 Pa, phase +2.2)."""
+    drift = 8000.0 * np.sin(2 * np.pi * (np.asarray(x_km, dtype=float) + 1400) / 2800 + 2.2)
+    return AEROSOL_OFFSET_BG_PA - drift
+
+
+def _terrain_following_height(x_km, p_surface_pa, offset_pa):
+    """centre = p_surface - offset, guarded to stay >= AEROSOL_MIN_HEIGHT_ABOVE_SURFACE_M above the surface."""
+    p = np.asarray(p_surface_pa, dtype=float)
+    return np.minimum(p - np.asarray(offset_pa, dtype=float), aerosol_height_cap_pa(p))
+
+
+def aerosol_height_cap_pa(p_surface_pa):
+    """Largest allowed aerosol-layer centroid pressure [Pa] for surface pressure `p_surface_pa`."""
+    return np.asarray(p_surface_pa, dtype=float) * np.exp(-AEROSOL_MIN_HEIGHT_ABOVE_SURFACE_M / _AIR_SCALE_HEIGHT_M)
 
 
 def height_aerosol(x_km, label=None):
@@ -432,16 +473,23 @@ def height_aerosol(x_km, label=None):
     correlated" convention `t_offset_k`'s own phase offset from
     `p_surface_hpa` already established.
     """
-    background_pa = 85000.0
-    drift = 8000.0 * np.sin(2 * np.pi * (x_km + 1400) / 2800 + 2.2)
-    return background_pa + drift
+    # 2026-09-21 (user): TERRAIN-FOLLOWING. The layer centre is defined RELATIVE TO THE SURFACE,
+    # `height = p_surface - offset(x)` with offset = AEROSOL_OFFSET_BG_PA - drift(x) (7000..23000 Pa, always
+    # far above the >= 100 m minimum), so a boundary-layer aerosol follows the terrain instead of
+    # sitting at a fixed pressure (which put the centre BELOW the surface over the mountain, x = -308..-192 km,
+    # by up to 20 hPa). Over flat terrain it reproduces the previous fixed-pressure field to within the
+    # ~3 hPa synoptic surface-pressure term. The old >= 100 m cap (`aerosol_height_cap_pa`) is kept only as a
+    # guarantee -- it never binds now.
+    return _terrain_following_height(x_km, p_surface_hpa(x_km) * 100.0, aerosol_offset_pa(x_km))
 
 
 def height_aerosol_prior(x_km, label=None):
     """Structural prior: flat background only, matching `t_offset_k_prior`'s
     "no known anomaly" convention.
     """
-    return np.full_like(np.asarray(x_km, dtype=float), 85000.0)
+    # terrain-following (2026-09-21): the flat background offset below the PRIOR's own surface pressure
+    return _terrain_following_height(x_km, p_surface_hpa_prior(x_km) * 100.0,
+                                     np.full_like(np.asarray(x_km, dtype=float), AEROSOL_OFFSET_BG_PA))
 
 
 def thickness_aerosol(x_km, label=None):
@@ -818,6 +866,107 @@ STATE_FIELDS_PRIOR_CO2_PLUS1PCT_PSURF_MINUS1PCT = {
     "p_surface_hpa": lambda x: 0.99 * p_surface_hpa(x),
 }
 
+# -- "realistic" prior (2026-09-21): ACOS-like, and NEVER exactly the truth --
+#
+# User (2026-09-21): the "structural" prior matches the truth EXACTLY wherever no localized feature
+# is present (CO2/CH4/CO background; p/T/h2o synoptic terms cross zero), so a retrieval can only ever
+# be WORSE than the prior there, which skewed every summary and made refinement ambiguous (is that
+# error a bug, or just an unimprovable perfect prior?). The ACOS prior: CO2/CH4/CO climatological
+# (no weather, no plumes; imperfect), temperature/humidity/surface pressure/aerosol from weather
+# reanalyses (they follow today's synoptic pattern but carry their own errors). Mimicked here:
+#   * gases: climatological curve = truth's own smooth background with a bias and a mis-scaled,
+#     phase-shifted seasonal/latitudinal wave; none of the plume / hot spots / synoptic content;
+#   * T, p_surface, h2o, aerosol (amplitude, height, thickness): the TRUTH plus a smooth,
+#     reanalysis-scale error;
+#   * albedo: the existing large-scale patch prior with a large smooth multiplicative bias (+20..30%;
+#     the truth's fine-scale texture makes a strict floor impossible -- see albedo_for_label_prior_realistic).
+# Every error is "offset + smaller sinusoid" (|offset| > |amplitude|), so it is SIGN-DEFINITE: the
+# prior differs from the truth by at least a floor everywhere along the slit, not just on average
+# (checked by scripts/check_realistic_prior.py). Sizes are stated defaults, not measurements -- in a
+# real problem they would be tuned to the reanalysis/climatology actually used.
+
+def _bias_wave(x_km, offset, amp, period_km, phase):
+    """A smooth, sign-definite error term: ``offset + amp*sin(...)`` with ``|offset| > |amp|``."""
+    x = np.asarray(x_km, dtype=float)
+    return offset + amp * np.sin(2.0 * np.pi * (x + 1400.0) / period_km + phase)
+
+
+# climatology (CO2/CH4/CO): no plume, no hot spots, no synoptic term; biased and mis-scaled seasonal wave
+def xco2_ppm_prior_realistic(x_km):
+    return XCO2_BG_PPM + _bias_wave(x_km, -1.2, 1.5, 3200.0, 0.5)          # truth bg: +2.0 sin(.../3200)
+
+
+def xch4_ppb_prior_realistic(x_km):
+    return XCH4_BG_PPB + _bias_wave(x_km, -14.0, 11.0, 2200.0, 2.9)        # truth bg: +15 sin(.../2200 + 2.5)
+
+
+def xco_ppb_prior_realistic(x_km):
+    return XCO_BG_PPB + _bias_wave(x_km, -8.0, 7.0, 2600.0, 1.3)           # truth bg: +10 sin(.../2600 + 1.0)
+
+
+# reanalysis-like (T, p_surface, h2o, aerosol): follow the truth, plus a smooth reanalysis-scale error
+def t_offset_k_prior_realistic(x_km):
+    return t_offset_k(x_km) + _bias_wave(x_km, 0.6, 0.25, 1900.0, 0.7)             # ~0.35-0.85 K
+
+
+def p_surface_hpa_prior_realistic(x_km):
+    return p_surface_hpa(x_km) + _bias_wave(x_km, -1.0, 0.4, 2100.0, 1.1)          # -0.6..-1.4 hPa
+
+
+def h2o_surface_vmr_prior_realistic(x_km):
+    return h2o_surface_vmr(x_km) * (1.0 + _bias_wave(x_km, 0.07, 0.02, 1700.0, 2.4))   # +5..+9 %
+
+
+def amplitude_aerosol_prior_realistic(x_km, label=None):
+    # x(0.68 +- 0.07): -25..-39 %. Amplitude and thickness errors MULTIPLY into the AOD (tau = amp*sigma*sqrt(2 pi)),
+    # so their product must also stay away from 1 (2026-09-21 fix: with x1.25 thickness the AOD nearly equalled the
+    # truth at the haze peak); see thickness_aerosol_prior_realistic and check_realistic_prior.py's AOD check.
+    return amplitude_aerosol(x_km, label) * (0.68 + 0.07 * np.sin(2.0 * np.pi * (np.asarray(x_km, dtype=float) + 1400.0) / 1500.0 + 0.4))
+
+
+def height_aerosol_prior_realistic(x_km, label=None):
+    # Reanalysis-like AND terrain-following (2026-09-21): centre = the PRIOR's surface pressure minus the true
+    # offset plus a smooth positive error, i.e. the layer sits 2300..4700 Pa higher above the surface than the
+    # truth. The absolute-pressure error is then (prior p_surface - true p_surface) - error <= -2300 Pa:
+    # sign-definite, never zero, and it cannot run into the surface.
+    off = aerosol_offset_pa(x_km) + _bias_wave(x_km, 3500.0, 1200.0, 2300.0, 0.9)
+    return _terrain_following_height(x_km, p_surface_hpa_prior_realistic(x_km) * 100.0, off)
+
+
+def thickness_aerosol_prior_realistic(x_km, label=None):
+    # x(1.12 +- 0.05): +7..+17 %. Product with the amplitude factor (0.61..0.75 x 1.07..1.17) = 0.65..0.88, so the prior
+    # AOD is 12..35 % LOW everywhere (never equal to the truth).
+    return thickness_aerosol(x_km, label) * (1.12 + 0.05 * np.sin(2.0 * np.pi * (np.asarray(x_km, dtype=float) + 1400.0) / 1900.0 + 1.7))
+
+
+def albedo_for_label_prior_realistic(x_km, label):
+    # Unlike the others this CANNOT be made strictly sign-definite: the truth carries random fine-scale
+    # texture (~10% of the mean), so the structural (patch-layout) prior's own error changes sign
+    # wherever the texture crosses it. A large smooth multiplicative bias (+20..+30%, plausible for a
+    # climatological albedo prior) pushes the fraction of the slit within 4% of the truth to ~2%
+    # (measured: bias 0.08 -> 24%, 0.15 -> 13%, 0.25 -> 1.9%, 0.35 -> 0.2%), which is the closest to
+    # "never" that is not an unrealistic bias. See scripts/check_realistic_prior.py.
+    return albedo_for_label_prior(x_km, label) * (1.0 + _bias_wave(x_km, 0.25, 0.05, 1500.0, 0.3))
+
+
+STATE_FIELDS_PRIOR_REALISTIC = {
+    "co2_ppm": lambda x: xco2_ppm_prior_realistic(x),
+    "ch4_ppb": lambda x: xch4_ppb_prior_realistic(x),
+    "co_ppb": lambda x: xco_ppb_prior_realistic(x),
+    "h2o_surface_vmr": lambda x: h2o_surface_vmr_prior_realistic(x),
+    "p_surface_hpa": lambda x: p_surface_hpa_prior_realistic(x),
+    "t_offset_k": lambda x: t_offset_k_prior_realistic(x),
+}
+
+SURFACE_FIELDS_PRIOR_REALISTIC = {
+    "albedo": albedo_for_label_prior_realistic,
+    "amplitude_aerosol": amplitude_aerosol_prior_realistic,
+    "height_aerosol": height_aerosol_prior_realistic,
+    "thickness_aerosol": thickness_aerosol_prior_realistic,
+}
+
+SURFACE_PRIOR_FIELD_SETS["realistic"] = SURFACE_FIELDS_PRIOR_REALISTIC
+
 #: Standardized registry every prior-selecting call site reads from by
 #: NAME, instead of each caller wiring its own boolean/enum for one prior
 #: at a time (the pattern this replaces: `gd_joint_block_whole_slit_
@@ -832,6 +981,7 @@ PRIOR_FIELD_SETS = {
     "structural": STATE_FIELDS_PRIOR,
     "co2_plus1pct": STATE_FIELDS_PRIOR_CO2_PLUS1PCT,
     "co2_plus1pct_psurf_minus1pct": STATE_FIELDS_PRIOR_CO2_PLUS1PCT_PSURF_MINUS1PCT,
+    "realistic": STATE_FIELDS_PRIOR_REALISTIC,     # ACOS-like: climatological gases + reanalysis-like T/p/h2o/aerosol, never exact
 }
 
 

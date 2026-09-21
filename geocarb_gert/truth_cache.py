@@ -53,7 +53,11 @@ from .paths import REPO_ROOT
 #: along_slit_scene.build_lookup_radiance, the GD polynomial CSV/loader,
 #: focalplane.py's spatial PSF convolution, ...) -- this is the only guard
 #: against silently serving a stale cached render after such a change.
-TRUTH_CACHE_VERSION = 4  # 2026-09-20: eta convention changed (gd_polynomials.eta_of_s,
+TRUTH_CACHE_VERSION = 6  # 2026-09-21 (later): terrain-following aerosol height (p_surface - offset) and an urban
+                         # AOD bump at the -500 km CO2 plume -- both change every aerosol render; v5 entries are stale.
+                         # (v5) 2026-09-21: the truth aerosol height is now capped >= 100 m above the surface
+                         # (along_slit_scene.height_aerosol), so every aerosol render changes; v4 entries are stale.
+                         # (v4) 2026-09-20: eta convention changed (gd_polynomials.eta_of_s,
                          # slit-image centred/scaled; was s/s_max) -- every rendered
                          # image places the scene at different detector rows, so every
                          # version-3 entry is stale and must not be served.

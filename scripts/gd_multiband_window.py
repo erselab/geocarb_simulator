@@ -133,7 +133,7 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
                                gamma=gamma, row_bounds=gjr.ROW_BOUNDS, sigmas=gjr.ROW_SIGMAS)
 
     # ---- per-band forwards / Jacobians on the views -------------------------------------
-    pools = []
+    pools = []          # one mutable single-element holder per band (so a hung pool can be replaced)
     forwards, lins = [], []
     try:
         for i, f in enumerate(fpas):
@@ -141,12 +141,27 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
             forwards.append(build_forward_state(f, b["rows"], anchor_etas, view, b["spectrum"], b["wn_hires"],
                                                 b["ils"], pad=retrieval_pad, state_interp=state_interp,
                                                 n_workers=anchor_workers, spatial_psf_fwhm_px=psf_fwhm_px))
-            pool = jac.LinearizePool(anchor_workers, b["spectrum_jac"]) if anchor_workers > 1 else None
-            pools.append(pool)
+            holder = [jac.LinearizePool(anchor_workers, b["spectrum_jac"]) if anchor_workers > 1 else None]
+            pools.append(holder)
 
-            def lin(x, f=f, b=b, view=view, pool=pool):
-                return jac.linearize(f, b["rows"], anchor_etas, view, b["spectrum_jac"], b["wn_hires"], b["ils"],
-                                     x, pad=gjr.PAD, state_interp=state_interp, n_workers=anchor_workers, pool=pool)
+            def lin(x, f=f, b=b, view=view, holder=holder):
+                # 2026-09-21: sweep tile 11 (job 1945175_11) died with a PoolHangError -- one run_L stalled from
+                # the START of an iteration for the whole 3600 s guard, with no OOM (real memory ~40 GB of a
+                # 160 GB limit) and healthy sibling tasks. Cause unknown; the cheap mitigation is to rebuild that
+                # band's pool and repeat the (deterministic, side-effect-free) linearization instead of losing
+                # the window's hours of work.
+                for attempt in range(3):
+                    try:
+                        return jac.linearize(f, b["rows"], anchor_etas, view, b["spectrum_jac"], b["wn_hires"],
+                                             b["ils"], x, pad=gjr.PAD, state_interp=state_interp,
+                                             n_workers=anchor_workers, pool=holder[0])
+                    except jac.PoolHangError as e:
+                        if holder[0] is None or attempt == 2:
+                            raise
+                        print(f"  PoolHangError in FPA{f} linearize (attempt {attempt + 1}/3): rebuilding that "
+                              f"band's pool and retrying -- {str(e)[:120]}", flush=True)
+                        holder[0].close()
+                        holder[0] = jac.LinearizePool(anchor_workers, b["spectrum_jac"])
             lins.append(lin)
         fwd = mb.stack_forward(forwards)
         jac_joint = mb.stack_linearize(lins)
@@ -162,9 +177,9 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
                                            jacobian_fn=jac_joint, return_cov=True, return_avk=True)
         resid = y - fwd(x)
     finally:
-        for p in pools:
-            if p is not None:
-                p.close()
+        for holder in pools:
+            if holder[0] is not None:
+                holder[0].close()
     sizes = [y_true[f].size for f in fpas]
     splits = np.cumsum([0] + sizes)
     return dict(fpas=fpas, rows_by_fpa={f: tuple(rows_by_fpa[f]) for f in fpas}, G=G, bin_centers=bin_centers,
@@ -189,6 +204,9 @@ def main():
     ap.add_argument("--anchor-workers", type=int, default=1)
     ap.add_argument("--solver", default="single_scatter", choices=["single_scatter", "xrtm"])
     ap.add_argument("--g-ratio", type=float, default=None, help="bins per row ratio (default: config; the production sweeps use 1)")
+    ap.add_argument("--prior-fields", default="structural", choices=sorted(als.PRIOR_FIELD_SETS),
+                    help="named prior set (als.PRIOR_FIELD_SETS); 'realistic' = ACOS-like climatological gases + "
+                         "reanalysis-like T/p/h2o/aerosol, never exactly the truth (2026-09-21)")
     ap.add_argument("--overlap", type=int, default=2)
     ap.add_argument("--out", default=None, help="output pickle (default under results/realistic_prior/multiband/)")
     a = ap.parse_args()
@@ -203,9 +221,10 @@ def main():
     else:
         ap.error("give --rows or --tile")
     res = solve_window_multiband(rows, a.free.split(","), g_ratio=a.g_ratio, anchor_density=a.anchor_density,
-                                 anchor_mode=a.anchor_mode, solver=a.solver, anchor_workers=a.anchor_workers)
+                                 anchor_mode=a.anchor_mode, solver=a.solver, anchor_workers=a.anchor_workers, prior_fields=a.prior_fields)
     name = f"mb_fpa{'-'.join(map(str, fpas))}_" + "_".join(f"r{f}-{rows[f][0]}-{rows[f][1]}" for f in fpas) \
-        + f"_free-{'-'.join(t.split('_')[0] for t in a.free.split(','))}_{a.anchor_mode}_g{a.g_ratio if a.g_ratio is not None else 'cfg'}_etaslit"
+        + f"_free-{'-'.join(t.split('_')[0] for t in a.free.split(','))}_{a.anchor_mode}_g{a.g_ratio if a.g_ratio is not None else 'cfg'}_etaslit" \
+        + ("" if a.prior_fields == "structural" else f"_prior-{a.prior_fields}")
     out = Path(a.out) if a.out else REPO / "results/realistic_prior/multiband" / f"{name}.pkl"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "wb") as fh:

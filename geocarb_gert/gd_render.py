@@ -304,6 +304,7 @@ def predict_neighborhood(
     spatial_psf_fwhm_px: float = 1.5,
     pad: int = 4,
     footprint: bool = False,
+    active_fn: Callable | None = None,
 ) -> np.ndarray:
     """:func:`image`'s own per-row loop, restricted to a small row window --
     the forward operator for the joint multi-atmosphere block
@@ -342,6 +343,16 @@ def predict_neighborhood(
         of the two edges), not assumed increasing with row, since a
         distortion convention could in principle reverse that locally.
 
+    active_fn : callable, optional
+        ``footprint=True`` only (2026-09-21, sparse Jacobian operator). ``active_fn(eta_lo,
+        eta_hi) -> bool mask`` over one row's columns (see
+        :func:`geocarb_gert.focalplane.footprint_active_fn`): pixels it marks inactive are
+        EXACTLY zero for this scene, so they are skipped -- the whole row when none is
+        active -- and left as 0.0. The active pixels run the identical code on the identical
+        inputs, so the result is bit-for-bit the dense one. Used for a Jacobian column whose
+        scene field is nonzero only near one anchor (each column's operator otherwise costs a
+        full window render).
+
     Returns
     -------
     ndarray, shape (len(rows), 1024)
@@ -351,7 +362,10 @@ def predict_neighborhood(
     rows_padded = np.arange(max(0, row_lo), min(N_PX, row_hi + 1))
     cols = np.arange(N_PX, dtype=float)
 
-    A_pad = np.empty((len(rows_padded), N_PX), dtype=float)
+    if active_fn is not None and not footprint:
+        raise ValueError("active_fn is only defined for footprint=True")
+    A_pad = np.empty((len(rows_padded), N_PX), dtype=float) if active_fn is None \
+        else np.zeros((len(rows_padded), N_PX), dtype=float)
     for k, i in enumerate(rows_padded):
         if footprint:
             _, s_a = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i) - 0.5))
@@ -363,6 +377,13 @@ def predict_neighborhood(
             # separate from the along-slit footprint being integrated)
             lam_row, _ = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i)))
             nu_row = 1.0e4 / lam_row
+            if active_fn is not None:
+                m = active_fn(eta_row_lo, eta_row_hi)
+                if not m.any():
+                    continue                     # exactly zero row (A_pad was zero-initialised)
+                S_sub = np.asarray(radiance(eta_row_lo[m], eta_row_hi[m]), dtype=float)
+                A_pad[k, m] = _diagonal_ils_convolve(wn_hires, S_sub, nu_row[m], ils)
+                continue
             S_row = np.asarray(radiance(eta_row_lo, eta_row_hi), dtype=float)
         else:
             lam_row, s_row = xy_to_wavelength_slit(fpa, cols, np.full(N_PX, float(i)))
