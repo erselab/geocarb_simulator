@@ -4,7 +4,7 @@ Reads results/realistic_prior/multiband/mb_fpa0-2_r0-*_r2-*_free-co2-p-h2o-t-alb
 tile), matches each to build_window_tiles_multiband((0,2)) by its FPA0 rows, and prints a per-tile table plus rms
 errors (retrieved and prior) by width tier for p, h2o, T, CO2 and both albedo rows.
 
-    PYTHONPATH=.:<gert> python scripts/summarize_multiband_sweep.py
+    PYTHONPATH=.:<gert> python scripts/summarize_multiband_sweep.py [--prior realistic]
 """
 import glob
 import pickle
@@ -20,13 +20,15 @@ from geocarb_gert import along_slit_scene as als  # noqa: E402
 from geocarb_gert.multiband_geometry import build_window_tiles_multiband  # noqa: E402
 import gd_joint_block_retrieve as gjr  # noqa: E402
 
+PRIOR = sys.argv[sys.argv.index("--prior") + 1] if "--prior" in sys.argv else "structural"
+PSUF = "" if PRIOR == "structural" else f"_prior-{PRIOR}"
 ROWS = [("p_surface_hpa", None, "p [hPa]"), ("h2o_surface_vmr", None, "h2o (vmr)"), ("t_offset_k", None, "T [K]"),
         ("co2_ppm", None, "CO2 [ppm]"), ("albedo_O2_A", "O2_A", "albedo O2_A"),
         ("albedo_CO2_strong", "CO2_strong", "albedo CO2_str")]
 
 tiles = build_window_tiles_multiband((0, 2), gjr.MIN_WINDOW, 1.0, 2)
 by_rows = {tuple(t.rows[0]): i for i, t in enumerate(tiles)}
-files = sorted(glob.glob(str(REPO / "results/realistic_prior/multiband/mb_fpa0-2_r0-*_r2-*_free-co2-p-h2o-t-albedo_cover_g1.0_etaslit.pkl")))
+files = sorted(glob.glob(str(REPO / ("results/realistic_prior/multiband/mb_fpa0-2_r0-*_r2-*_free-co2-p-h2o-t-albedo_cover_g1.0_etaslit" + PSUF + ".pkl"))))
 res = {}
 for f in files:
     d = pickle.load(open(f, "rb"))
