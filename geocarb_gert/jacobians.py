@@ -1069,7 +1069,6 @@ class LinearizePool:
         self._shm_shape = None
         self._shm_dtype = None
         if self.n_workers > 1:
-            _ANCHOR_SPECTRA_G["spectrum_jac"] = spectrum_jac
             ctx = mp.get_context("fork")
             # 2026-09-22: `maxtasksperchild` -- confirmed (single-anchor repro, this session) that
             # every `solver="xrtm"` RT call leaks real, reachable memory (~40-50MB/call; survives
@@ -1086,7 +1085,9 @@ class LinearizePool:
             # overhead otherwise. Tune via env, not a constructor arg, since every call site here
             # (gd_multiband_window.py etc.) constructs this class far from any XRTM-specific choice.
             maxtasks = int(_os.environ.get("GEOCARB_ANCHOR_POOL_MAXTASKS", "20")) or None
-            self._anchor_pool = ctx.Pool(self.n_workers, maxtasksperchild=maxtasks)
+            self._anchor_pool = ctx.Pool(self.n_workers, maxtasksperchild=maxtasks,
+                                         initializer=_anchor_pool_worker_init,
+                                         initargs=(spectrum_jac,))
 
     def run_anchor(self, params_at_anchor, rows_needed, surface_at_anchor=None):
         """`None` return tells the caller to fall back to its own serial
@@ -1248,12 +1249,45 @@ class LinearizePool:
         self.close()
 
 
+def _anchor_pool_worker_init(spectrum_jac):
+    """`Pool(initializer=..., initargs=(spectrum_jac,))` -- runs once in EVERY
+    worker process this pool ever has, including one `maxtasksperchild`
+    respawns mid-solve (2026-09-22, found the hard way: the aerosol sweep's
+    two per-tile `LinearizePool`s, one per band, share the module-level
+    `_ANCHOR_SPECTRA_G` dict; setting it in `__init__` before the ORIGINAL
+    fork was fine -- each original worker's fork is a full copy of the parent
+    at that instant, so it keeps ITS OWN correct value no matter what the
+    parent does afterward. A RESPAWNED worker is different: `Pool`'s own
+    `_repopulate_pool` re-forks from the MAIN process's CURRENT state,
+    whenever the respawn happens to occur -- if band 2's `LinearizePool.
+    __init__` had since overwritten the shared dict, a later-respawned band-1
+    worker silently inherited band 2's `spectrum_jac`. Caught by
+    `_check_anchor_spectra_shapes`: anchor 0 (an original, never-respawned
+    worker) returned FPA0's real wn_hires length, later anchors (a respawned
+    worker) returned FPA2's -- two bands' results silently mixed within one
+    band's own anchor list, which would NOT have raised at all had both bands
+    happened to share the same hi-res length. `initializer`/`initargs`
+    fixes this properly: under a fork context they are copied into the CHILD
+    at ITS OWN process-start (not pickled, not read from a shared global), so
+    `spectrum_jac` here is always the one THIS pool's constructor closed
+    over, regardless of any other pool's state -- correct on the original
+    fork AND every respawn. `_ANCHOR_SPECTRA_G` is kept only for
+    `anchor_spectra_and_derivs`'s OWN plain (non-persistent-pool) path below,
+    which forks fresh every call and was never exposed to this bug."""
+    global _ANCHOR_POOL_SPECTRUM_JAC
+    _ANCHOR_POOL_SPECTRUM_JAC = spectrum_jac
+
+
+_ANCHOR_POOL_SPECTRUM_JAC = None
+
+
 def _anchor_spectra_one_persistent(arg):
     """`LinearizePool.run_anchor`'s worker -- everything needed travels in
-    `arg` except the unpicklable `spectrum_jac` closure, which came in via
-    `_ANCHOR_SPECTRA_G` before this (long-lived) worker was forked."""
+    `arg` except the unpicklable `spectrum_jac` closure, set once per worker
+    PROCESS by `_anchor_pool_worker_init` (see its own docstring for why that
+    -- not `_ANCHOR_SPECTRA_G` -- is what must be trusted here)."""
     g, p, surf, rows_needed = arg
-    spectrum_jac = _ANCHOR_SPECTRA_G["spectrum_jac"]
+    spectrum_jac = _ANCHOR_POOL_SPECTRUM_JAC
     s, d = _call_spectrum_jac_picklable(spectrum_jac, p, rows_needed, surf)
     return g, np.asarray(s, dtype=float), d
 
