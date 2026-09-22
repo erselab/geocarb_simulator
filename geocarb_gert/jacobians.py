@@ -827,6 +827,23 @@ def _anchor_spectra_one(g):
     return g, np.asarray(s, dtype=float), d
 
 
+
+def _check_anchor_spectra_shapes(S, context: str = ""):
+    """Every anchor's spectrum must be the same shape -- a mismatch means a worker
+    returned something malformed (2026-09-22: seen once, tile 6 of the aerosol sweep,
+    after 2 PoolHangError rebuilds of a persistent LinearizePool; np.asarray(S) later
+    silently built a ragged/object array and failed 3 calls downstream with an opaque
+    "inhomogeneous shape" error). Raise HERE, with the anchor index, instead.
+    """
+    shapes = {g: np.shape(s) for g, s in enumerate(S)}
+    bad = {g: sh for g, sh in shapes.items() if sh != shapes[0]}
+    if bad:
+        raise RuntimeError(
+            f"anchor_spectra_and_derivs{(' (' + context + ')') if context else ''}: "
+            f"anchor spectra have inconsistent shapes -- anchor 0 is {shapes[0]}, "
+            f"mismatches: {bad}. A worker likely returned a malformed result (stale "
+            f"pool state after a rebuild?); do not trust this solve.")
+
 def anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
                               surface_at_anchor=None, n_workers: int = 1,
                               pool: "LinearizePool | None" = None):
@@ -864,6 +881,7 @@ def anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
             s, d = spectrum_jac(p, rows_needed, surf)
             S.append(np.asarray(s, dtype=float))
             dS.append(d)
+        _check_anchor_spectra_shapes(S, context="serial")
         return S, dS
 
     _ANCHOR_SPECTRA_G.update(dict(spectrum_jac=spectrum_jac, params_at_anchor=params_at_anchor,
@@ -875,6 +893,7 @@ def anchor_spectra_and_derivs(spectrum_jac, params_at_anchor, rows_needed,
         for g, s, d in _map_with_timeout(pool, _anchor_spectra_one, range(n_anchor),
                                          chunksize=2, label="anchor_spectra_and_derivs"):
             S[g], dS[g] = s, d
+    _check_anchor_spectra_shapes(S, context="fresh pool")
     return S, dS
 
 
@@ -1052,7 +1071,22 @@ class LinearizePool:
         if self.n_workers > 1:
             _ANCHOR_SPECTRA_G["spectrum_jac"] = spectrum_jac
             ctx = mp.get_context("fork")
-            self._anchor_pool = ctx.Pool(self.n_workers)
+            # 2026-09-22: `maxtasksperchild` -- confirmed (single-anchor repro, this session) that
+            # every `solver="xrtm"` RT call leaks real, reachable memory (~40-50MB/call; survives
+            # `malloc_trim`, so NOT glibc fragmentation, and survives reusing one XRTMSolver/model
+            # instance, so NOT Python-level (re)construction either -- points at xrtm's own C
+            # `save_tree` cache, xrtm/src/xrtm_save_tree.c, never pruned between radiance() calls).
+            # A worker that lives for a whole GN solve (many iterations x many anchors, the whole
+            # point of this persistent pool -- see class docstring) accumulates this without bound;
+            # the aerosol sweep hit 400-600+ GB RSS from it. `maxtasksperchild` respawns a worker
+            # after this many anchor tasks so the OS reclaims what xrtm itself never frees, WITHOUT
+            # reforking the whole pool (that's the Sec.17/"climbs each iteration" cost this class
+            # exists to avoid -- a per-worker respawn forks fresh from THIS __init__'s parent state,
+            # not from a growing solve-in-progress object). Only matters for solver="xrtm"; harmless
+            # overhead otherwise. Tune via env, not a constructor arg, since every call site here
+            # (gd_multiband_window.py etc.) constructs this class far from any XRTM-specific choice.
+            maxtasks = int(_os.environ.get("GEOCARB_ANCHOR_POOL_MAXTASKS", "20")) or None
+            self._anchor_pool = ctx.Pool(self.n_workers, maxtasksperchild=maxtasks)
 
     def run_anchor(self, params_at_anchor, rows_needed, surface_at_anchor=None):
         """`None` return tells the caller to fall back to its own serial
@@ -1069,6 +1103,7 @@ class LinearizePool:
         for g, s, d in _map_with_timeout(self._anchor_pool, _anchor_spectra_one_persistent,
                                          args, chunksize=2, label="LinearizePool.run_anchor"):
             S[g], dS[g] = s, d
+        _check_anchor_spectra_shapes(S, context="persistent LinearizePool")
         return S, dS
 
     def run_L(self, jobs, *, fpa, rows_win, wn_hires, scene_etas, ils, pad):

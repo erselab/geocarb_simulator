@@ -14,10 +14,18 @@
 #   FREE=co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo [PRIOR=realistic] sbatch --export=ALL --array=... scripts/submit_multiband_sweep.sbatch
 # SOLVER=xrtm and AEROSOL=1 select the aerosol arm (required together with free amplitude/height_aerosol).
 # PRIOR = als.PRIOR_FIELD_SETS name (default structural); realistic = ACOS-like prior that never equals the truth.
+# MAXTASKS overrides GEOCARB_ANCHOR_POOL_MAXTASKS (2026-09-22: xrtm's own C save_tree cache leaks real,
+# reachable memory on every RT call, never freed until the model is destroyed -- confirmed via malloc_trim
+# NOT reclaiming it; jacobians.LinearizePool respawns an anchor-pool worker after this many anchor tasks
+# so the OS reclaims what xrtm itself never does. Default here (15) sized for THIS sbatch's own 180G/16
+# workers/2 bands (32 total XRTM-calling workers/tile): worst-case ~150MB/task (aerosol + the p_surface
+# fallback's 2 extra RT calls) x 15 tasks =~2.2GB/worker peak between respawns, well under 180G/32 =~5.6GB.
+# Override for a different --mem/--cpus-per-task/band-count combination.
 set -euo pipefail
 cd /scratch/scrowel3_lab/geocarb_simulator
 export PYTHONPATH="/scratch/scrowel3_lab/geocarb_simulator:/scratch/scrowel3_lab/gert"
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+export GEOCARB_ANCHOR_POOL_MAXTASKS="${MAXTASKS:-15}"
 : "${FREE:?set FREE=... in the environment}"
 SHM_NAME="/dev/shm/geocarb_L_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID:-0}"
 trap 'rm -f "${SHM_NAME}"*' EXIT
