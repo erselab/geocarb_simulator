@@ -22,19 +22,26 @@ from geocarb_gert.multiband_geometry import build_window_tiles_multiband  # noqa
 import gd_joint_block_retrieve as gjr  # noqa: E402
 
 PRIOR = sys.argv[sys.argv.index("--prior") + 1] if "--prior" in sys.argv else "structural"
+AEROSOL = "--aerosol" in sys.argv
 PSUF = "" if PRIOR == "structural" else f"_prior-{PRIOR}"
+ASUF = "_aero" if AEROSOL else ""
+FREE_TAG = "co2-p-h2o-t-albedo-amplitude-height" if AEROSOL else "co2-p-h2o-t-albedo"
 feats = [(-500.0, 60.0, 6.0)] + list(als.HOTSPOTS_CO2)
 tiles = build_window_tiles_multiband((0, 2), gjr.MIN_WINDOW, 1.0, 2)
 by = {tuple(t.rows[0]): i for i, t in enumerate(tiles)}
 X, P, V, TILE = [], [], [], []
-for f in sorted(glob.glob(str(REPO / f"results/realistic_prior/multiband/mb_fpa0-2_r0-*_r2-*_free-co2-p-h2o-t-albedo_cover_g1.0_etaslit{PSUF}.pkl"))):
+for f in sorted(glob.glob(str(REPO / f"results/realistic_prior/multiband/mb_fpa0-2_r0-*_r2-*_free-{FREE_TAG}_cover_g1.0_etaslit{PSUF}{ASUF}.pkl"))):
     d = pickle.load(open(f, "rb"))
     k = by.get(tuple(d["rows_by_fpa"][0]))
     if k is None:
         continue
     p = d["joint"]["params"]["co2_ppm"]
     x = np.asarray(p["positions"]) * als.SLIT_HALF_KM
-    X += list(x); P += list(p["prior"]); V += list(p["values"]); TILE += [k] * len(x)
+    if x.size > 2:                     # 2026-09-22 (user): drop each tile's boundary anchors -- least
+        x, pr_, vv = x[1:-1], p["prior"][1:-1], p["values"][1:-1]
+    else:
+        pr_, vv = p["prior"], p["values"]
+    X += list(x); P += list(pr_); V += list(vv); TILE += [k] * len(x)
 X, P, V, TILE = map(np.array, (X, P, V, TILE))
 T = als.xco2_ppm(X)
 ep, ev = P - T, V - T
@@ -96,6 +103,6 @@ a.set_xlabel("along-slit position [km]", color=ink)
 a.set_ylabel("CO$_2$ [ppm]", color=ink)
 a.set_title("Zoom on the -500 km plume", loc="left", color=ink, fontsize=11)
 plt.tight_layout()
-out = REPO / f"plots/co2_multiband_prior_truth_posterior{PSUF}.png"
+out = REPO / f"plots/co2_multiband_prior_truth_posterior{PSUF}{ASUF}.png"
 fig.savefig(out, dpi=140, bbox_inches="tight")
 print("saved", out)
