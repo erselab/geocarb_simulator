@@ -83,6 +83,7 @@ from geocarb_gert.spectrum import simulate_spectrum  # noqa: E402
 from geocarb_gert.gd_polynomials import rows_crossed  # noqa: E402
 from geocarb_gert.gd_render import available_cpus  # noqa: E402
 from geocarb_gert.gd_polynomials import eta_of_s  # noqa: E402
+from geocarb_gert.multiband_geometry import eta_to_row as _geom_eta_to_row  # noqa: E402
 from geocarb_gert import jacobians as jac  # noqa: E402
 from geocarb_gert.mission_config import RetrievalDefaults  # noqa: E402
 from geocarb_gert.radiometry import geocarb_noise_model  # noqa: E402
@@ -405,18 +406,27 @@ def _solve_window(row_lo: int, row_hi: int):
 
     rows_win = np.arange(row_lo, row_hi + 1)
     width = len(rows_win)
-    G = max(2, int(round(width / g_ratio)))
     cols = np.arange(1024.0)
     eta_all = np.stack([_eta_of(FPA, cols, np.full(1024, float(i))) for i in rows_win])
     bin_scheme = _SWEEP.get("bin_scheme", "pixel-density")
-    if bin_scheme == "uniform":
-        # The original (pre-pixel-density) placement -- np.linspace over the
-        # window's own eta range, no pixel-density weighting. Kept for the
-        # diagnostics.py-style uniform-vs-pixel-density comparison; not the
-        # production default.
-        bin_centers = np.linspace(float(eta_all.min()), float(eta_all.max()), G)
+    geom_bins = _SWEEP.get("geometry_config_bin_centers", {}).get((row_lo, row_hi))
+    if geom_bins is not None:
+        # 2026-09-23 (user: cross-run bin alignment -- see gd_export_geometry_config.py's own
+        # docstring): bins at the EXACT eta positions another run (typically a reference
+        # multi-band sweep) used for this same tile, instead of this run's own pixel-density
+        # placement -- lets single-band and multi-band retrieved bins be compared bin-for-bin.
+        bin_centers = np.asarray(geom_bins, dtype=float)
+        G = bin_centers.size
     else:
-        bin_centers = pixel_density_bin_centers(eta_all.ravel(), G)
+        G = max(2, int(round(width / g_ratio)))
+        if bin_scheme == "uniform":
+            # The original (pre-pixel-density) placement -- np.linspace over the
+            # window's own eta range, no pixel-density weighting. Kept for the
+            # diagnostics.py-style uniform-vs-pixel-density comparison; not the
+            # production default.
+            bin_centers = np.linspace(float(eta_all.min()), float(eta_all.max()), G)
+        else:
+            bin_centers = pixel_density_bin_centers(eta_all.ravel(), G)
     # kept only for gd_joint_block_whole_slit_plot.py's own backward-compat
     # reconstruction (prior_co2_ppm_bins * x_coarse); the real solve below
     # gets its priors from state_spec_from_scene(..., uniform=uniform_priors)
@@ -1486,6 +1496,13 @@ def main() -> int:
                          "eta_hi, G), the original placement pixel-density superseded -- "
                          "kept for the diagnostics.py-style comparison, not recommended "
                          "for production runs.")
+    ap.add_argument("--geometry-config", default=None,
+                    help="JSON from gd_export_geometry_config.py (2026-09-23, user: cross-run bin alignment) -- "
+                         "REPLACES this sweep's own tiling with the config's tile row ranges (this FPA's own "
+                         "rows_by_fpa entry) and bin_centers, so this run's bins land at the exact eta positions "
+                         "another run (typically a reference multi-band sweep) used, for a bin-for-bin comparison "
+                         "instead of overlay-only. --row-min/--row-max/--min-window/--window-scale/--overlap/"
+                         "--n-windows/--bin-scheme are all ignored when this is given.")
     ap.add_argument("--min-window", type=int, default=cfg.min_window,
                     help=f"minimum window radius (default {cfg.min_window})")
     ap.add_argument("--overlap", type=int, default=0,
@@ -1816,9 +1833,32 @@ def main() -> int:
     wide_win, wide_inst, albedo = band_basics(fpa, atm_center, absco, geo, solar)
     print("done.\n", flush=True)
 
-    all_tiles = build_window_tiles(fpa, row_min=args.row_min, row_max=args.row_max,
-                                   min_window=args.min_window,
-                                   window_scale=window_scale, overlap=args.overlap)
+    geometry_config_bin_centers = {}
+    if args.geometry_config:
+        import json
+        geom = json.load(open(args.geometry_config))
+        all_tiles = []
+        n_derived = 0
+        for t in geom["tiles"]:
+            rbf = t.get("rows_by_fpa")
+            if rbf is not None and str(fpa) in rbf:
+                lo, hi = rbf[str(fpa)]
+            else:
+                # 2026-09-23 (user: "the ability to specify values explicitly instead of just
+                # pointing to a reference pkl file") -- no rows_by_fpa (or none for THIS fpa) in
+                # this entry: derive FPA2's own row range from eta_lo/eta_hi directly.
+                lo, hi = int(_geom_eta_to_row(fpa, t["eta_lo"])), int(_geom_eta_to_row(fpa, t["eta_hi"]))
+                n_derived += 1
+            all_tiles.append((lo, hi))
+            geometry_config_bin_centers[(lo, hi)] = t["bin_centers"]
+        print(f"geometry-config: {len(all_tiles)} tiles from {args.geometry_config} "
+             f"(FPA{fpa}'s own row ranges, bins at the config's eta positions"
+             + (f"; {n_derived} tile(s) had no rows_by_fpa, derived from eta bounds" if n_derived else "") + ")",
+             flush=True)
+    else:
+        all_tiles = build_window_tiles(fpa, row_min=args.row_min, row_max=args.row_max,
+                                       min_window=args.min_window,
+                                       window_scale=window_scale, overlap=args.overlap)
     widths = [hi - lo + 1 for lo, hi in all_tiles]
     print(f"{len(all_tiles)} windows total, widths min={min(widths)} max={max(widths)} "
          f"mean={np.mean(widths):.1f}, total rows={sum(widths)}"
@@ -1913,7 +1953,8 @@ def main() -> int:
                        frozen_atmosphere_positions_mode=args.frozen_atmosphere_positions,
                        anchor_workers=args.anchor_workers,
                        retrieval_psf_fwhm_px=args.retrieval_psf_fwhm_px,
-                       bin_scheme=args.bin_scheme, with_aerosol=with_aerosol))
+                       bin_scheme=args.bin_scheme, with_aerosol=with_aerosol,
+                       geometry_config_bin_centers=geometry_config_bin_centers))
 
     n_workers = args.n_workers if args.n_workers is not None else available_cpus()
     if args.anchor_workers > 1 and n_workers > 1 and args.task_id is None:

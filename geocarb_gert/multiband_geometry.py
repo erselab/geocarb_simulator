@@ -175,6 +175,24 @@ def window_eta_extent(fpa: int, row_lo: int, row_hi: int, pad: int = 0) -> tuple
     return float(t["eta_lo"][a:b + 1].min()), float(t["eta_hi"][a:b + 1].max())
 
 
+def eta_to_row(fpa: int, eta) -> np.ndarray:
+    """Nearest detector row (centre column) for `eta` (scalar or array) -- the
+    inverse of `band_tables(fpa)["eta_c"]`, itself strictly increasing with row
+    (checked in `band_tables`). 2026-09-23 (user: "the ability to specify values
+    explicitly instead of just pointing to a reference pkl file" -- a geometry
+    config's tile eta_lo/eta_hi, hand-typed or exported, can stand in for
+    `rows_by_fpa` directly via this, so a config never STRICTLY needs a prior
+    run's own row ranges). A nearest-row lookup for window PLACEMENT, same
+    spirit as `gd_joint_block_retrieve.py`'s own local `eta_to_row` (x-axis
+    placement only) -- never used to reconstruct a physical quantity.
+    """
+    eta_c = band_tables(fpa)["eta_c"]
+    idx = np.searchsorted(eta_c, np.atleast_1d(eta))
+    idx = np.clip(idx, 0, len(eta_c) - 1)
+    rows = idx if np.ndim(eta) else int(idx[0])
+    return rows
+
+
 def joint_anchor_eta_range(window: MBWindow, pad: int) -> tuple:
     """Union over bands of :func:`window_eta_extent` -- the eta range the SHARED
     anchor grid must span so no band's pixel falls outside it."""

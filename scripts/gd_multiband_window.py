@@ -34,7 +34,7 @@ from geocarb_gert.joint_state import (build_forward_state, default_pad_for_psf, 
                                        pixel_density_bin_centers, state_spec_from_scene)
 from geocarb_gert.multiband import BandRef, joint_spec_from_scene  # noqa: E402
 from geocarb_gert.multiband_geometry import (build_window_tiles_multiband, band_tables,  # noqa: E402
-                                              joint_anchor_eta_range)
+                                              joint_anchor_eta_range, eta_to_row)
 
 _NO_AEROSOL = ("amplitude_aerosol", "height_aerosol", "thickness_aerosol")
 
@@ -51,13 +51,19 @@ def load_inputs():
 def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields="structural",
                            g_ratio=None, anchor_density=4, anchor_mode="cover", solver="xrtm",
                            state_interp=None, prior_form=None, gamma=None, anchor_workers=1,
-                           psf_fwhm_px=1.5, verbose=True, hook=None, aerosol=False):
+                           psf_fwhm_px=1.5, verbose=True, hook=None, aerosol=False,
+                           bin_centers_override=None):
     """Joint hi-res solve of one window.
 
     rows_by_fpa : {fpa: (row_lo, row_hi)}; the FIRST entry is the reference band (sets G).
     anchor_mode : "nominal" -- anchors at the reference band's rows +/- pad at the centre
                   column (exactly the single-band driver); "cover" -- a uniform eta grid
                   spanning every pixel of every band's padded rows (keystone included).
+    bin_centers_override (2026-09-23, user: geometry-config override for cross-run bin
+        alignment -- see scripts/gd_export_geometry_config.py's own docstring): an explicit eta
+        array replacing `pixel_density_bin_centers`'s own computation, e.g. so this run's bins
+        land at the SAME eta positions as a single-band run given the same geometry config. `G`
+        is then `len(bin_centers_override)`, not `width_ref / g_ratio`.
     """
     cfg = gjr._defaults
     g_ratio = cfg.g_ratio if g_ratio is None else g_ratio
@@ -85,8 +91,12 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
 
     # ---- shared eta bins and anchors ------------------------------------------------
     width_ref = len(B[ref]["rows"])
-    G = max(2, int(round(width_ref / g_ratio)))
-    bin_centers = pixel_density_bin_centers(np.concatenate([B[f]["eta_all"].ravel() for f in fpas]), G)
+    if bin_centers_override is not None:
+        bin_centers = np.asarray(bin_centers_override, dtype=float)
+        G = bin_centers.size
+    else:
+        G = max(2, int(round(width_ref / g_ratio)))
+        bin_centers = pixel_density_bin_centers(np.concatenate([B[f]["eta_all"].ravel() for f in fpas]), G)
     anchor_ext = max(gjr.PAD, retrieval_pad)
     if anchor_mode == "nominal":
         lo, hi = rows_by_fpa[ref]
@@ -216,12 +226,43 @@ def main():
     ap.add_argument("--aerosol", action="store_true",
                     help="truth scene and retrieval include the Gaussian aerosol layer (rows in --free are retrieved, "
                          "the rest frozen at truth); default off = no aerosol")
+    ap.add_argument("--geometry-config", default=None,
+                    help="JSON from gd_export_geometry_config.py, OR hand-authored with the same schema -- "
+                         "{\"tiles\": [{\"tile\": i, \"eta_lo\":..., \"eta_hi\":..., \"bin_centers\": [...], "
+                         "\"rows_by_fpa\": {\"0\": [lo,hi], ...}}]} -- gives this tile's bin_centers, and (if "
+                         "--rows/--tile alone weren't enough) its row ranges too: 'rows_by_fpa' if present, else "
+                         "derived per band from eta_lo/eta_hi via multiband_geometry.eta_to_row (2026-09-23, user: "
+                         "\"the ability to specify values explicitly instead of just pointing to a reference pkl "
+                         "file\" -- a config entry with only eta_lo/eta_hi/bin_centers, no rows_by_fpa, works too). "
+                         "Use with --tile to pick the entry (by its 'tile' field, not necessarily this run's own "
+                         "tile numbering); --rows still overrides rows if given alongside.")
     ap.add_argument("--out", default=None, help="output pickle (default under results/realistic_prior/multiband/)")
     a = ap.parse_args()
     fpas = [int(t) for t in a.fpas.split(",")]
+    geom_bin_centers = None
+    geom_rows = None
+    if a.geometry_config:
+        import json
+        geom = json.load(open(a.geometry_config))
+        if a.tile is None:
+            ap.error("--geometry-config requires --tile (to pick which entry to use)")
+        entry = next((t for t in geom["tiles"] if t["tile"] == a.tile), None)
+        if entry is None:
+            ap.error(f"--geometry-config has no entry for tile {a.tile}")
+        geom_bin_centers = entry["bin_centers"]
+        rbf = entry.get("rows_by_fpa")
+        if rbf is not None:
+            geom_rows = {f: tuple(rbf[str(f)]) for f in fpas}
+        else:
+            geom_rows = {f: (int(eta_to_row(f, entry["eta_lo"])), int(eta_to_row(f, entry["eta_hi"]))) for f in fpas}
+            print(f"geometry-config: tile {a.tile} has no rows_by_fpa -- derived from eta bounds via eta_to_row")
+        print(f"geometry-config: tile {a.tile} from {a.geometry_config} "
+             f"({len(geom_bin_centers)} bins, eta [{entry['eta_lo']:.4f},{entry['eta_hi']:.4f}], rows {geom_rows})")
     if a.rows:
         rows = {int(k): tuple(int(v) for v in r.split("-")) for k, r in (t.split(":") for t in a.rows.split(","))}
         rows = {f: rows[f] for f in fpas}
+    elif geom_rows is not None:
+        rows = geom_rows
     elif a.tile is not None:
         tiles = build_window_tiles_multiband(fpas, gjr.MIN_WINDOW, 1.0, a.overlap)
         rows = dict(tiles[a.tile].rows)
@@ -230,10 +271,11 @@ def main():
         ap.error("give --rows or --tile")
     res = solve_window_multiband(rows, a.free.split(","), g_ratio=a.g_ratio, anchor_density=a.anchor_density,
                                  anchor_mode=a.anchor_mode, solver=a.solver, anchor_workers=a.anchor_workers, prior_fields=a.prior_fields,
-                                 aerosol=a.aerosol)
+                                 aerosol=a.aerosol, bin_centers_override=geom_bin_centers)
     name = f"mb_fpa{'-'.join(map(str, fpas))}_" + "_".join(f"r{f}-{rows[f][0]}-{rows[f][1]}" for f in fpas) \
         + f"_free-{'-'.join(t.split('_')[0] for t in a.free.split(','))}_{a.anchor_mode}_g{a.g_ratio if a.g_ratio is not None else 'cfg'}_etaslit" \
-        + ("" if a.prior_fields == "structural" else f"_prior-{a.prior_fields}") + ("_aero" if a.aerosol else "")
+        + ("" if a.prior_fields == "structural" else f"_prior-{a.prior_fields}") + ("_aero" if a.aerosol else "") \
+        + ("_geomcfg" if a.geometry_config else "")
     out = Path(a.out) if a.out else REPO / "results/realistic_prior/multiband" / f"{name}.pkl"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "wb") as fh:
