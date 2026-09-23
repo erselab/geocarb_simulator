@@ -87,8 +87,22 @@ print(f"{len(files)} tiles, {len(df)} bins pooled")
 print("\ncorrelation matrix:")
 print(df.corr().round(3).to_string())
 
-g = sns.pairplot(df, diag_kind="hist", plot_kws=dict(s=8, alpha=0.35, edgecolor="none"),
-                 diag_kws=dict(bins=40))
+def annotate_corr(x, y, **kws):
+    """Upper triangle (2026-09-23, user: 'labels that have the names of the pairwise variables
+    and the correlation between them'): each pair's own column names + Pearson r, text size/color
+    scaled by |r| so strong pairs are visually obvious without cross-referencing the printed
+    matrix above."""
+    r = np.corrcoef(x, y)[0, 1]
+    ax = plt.gca()
+    ax.set_facecolor(plt.cm.RdBu_r((r + 1) / 2, alpha=0.25))
+    ax.annotate(f"{x.name}\nvs\n{y.name}\nr = {r:+.2f}", xy=(0.5, 0.5), xycoords=ax.transAxes,
+               ha="center", va="center", fontsize=8 + 6 * abs(r), fontweight="bold" if abs(r) > 0.5 else "normal")
+
+
+g = sns.PairGrid(df)
+g.map_diag(plt.hist, bins=40)
+g.map_lower(sns.scatterplot, s=8, alpha=0.35, edgecolor="none")
+g.map_upper(annotate_corr)
 g.figure.suptitle(f"Multiband error correlations ({PRIOR} prior{', aerosol' if AEROSOL else ', no aerosol'})",
                   y=1.01)
 out = REPO / f"plots/multiband_error_pairplot{PSUF}{ASUF}.png"
