@@ -21,14 +21,19 @@ from geocarb_gert.multiband_geometry import build_window_tiles_multiband  # noqa
 import gd_joint_block_retrieve as gjr  # noqa: E402
 
 PRIOR = sys.argv[sys.argv.index("--prior") + 1] if "--prior" in sys.argv else "structural"
+AEROSOL = "--aerosol" in sys.argv
 PSUF = "" if PRIOR == "structural" else f"_prior-{PRIOR}"
 ROWS = [("p_surface_hpa", None, "p [hPa]"), ("h2o_surface_vmr", None, "h2o (vmr)"), ("t_offset_k", None, "T [K]"),
         ("co2_ppm", None, "CO2 [ppm]"), ("albedo_O2_A", "O2_A", "albedo O2_A"),
         ("albedo_CO2_strong", "CO2_strong", "albedo CO2_str")]
+if AEROSOL:
+    ROWS += [("amplitude_aerosol", None, "amp_aer"), ("height_aerosol", None, "height_aer [Pa]")]
 
 tiles = build_window_tiles_multiband((0, 2), gjr.MIN_WINDOW, 1.0, 2)
 by_rows = {tuple(t.rows[0]): i for i, t in enumerate(tiles)}
-files = sorted(glob.glob(str(REPO / ("results/realistic_prior/multiband/mb_fpa0-2_r0-*_r2-*_free-co2-p-h2o-t-albedo_cover_g1.0_etaslit" + PSUF + ".pkl"))))
+FREE_TAG = "co2-p-h2o-t-albedo-amplitude-height" if AEROSOL else "co2-p-h2o-t-albedo"
+ASUF = "_aero" if AEROSOL else ""
+files = sorted(glob.glob(str(REPO / (f"results/realistic_prior/multiband/mb_fpa0-2_r0-*_r2-*_free-{FREE_TAG}_cover_g1.0_etaslit" + PSUF + ASUF + ".pkl"))))
 res = {}
 for f in files:
     d = pickle.load(open(f, "rb"))
@@ -38,11 +43,29 @@ for f in files:
 missing = [i for i in range(len(tiles)) if i not in res]
 print(f"{len(res)}/{len(tiles)} tiles present; missing: {missing}\n")
 
+#: 2026-09-22 (user: "let's leave out the boundary points when computing tile-scale
+#: statistics. We know they aren't well constrained."): each row's own position grid is
+#: least redundantly covered by nearby anchors at its two ends (found investigating a
+#: p_surface outlier -- the tile-0 edge bin sat in a ~12km gap to its neighbor vs a
+#: ~2.8km median elsewhere, and excluding it alone flipped that tile's p rms back below
+#: the prior's). Drop each row's first/last position before pooling, everywhere, not
+#: just for the tile that surfaced it.
+DROP_BOUNDARY = True
+
+
 def errs(d, name, label):
     p = d["joint"]["params"][name]
     x = np.asarray(p["positions"]) * als.SLIT_HALF_KM
-    tr = np.asarray(als.SURFACE_FIELDS["albedo"](x, label)) if label else np.asarray(als.STATE_FIELDS[name](x))
-    return np.asarray(p["values"]) - tr, np.asarray(p["prior"]) - tr
+    if label:
+        tr = np.asarray(als.SURFACE_FIELDS["albedo"](x, label))
+    elif name in als.SURFACE_FIELDS:                    # amplitude_aerosol / height_aerosol -- shared, no band label
+        tr = np.asarray(als.SURFACE_FIELDS[name](x))
+    else:
+        tr = np.asarray(als.STATE_FIELDS[name](x))
+    e, pe = np.asarray(p["values"]) - tr, np.asarray(p["prior"]) - tr
+    if DROP_BOUNDARY and e.size > 2:
+        e, pe = e[1:-1], pe[1:-1]
+    return e, pe
 
 print("tile  width  n_free  t_solve[s]  rms_resid  FPA0      FPA2")
 for i in sorted(res):
