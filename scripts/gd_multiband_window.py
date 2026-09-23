@@ -233,7 +233,9 @@ def main():
                          "--rows/--tile alone weren't enough) its row ranges too: 'rows_by_fpa' if present, else "
                          "derived per band from eta_lo/eta_hi via multiband_geometry.eta_to_row (2026-09-23, user: "
                          "\"the ability to specify values explicitly instead of just pointing to a reference pkl "
-                         "file\" -- a config entry with only eta_lo/eta_hi/bin_centers, no rows_by_fpa, works too). "
+                         "file\" -- a config entry with only eta_lo/eta_hi/bin_centers, no rows_by_fpa, works too; "
+                         "an optional per-tile 'overlap' integer then symmetrically pads that derived range at BOTH "
+                         "edges -- adjacent tiles' resulting coverage is NOT checked for overlap with each other). "
                          "Use with --tile to pick the entry (by its 'tile' field, not necessarily this run's own "
                          "tile numbering); --rows still overrides rows if given alongside.")
     ap.add_argument("--out", default=None, help="output pickle (default under results/realistic_prior/multiband/)")
@@ -254,8 +256,18 @@ def main():
         if rbf is not None:
             geom_rows = {f: tuple(rbf[str(f)]) for f in fpas}
         else:
-            geom_rows = {f: (int(eta_to_row(f, entry["eta_lo"])), int(eta_to_row(f, entry["eta_hi"]))) for f in fpas}
-            print(f"geometry-config: tile {a.tile} has no rows_by_fpa -- derived from eta bounds via eta_to_row")
+            # 2026-09-23 (user: "let's add the 'overlap' field to symmetrically pad the rows"):
+            # an optional per-tile integer, added/subtracted at BOTH edges of the eta-derived row
+            # range -- unlike build_window_tiles_multiband's own overlap (interior boundaries
+            # only, never the outermost edge of the whole tile set), since a single hand-authored
+            # entry has no neighbor context to know which edges are "interior." If adjacent
+            # tiles' padded ranges end up covering the same rows, nothing here detects or
+            # prevents it -- see this flag's own --geometry-config help for what that means.
+            ov = int(entry.get("overlap", 0))
+            geom_rows = {f: (max(0, int(eta_to_row(f, entry["eta_lo"])) - ov),
+                             min(gjr.ROW_MAX_IDX, int(eta_to_row(f, entry["eta_hi"])) + ov)) for f in fpas}
+            print(f"geometry-config: tile {a.tile} has no rows_by_fpa -- derived from eta bounds via eta_to_row"
+                 + (f", padded by {ov} rows at both edges" if ov else ""))
         print(f"geometry-config: tile {a.tile} from {a.geometry_config} "
              f"({len(geom_bin_centers)} bins, eta [{entry['eta_lo']:.4f},{entry['eta_hi']:.4f}], rows {geom_rows})")
     if a.rows:

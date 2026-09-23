@@ -1499,10 +1499,14 @@ def main() -> int:
     ap.add_argument("--geometry-config", default=None,
                     help="JSON from gd_export_geometry_config.py (2026-09-23, user: cross-run bin alignment) -- "
                          "REPLACES this sweep's own tiling with the config's tile row ranges (this FPA's own "
-                         "rows_by_fpa entry) and bin_centers, so this run's bins land at the exact eta positions "
-                         "another run (typically a reference multi-band sweep) used, for a bin-for-bin comparison "
-                         "instead of overlay-only. --row-min/--row-max/--min-window/--window-scale/--overlap/"
-                         "--n-windows/--bin-scheme are all ignored when this is given.")
+                         "rows_by_fpa entry, if given -- else derived from eta_lo/eta_hi via eta_to_row, "
+                         "optionally padded by a per-tile 'overlap' integer at BOTH edges) and bin_centers, so "
+                         "this run's bins land at the exact eta positions another run (typically a reference "
+                         "multi-band sweep) used, for a bin-for-bin comparison instead of overlay-only. "
+                         "--row-min/--row-max/--min-window/--window-scale/--overlap/--n-windows/--bin-scheme are "
+                         "all ignored when this is given (each tile's OWN padding, if any, comes from its "
+                         "'overlap' field instead). Adjacent tiles' resulting row/eta coverage is NOT checked "
+                         "for overlap with each other.")
     ap.add_argument("--min-window", type=int, default=cfg.min_window,
                     help=f"minimum window radius (default {cfg.min_window})")
     ap.add_argument("--overlap", type=int, default=0,
@@ -1846,8 +1850,15 @@ def main() -> int:
             else:
                 # 2026-09-23 (user: "the ability to specify values explicitly instead of just
                 # pointing to a reference pkl file") -- no rows_by_fpa (or none for THIS fpa) in
-                # this entry: derive FPA2's own row range from eta_lo/eta_hi directly.
-                lo, hi = int(_geom_eta_to_row(fpa, t["eta_lo"])), int(_geom_eta_to_row(fpa, t["eta_hi"]))
+                # this entry: derive FPA2's own row range from eta_lo/eta_hi directly. Optional
+                # per-tile "overlap" (user: "add the 'overlap' field to symmetrically pad the
+                # rows") pads BOTH edges -- unlike build_window_tiles_multiband's own overlap
+                # (interior boundaries only), since a standalone entry has no neighbor context
+                # to know which edge is interior. Nothing here checks whether that padding (or
+                # the eta_lo/eta_hi values themselves) makes this tile overlap another.
+                ov = int(t.get("overlap", 0))
+                lo = max(0, int(_geom_eta_to_row(fpa, t["eta_lo"])) - ov)
+                hi = min(ROW_MAX_IDX, int(_geom_eta_to_row(fpa, t["eta_hi"])) + ov)
                 n_derived += 1
             all_tiles.append((lo, hi))
             geometry_config_bin_centers[(lo, hi)] = t["bin_centers"]
