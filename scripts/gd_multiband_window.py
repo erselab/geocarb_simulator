@@ -217,7 +217,10 @@ def main():
     ap.add_argument("--anchor-mode", default="cover", choices=["nominal", "cover"])
     ap.add_argument("--anchor-density", type=int, default=4)
     ap.add_argument("--anchor-workers", type=int, default=1)
-    ap.add_argument("--solver", default="xrtm", choices=["single_scatter", "xrtm"])
+    ap.add_argument("--solver", default=None, choices=["single_scatter", "xrtm"],
+                    help="default (omit): 'xrtm' if --aerosol, else 'single_scatter' (2026-09-23, user: "
+                         "'when aerosol is not included, the RT model should default to single_scatter' -- "
+                         "confirmed equivalent there, see gd_joint_block_retrieve.py's own --solver help).")
     ap.add_argument("--g-ratio", type=float, default=None, help="bins per row ratio (default: config; the production sweeps use 1)")
     ap.add_argument("--prior-fields", default="structural", choices=sorted(als.PRIOR_FIELD_SETS),
                     help="named prior set (als.PRIOR_FIELD_SETS); 'realistic' = ACOS-like climatological gases + "
@@ -281,6 +284,9 @@ def main():
         print(f"tile {a.tile}/{len(tiles)}: eta [{tiles[a.tile].eta_lo:.4f},{tiles[a.tile].eta_hi:.4f}] rows {rows}")
     else:
         ap.error("give --rows or --tile")
+    if a.solver is None:
+        a.solver = "xrtm" if a.aerosol else "single_scatter"
+        print(f"--solver not given: defaulting to '{a.solver}' ({'aerosol' if a.aerosol else 'no aerosol'})")
     res = solve_window_multiband(rows, a.free.split(","), g_ratio=a.g_ratio, anchor_density=a.anchor_density,
                                  anchor_mode=a.anchor_mode, solver=a.solver, anchor_workers=a.anchor_workers, prior_fields=a.prior_fields,
                                  aerosol=a.aerosol, bin_centers_override=geom_bin_centers)

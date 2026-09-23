@@ -1451,14 +1451,20 @@ def main() -> int:
                          "scripts/gd_jacobian_validate.py --interp-kind nearest), or to "
                          "exercise a state target (dispersion, albedo) neither matrix "
                          "covered.")
-    ap.add_argument("--solver", type=str, default="xrtm",
+    ap.add_argument("--solver", type=str, default=None,
                     choices=["single_scatter", "xrtm"],
-                    help="which gert RTSolver both truth generation and the retrieval's "
-                         "own forward model use (2026-09-15, Phase 2 of the XRTM "
-                         "integration plan; default flipped to 'xrtm' 2026-09-23 once "
-                         "its memory/correctness issues -- see jacobians.LinearizePool's "
-                         "own maxtasksperchild/initializer docstrings -- were fixed). "
-                         "'single_scatter' is gert.rt_solver.SingleScatterSolver -- Beer-Lambert "
+                    help="which gert RTSolver both truth generation and the retrieval's own forward model use "
+                         "(2026-09-15, Phase 2 of the XRTM integration plan). Default (omit this flag): 'xrtm' "
+                         "if an aerosol row ends up free (see --aerosol/with_aerosol below), else "
+                         "'single_scatter' -- 2026-09-23, user: 'when aerosol is not included, the RT model "
+                         "should default to single_scatter'. Confirmed equivalent there: SingleScatterSolver's "
+                         "own I_scatter term is unconditionally zero without aerosol kwargs (no Rayleigh-"
+                         "scattered-light source term exists in that solver at all -- only aerosol has one), so "
+                         "its I = I_direct IS already the genuine absorption/extinction-only radiance (Rayleigh "
+                         "still attenuates via tau_total, just adds nothing back) -- xrtm's multiple-scattering "
+                         "machinery buys real accuracy only once something (aerosol) actually needs it, at "
+                         "~32x the per-anchor cost measured earlier. Pass --solver explicitly to override either "
+                         "way. 'single_scatter' is gert.rt_solver.SingleScatterSolver -- Beer-Lambert "
                          "+ single-scatter aerosol, no multiple scattering. 'xrtm' is "
                          "gert.rt_solver.XRTMSolver(method='two_stream') -- real "
                          "multiple scattering, and (only under this solver) genuinely "
@@ -1721,6 +1727,11 @@ def main() -> int:
                     or "thickness_aerosol" in free_check)
     if with_aerosol and not args.aerosol:
         print("NOTE: --aerosol implied (an aerosol row is in --free).", flush=True)
+    if args.solver is None:
+        # 2026-09-23 (user): default to single_scatter when there's no aerosol -- see --solver's own help.
+        args.solver = "xrtm" if with_aerosol else "single_scatter"
+        print(f"--solver not given: defaulting to '{args.solver}' ({'aerosol free' if with_aerosol else 'no aerosol'})",
+             flush=True)
     if args.resolution_matched_anchor_density is not None and args.anchor_density != args.resolution_matched_anchor_density:
         print(f"WARNING: --resolution-matched-anchor-density "
              f"{args.resolution_matched_anchor_density} != --anchor-density "

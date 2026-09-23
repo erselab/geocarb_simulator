@@ -24,7 +24,8 @@ def main():
     ap.add_argument("--free", required=True)
     ap.add_argument("--anchor-workers", type=int, default=1)
     ap.add_argument("--g-ratio", type=float, default=1.0)
-    ap.add_argument("--solver", default="xrtm", choices=["single_scatter", "xrtm"])
+    ap.add_argument("--solver", default=None, choices=["single_scatter", "xrtm"],
+                    help="default: xrtm if --aerosol, else single_scatter (2026-09-23)")
     ap.add_argument("--prior-fields", default="structural")
     ap.add_argument("--aerosol", action="store_true")
     ap.add_argument("--rel-step", type=float, default=1e-3, help="FD step in units of the row's dx scale")
@@ -73,7 +74,8 @@ def main():
 
     ok = gmw.solve_window_multiband(rows, a.free.split(","), g_ratio=a.g_ratio, anchor_mode="cover",
                                     anchor_workers=a.anchor_workers, hook=hook, verbose=False,
-                                    solver=a.solver, prior_fields=a.prior_fields, aerosol=a.aerosol)
+                                    solver=(a.solver or ("xrtm" if a.aerosol else "single_scatter")),
+                                    prior_fields=a.prior_fields, aerosol=a.aerosol)
     sys.exit(0 if ok else 1)
 
 

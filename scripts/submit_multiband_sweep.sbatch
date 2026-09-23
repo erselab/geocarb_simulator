@@ -12,11 +12,11 @@
 # non-zero (Slurm FAILED) -- unlike the single-band driver it does not record an error and
 # exit 0. Pass the free set through the environment (--export splits at commas):
 #   FREE=co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo [PRIOR=realistic] sbatch --export=ALL --array=... scripts/submit_multiband_sweep.sbatch
-# SOLVER=xrtm is now the DEFAULT (2026-09-23, user: "make the two-stream version the default RT and
-# relegate single scatter to the options" -- flipped everywhere once XRTM's memory/correctness issues
-# were fixed, see this file's own MAXTASKS comment). AEROSOL=1 additionally requires free
-# amplitude/height_aerosol. SOLVER=single_scatter opts back out (no aerosol-height/thickness Jacobian
-# in that case -- see gd_joint_block_retrieve.py's own --solver help).
+# SOLVER: if unset, gd_multiband_window.py itself now defaults to xrtm when AEROSOL=1 else
+# single_scatter (2026-09-23, user: "when aerosol is not included, the RT model should default to
+# single_scatter" -- single_scatter's own I_scatter term is unconditionally zero without aerosol
+# kwargs, so it's already exactly absorption/extinction-only there; xrtm's multiple-scattering cost
+# only buys real accuracy once aerosol is actually free). Set SOLVER explicitly to override either way.
 # PRIOR = als.PRIOR_FIELD_SETS name (default structural); realistic = ACOS-like prior that never equals the truth.
 # MAXTASKS overrides GEOCARB_ANCHOR_POOL_MAXTASKS (2026-09-22: xrtm's own C save_tree cache leaks real,
 # reachable memory on every RT call, never freed until the model is destroyed -- confirmed via malloc_trim
@@ -36,4 +36,4 @@ trap 'rm -f "${SHM_NAME}"*' EXIT
 /gpfs/fs1/home/scrowel3/miniforge3/envs/analysis/bin/python -u scripts/gd_multiband_window.py \
     --fpas 0,2 --tile "${SLURM_ARRAY_TASK_ID}" --anchor-mode cover --g-ratio 1 \
     --free "${FREE}" --prior-fields "${PRIOR:-structural}" --anchor-workers "${SLURM_CPUS_PER_TASK}" \
-    --solver "${SOLVER:-xrtm}" ${AEROSOL:+--aerosol}
+    ${SOLVER:+--solver "${SOLVER}"} ${AEROSOL:+--aerosol}
