@@ -80,12 +80,14 @@ for f in files:
         p = params[name]
         e_coarse = np.asarray(p["values"])[1:-1] - truth_of(name, x_coarse)[1:-1]   # drop ITS OWN boundary too
         tile_err[name] = np.interp(x_fine_k, x_coarse[1:-1], e_coarse)
+    tile_err["along-slit [km]"] = x_fine_k              # NOT a plotted variable -- scatter color only
     rows_out.append(pd.DataFrame(tile_err))
 df = pd.concat(rows_out, ignore_index=True)
 df = df.rename(columns=LABELS)
+plot_vars = [c for c in df.columns if c != "along-slit [km]"]
 print(f"{len(files)} tiles, {len(df)} bins pooled")
 print("\ncorrelation matrix:")
-print(df.corr().round(3).to_string())
+print(df[plot_vars].corr().round(3).to_string())
 
 def annotate_corr(x, y, **kws):
     """Upper triangle (2026-09-23, user: 'labels that have the names of the pairwise variables
@@ -99,12 +101,26 @@ def annotate_corr(x, y, **kws):
                ha="center", va="center", fontsize=8 + 6 * abs(r), fontweight="bold" if abs(r) > 0.5 else "normal")
 
 
-g = sns.PairGrid(df)
+ETA_NORM = plt.Normalize(vmin=-1400, vmax=1400)
+
+
+def scatter_by_eta(x, y, **kws):
+    """Lower triangle (2026-09-23, user: 'color the scatterplot points by eta value') -- each
+    point's along-slit km position, not just which tile it came from, so a correlation that's
+    actually localized to one part of the slit (e.g. the low-albedo region flagged separately)
+    is visible directly rather than looking like a uniform cloud."""
+    c = df.loc[x.index, "along-slit [km]"]
+    plt.scatter(x, y, c=c, cmap="coolwarm", norm=ETA_NORM, s=8, alpha=0.45, edgecolor="none")
+
+
+g = sns.PairGrid(df, vars=plot_vars)
 g.map_diag(plt.hist, bins=40)
-g.map_lower(sns.scatterplot, s=8, alpha=0.35, edgecolor="none")
+g.map_lower(scatter_by_eta)
 g.map_upper(annotate_corr)
 g.figure.suptitle(f"Multiband error correlations ({PRIOR} prior{', aerosol' if AEROSOL else ', no aerosol'})",
                   y=1.01)
+g.figure.colorbar(plt.cm.ScalarMappable(norm=ETA_NORM, cmap="coolwarm"), ax=g.axes, shrink=0.5,
+                  label="along-slit position [km]", location="right", pad=0.02)
 out = REPO / f"plots/multiband_error_pairplot{PSUF}{ASUF}.png"
 g.figure.savefig(out, dpi=130, bbox_inches="tight")
 print("saved", out)
