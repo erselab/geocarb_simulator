@@ -237,7 +237,7 @@ def build_window_tiles(fpa: int, row_min: int = 0, row_max: int = ROW_MAX_IDX,
     return tiles
 
 
-def _make_state_spectrum(absco, wide_inst, geo, solar, albedo, solver: str = "single_scatter"):
+def _make_state_spectrum(absco, wide_inst, geo, solar, albedo, solver: str = "xrtm"):
     """spectrum(params_dict[, surface_dict]) -> hi-res radiance, built
     straight from `als.atmosphere_from_params`. Deliberately NOT gert's
     StateVector.gas_scaling, which only knows how to scale gases and would
@@ -455,7 +455,7 @@ def _solve_window(row_lo: int, row_hi: int):
                   if ("albedo" in free or vary_albedo or with_aerosol) else None)
     corr_length = _SWEEP.get("corr_length")          # None -> per-row physical defaults
     prior_form = _SWEEP.get("prior_form", "exponential")
-    rt_solver = _SWEEP.get("solver", "single_scatter")
+    rt_solver = _SWEEP.get("solver", "xrtm")
     spectrum = _make_state_spectrum(absco, wide_inst, geo, solar, albedo, solver=rt_solver)
 
     anchor_ext = max(PAD, retrieval_pad)
@@ -1441,12 +1441,14 @@ def main() -> int:
                          "scripts/gd_jacobian_validate.py --interp-kind nearest), or to "
                          "exercise a state target (dispersion, albedo) neither matrix "
                          "covered.")
-    ap.add_argument("--solver", type=str, default="single_scatter",
+    ap.add_argument("--solver", type=str, default="xrtm",
                     choices=["single_scatter", "xrtm"],
                     help="which gert RTSolver both truth generation and the retrieval's "
                          "own forward model use (2026-09-15, Phase 2 of the XRTM "
-                         "integration plan). 'single_scatter' (default, unchanged "
-                         "behavior) is gert.rt_solver.SingleScatterSolver -- Beer-Lambert "
+                         "integration plan; default flipped to 'xrtm' 2026-09-23 once "
+                         "its memory/correctness issues -- see jacobians.LinearizePool's "
+                         "own maxtasksperchild/initializer docstrings -- were fixed). "
+                         "'single_scatter' is gert.rt_solver.SingleScatterSolver -- Beer-Lambert "
                          "+ single-scatter aerosol, no multiple scattering. 'xrtm' is "
                          "gert.rt_solver.XRTMSolver(method='two_stream') -- real "
                          "multiple scattering, and (only under this solver) genuinely "

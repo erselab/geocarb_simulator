@@ -164,7 +164,7 @@ def _build_aerosol_kwargs(surface: Optional[dict], n_wn: int, geo,
 def simulate_spectrum(atm_params: dict, surface: Optional[dict], absco, wide_inst,
                       geo, solar, jacobians: bool = False,
                       aerosol_type: str = "smoke",
-                      solver: str = "single_scatter") -> SpectrumResult:
+                      solver: str = "xrtm") -> SpectrumResult:
     """Build the atmosphere from `atm_params` (the kwargs
     `along_slit_scene.atmosphere_from_params` takes) and run one
     `gert.ForwardModel` pass.
@@ -207,7 +207,7 @@ def simulate_spectrum(atm_params: dict, surface: Optional[dict], absco, wide_ins
 def spectrum_and_jacobian(atm_params: dict, rows, absco, wide_inst, geo, solar,
                           surface: Optional[dict] = None,
                           aerosol_type: str = "smoke",
-                          solver: str = "single_scatter"):
+                          solver: str = "xrtm"):
     """``(S_hires, {row: dS/d(param)})`` -- the analytic-Jacobian
     counterpart of `simulate_spectrum`. Row dispatch is delegated to
     `geocarb_gert.jacobians` (`SURFACE_ROW_JACOBIAN`, `gas_dI_dparam`,

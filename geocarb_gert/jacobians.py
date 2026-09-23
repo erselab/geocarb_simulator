@@ -672,7 +672,7 @@ def height_aerosol_dI_dparam_fd(absco, wide_inst, geo, solar, atm, alb, slope,
     return (_I(height_aerosol_val + h) - _I(height_aerosol_val - h)) / (2.0 * h)
 
 
-def make_spectrum_jac(absco, wide_inst, geo, solar, albedo, solver: str = "single_scatter"):
+def make_spectrum_jac(absco, wide_inst, geo, solar, albedo, solver: str = "xrtm"):
     """``spectrum_jac(params, rows) -> (S_hires, {row: dS/d(param)})``.
 
     Thin wrapper around `geocarb_gert.spectrum.spectrum_and_jacobian`

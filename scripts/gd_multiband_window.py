@@ -49,7 +49,7 @@ def load_inputs():
 
 
 def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields="structural",
-                           g_ratio=None, anchor_density=4, anchor_mode="cover", solver="single_scatter",
+                           g_ratio=None, anchor_density=4, anchor_mode="cover", solver="xrtm",
                            state_interp=None, prior_form=None, gamma=None, anchor_workers=1,
                            psf_fwhm_px=1.5, verbose=True, hook=None, aerosol=False):
     """Joint hi-res solve of one window.
@@ -207,7 +207,7 @@ def main():
     ap.add_argument("--anchor-mode", default="cover", choices=["nominal", "cover"])
     ap.add_argument("--anchor-density", type=int, default=4)
     ap.add_argument("--anchor-workers", type=int, default=1)
-    ap.add_argument("--solver", default="single_scatter", choices=["single_scatter", "xrtm"])
+    ap.add_argument("--solver", default="xrtm", choices=["single_scatter", "xrtm"])
     ap.add_argument("--g-ratio", type=float, default=None, help="bins per row ratio (default: config; the production sweeps use 1)")
     ap.add_argument("--prior-fields", default="structural", choices=sorted(als.PRIOR_FIELD_SETS),
                     help="named prior set (als.PRIOR_FIELD_SETS); 'realistic' = ACOS-like climatological gases + "

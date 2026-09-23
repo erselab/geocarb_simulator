@@ -24,7 +24,7 @@ def main():
     ap.add_argument("--free", required=True)
     ap.add_argument("--anchor-workers", type=int, default=1)
     ap.add_argument("--g-ratio", type=float, default=1.0)
-    ap.add_argument("--solver", default="single_scatter", choices=["single_scatter", "xrtm"])
+    ap.add_argument("--solver", default="xrtm", choices=["single_scatter", "xrtm"])
     ap.add_argument("--prior-fields", default="structural")
     ap.add_argument("--aerosol", action="store_true")
     ap.add_argument("--rel-step", type=float, default=1e-3, help="FD step in units of the row's dx scale")
