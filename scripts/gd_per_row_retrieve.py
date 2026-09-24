@@ -139,6 +139,13 @@ DEFAULT_SNR_BY_FPA = {fpa: spec["SNR_ref"] for fpa, spec in RADIOMETRIC_SPEC_BY_
 _G = {}
 
 
+def render_solver(with_aerosol: bool) -> str:
+    """The RT solver `_band_setup`'s dense truth render uses -- ONE definition, shared by the render
+    closure and by `_band_setup_cached`'s cache inputs, so the two can never disagree. xrtm only
+    when aerosol is in the scene (2026-09-23 policy; see gd_joint_block_retrieve.py's --solver help)."""
+    return "xrtm" if with_aerosol else "single_scatter"
+
+
 def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_samples: int,
                 n_workers, uniform: bool, barcode: bool, barcode_bars: int,
                 noise: bool, noise_seed: int, realistic_barcode: bool = False,
@@ -197,7 +204,14 @@ def _band_setup(fpa: int, atm_center, absco, geo, solar, snr: float, n_lookup_sa
         # physics addition can't be silently missed from just this site.
         sfc = dict(surf_p or {})
         sfc["albedo"] = sfc.get("albedo", albedo)
-        return simulate_spectrum(atm_p, sfc, absco, wide_inst, geo, solar).I_hires
+        # 2026-09-24: EXPLICIT solver. This call relied on simulate_spectrum's own default, which
+        # the 2026-09-23 xrtm-default flip silently moved to xrtm -- and this is the dense
+        # WHOLE-SLIT render (hundreds of thousands of RT calls), so a no-aerosol single-band
+        # sweep's first task ran >3h and was OOM-killed at 60G (xrtm leaks ~50MB/call, docs
+        # Sec.36/commit 5099815) where the same render historically fit in 16G. Same policy as
+        # the drivers' --solver default: xrtm only when aerosol is in the scene.
+        return simulate_spectrum(atm_p, sfc, absco, wide_inst, geo, solar,
+                                 solver=render_solver(with_aerosol)).I_hires
 
     # Whole-slit anchor grid, uniform `dx_km` spacing -- `uniform`/`barcode`
     # collapse the ATMOSPHERE to one constant value via build_scene_fields
@@ -369,13 +383,14 @@ def _band_setup_cached(fpa: int, atm_center, absco, geo, solar, snr: float, n_lo
         barcode_bars=barcode_bars if scene in ("barcode", "realistic-barcode") else None,
         n_lookup_samples=n_lookup_samples, vary_albedo=vary_albedo,
         with_aerosol=with_aerosol,
+        render_solver=render_solver(with_aerosol),      # 2026-09-24: solver is part of the exact-match inputs
         spatial_psf_fwhm_px=_GEOCARB_CFG.focal_plane.measured.spatial_psf_fwhm_px,
         gd_csv_path=str(_GEOCARB_CFG.focal_plane.measured.gd_csv_path),
     )
     if resolution_tag is not None:
         key_kwargs["resolution_matched"] = resolution_tag
     key = truth_cache.cache_key(**key_kwargs)
-    cached = truth_cache.load(key)
+    cached = truth_cache.load(key, key_kwargs)          # served only on an exact metadata match
     if cached is not None:
         print(f"  truth cache HIT ({key})", flush=True)
         return cached
@@ -386,7 +401,7 @@ def _band_setup_cached(fpa: int, atm_center, absco, geo, solar, snr: float, n_lo
                        realistic_barcode, vary_albedo, fields, surface_fields,
                        with_aerosol=with_aerosol)
     cacheable = {k: v for k, v in band.items() if k not in ("radiance", "noise_arr")}
-    truth_cache.save(key, cacheable)
+    truth_cache.save(key, cacheable, key_kwargs)
     return cacheable
 
 

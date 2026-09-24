@@ -18,6 +18,14 @@ uses). Every current consumer of this cache
 must bypass the cache -- a bare ``KeyError`` on the returned dict makes
 that failure loud rather than silently serving a wrong/incomplete band.
 
+**Metadata and the exact-match requirement** (2026-09-24, v8): every entry is stored as
+``{"_meta": {cache_version, inputs, provenance}, "data": <band dict>}``. ``inputs`` is the exact
+set of render inputs (including the RT solver the render used); ``provenance`` (timestamp, git
+head, SLURM job/array task, host, argv) is for tracing only. :func:`load` serves an entry ONLY if
+it has ``_meta``, its version equals :data:`TRUTH_CACHE_VERSION`, and its recorded ``inputs`` equal
+the requested ones exactly -- otherwise it is a miss and the caller must re-render (the reason is
+printed). Query with :func:`describe` or ``scripts/list_truth_cache.py``.
+
 **Cache key**: a hash of every input that actually determines the render
 (see :func:`cache_key`'s callers), plus :data:`TRUTH_CACHE_VERSION` --
 bump that constant whenever a code change touches the deterministic
@@ -53,7 +61,10 @@ from .paths import REPO_ROOT
 #: along_slit_scene.build_lookup_radiance, the GD polynomial CSV/loader,
 #: focalplane.py's spatial PSF convolution, ...) -- this is the only guard
 #: against silently serving a stale cached render after such a change.
-TRUTH_CACHE_VERSION = 7  # 2026-09-21 (later): terrain-following aerosol height (p_surface - offset) and an urban
+TRUTH_CACHE_VERSION = 8  # 2026-09-24: entries now carry `_meta` (exact render inputs + provenance) and are
+                         # served ONLY on an exact inputs match; the render solver is part of the inputs. v7 and
+                         # older entries (no metadata) are never served.
+                         # (v7) 2026-09-21 (later): terrain-following aerosol height (p_surface - offset) and an urban
                          # AOD bump at the -500 km CO2 plume -- both change every aerosol render; v5 entries are stale.
                          # (v5) 2026-09-21: the truth aerosol height is now capped >= 100 m above the surface
                          # (along_slit_scene.height_aerosol), so every aerosol render changes; v4 entries are stale.
@@ -101,28 +112,91 @@ def cache_key(**fields) -> str:
     return h.hexdigest()[:24]
 
 
-def load(key: str, root: Optional[Path] = None) -> Optional[dict]:
-    """The cached dict, or ``None`` on a cache miss -- no file, or a
-    corrupt/unreadable one (treated as a miss, not an error: the caller's
-    fallback is always just 're-render it')."""
+def _normalize(inputs: dict) -> dict:
+    """`{name: repr(value)}`, sorted -- JSON-friendly, human-readable, and comparable with `==`
+    regardless of how the caller built the dict."""
+    return {k: repr(v) for k, v in sorted(inputs.items())}
+
+
+def _provenance() -> dict:
+    """Who/what/when produced an entry. NOT part of the exact-match requirement (a different
+    commit or job legitimately reuses a valid render) -- recorded so an entry can be traced."""
+    import datetime
+    import socket
+    import subprocess
+    import sys
+    git_head = None
+    try:
+        git_head = subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], capture_output=True,
+                                  text=True, timeout=20).stdout.strip() or None
+    except Exception:
+        pass                                   # git may not be on PATH (no `module load git` in a job)
+    return dict(created=datetime.datetime.now().isoformat(timespec="seconds"), git_head=git_head,
+                slurm_job_id=os.environ.get("SLURM_JOB_ID"), slurm_array_task_id=os.environ.get("SLURM_ARRAY_TASK_ID"),
+                host=socket.gethostname(), user=os.environ.get("USER"), argv=list(sys.argv))
+
+
+def load(key: str, inputs: dict, root: Optional[Path] = None, verbose: bool = True) -> Optional[dict]:
+    """The cached band dict, or ``None`` (a miss -- the caller re-renders).
+
+    HARD REQUIREMENT (2026-09-24, user: "induce a hard requirement that the experiment build a
+    new truth cache without exact matches to metadata"): an entry is served only if it carries
+    ``_meta`` AND its recorded ``cache_version`` equals :data:`TRUTH_CACHE_VERSION` AND its
+    recorded render ``inputs`` equal ``inputs`` exactly. Anything else -- no metadata (every
+    pre-v8 entry), a version or inputs mismatch, an unreadable file -- is a miss, with the reason
+    printed so a re-render is never a mystery. The key hash alone is deliberately not trusted.
+    """
     path = (root or cache_root()) / f"{key}.pkl"
     if not path.exists():
         return None
     try:
         with open(path, "rb") as f:
-            return pickle.load(f)
-    except Exception:
+            blob = pickle.load(f)
+    except Exception as e:
+        if verbose:
+            print(f"  truth cache entry {key} unreadable ({type(e).__name__}) -- treating as a miss", flush=True)
         return None
+    meta = blob.get("_meta") if isinstance(blob, dict) else None
+    if meta is None or "data" not in blob:
+        if verbose:
+            print(f"  truth cache entry {key} has NO metadata (pre-v8 format) -- refusing to serve it", flush=True)
+        return None
+    if meta.get("cache_version") != TRUTH_CACHE_VERSION:
+        if verbose:
+            print(f"  truth cache entry {key}: version {meta.get('cache_version')} != {TRUTH_CACHE_VERSION} -- miss", flush=True)
+        return None
+    want = _normalize(inputs)
+    have = meta.get("inputs", {})
+    if have != want:
+        diff = sorted(k for k in set(want) | set(have) if want.get(k) != have.get(k))
+        if verbose:
+            print(f"  truth cache entry {key}: inputs differ on {diff} -- miss", flush=True)
+        return None
+    return blob["data"]
 
 
-def save(key: str, data: dict, root: Optional[Path] = None) -> Path:
-    """Write ``data`` under ``key``, atomically (temp file + rename) so a
-    concurrent reader never observes a partial file."""
+def save(key: str, data: dict, inputs: dict, root: Optional[Path] = None) -> Path:
+    """Write ``data`` under ``key`` together with its ``_meta`` (exact render ``inputs``, version,
+    provenance), atomically (temp file + rename) so a concurrent reader never observes a partial
+    file."""
     root = root or cache_root()
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{key}.pkl"
     tmp = path.with_suffix(f".pkl.tmp{os.getpid()}")
+    meta = dict(cache_version=TRUTH_CACHE_VERSION, inputs=_normalize(inputs), provenance=_provenance())
     with open(tmp, "wb") as f:
-        pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(dict(_meta=meta, data=data), f, protocol=pickle.HIGHEST_PROTOCOL)
     tmp.replace(path)
     return path
+
+
+def describe(key: str, root: Optional[Path] = None) -> Optional[dict]:
+    """The stored ``_meta`` of entry ``key`` (inputs, version, provenance), or ``None`` if the
+    entry is missing/unreadable/pre-v8. Loads the whole pickle -- fine at ~10 MB per entry."""
+    path = (root or cache_root()) / f"{key}.pkl"
+    try:
+        with open(path, "rb") as f:
+            blob = pickle.load(f)
+        return blob.get("_meta") if isinstance(blob, dict) else None
+    except Exception:
+        return None
