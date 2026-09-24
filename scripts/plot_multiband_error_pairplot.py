@@ -42,6 +42,7 @@ PRIOR = sys.argv[sys.argv.index("--prior") + 1] if "--prior" in sys.argv else "s
 AEROSOL = "--aerosol" in sys.argv
 PSUF = "" if PRIOR == "structural" else f"_prior-{PRIOR}"
 ASUF = "_aero" if AEROSOL else ""
+SINGLE = "--single-band" in sys.argv     # FPA2-only merged sweep (no aerosol); same tiles/bins as the multi-band run
 FREE_TAG = "co2-p-h2o-t-albedo-amplitude-height" if AEROSOL else "co2-p-h2o-t-albedo"
 
 SHARED_ROWS = ["co2_ppm", "p_surface_hpa", "h2o_surface_vmr", "t_offset_k"]
@@ -61,11 +62,18 @@ def truth_of(name, x, label=None):
     return np.asarray(als.STATE_FIELDS[name](x))
 
 
-files = sorted(glob.glob(str(REPO / f"results/realistic_prior/multiband/mb_fpa0-2_r0-*_r2-*_free-{FREE_TAG}_cover_g1.0_etaslit{PSUF}{ASUF}.pkl")))
+SB_DIR = "results/realistic_prior/gd_joint_block_whole_slit_fpa2_gratio1_adens4_free-co2-p-h2o-t-albedo_nwin33_analytic_prior-realistic_valb_spos-anchor_fapos-anchor_etaslit"
+if SINGLE:
+    assert not AEROSOL and PRIOR == "realistic", "--single-band data exists only for the realistic-prior no-aerosol arm"
+    ALBEDO_ROWS = [("albedo", "CO2_strong")]
+    LABELS["albedo"] = "albedo CO2_str"
+    _sb = pickle.load(open(glob.glob(str(REPO / SB_DIR / "*.pkl"))[0], "rb"))["results"]
+    files = [_sb[k]["hires"] for k in sorted(_sb) if "hires" in _sb[k]]
+else:
+  files = sorted(glob.glob(str(REPO / f"results/realistic_prior/multiband/mb_fpa0-2_r0-*_r2-*_free-{FREE_TAG}_cover_g1.0_etaslit{PSUF}{ASUF}.pkl")))
 rows_out = []
 for f in files:
-    d = pickle.load(open(f, "rb"))
-    params = d["joint"]["params"]
+    params = f["params"] if SINGLE else pickle.load(open(f, "rb"))["joint"]["params"]
     x_coarse = np.asarray(params[SHARED_ROWS[0]]["positions"]) * als.SLIT_HALF_KM
     x_fine = np.asarray(params[ALBEDO_ROWS[0][0]]["positions"]) * als.SLIT_HALF_KM   # the master grid
     if x_coarse.size <= 2 or x_fine.size <= 2:
@@ -117,10 +125,10 @@ g = sns.PairGrid(df, vars=plot_vars)
 g.map_diag(plt.hist, bins=40)
 g.map_lower(scatter_by_eta)
 g.map_upper(annotate_corr)
-g.figure.suptitle(f"Multiband error correlations ({PRIOR} prior{', aerosol' if AEROSOL else ', no aerosol'})",
+g.figure.suptitle(f"{'Single-band (FPA2)' if SINGLE else 'Multiband'} error correlations ({PRIOR} prior{', aerosol' if AEROSOL else ', no aerosol'})",
                   y=1.01)
 g.figure.colorbar(plt.cm.ScalarMappable(norm=ETA_NORM, cmap="coolwarm"), ax=g.axes, shrink=0.5,
                   label="along-slit position [km]", location="right", pad=0.02)
-out = REPO / f"plots/multiband_error_pairplot{PSUF}{ASUF}.png"
+out = REPO / f"plots/{"singleband" if SINGLE else "multiband"}_error_pairplot{PSUF}{ASUF}.png"
 g.figure.savefig(out, dpi=130, bbox_inches="tight")
 print("saved", out)
