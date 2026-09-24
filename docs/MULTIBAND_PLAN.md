@@ -148,3 +148,24 @@ measured. Keep concurrency inside the atmos cap (6 nodes; 300G tasks are 1/node)
 - Directory-name collisions between band sets: tag with the band list.
 - Silent failures: the driver exits 0 after recording an error; scan part files
   for an `error` key, not just Slurm state.
+
+## 9. Planned: sbatch load-balancing table (added 2026-09-24, user request)
+
+Motivation: `submit_multiband_sweep.sbatch` requests a fixed 16 CPU / 180G / 5h per task (sized for the
+aerosol arm on FPA0+FPA2), which limits packing to ~2 tasks per atmos node. The FPA0+FPA1 / FPA0+FPA3
+no-aerosol smoke tests (tile 12, n_free 382) ran 7-8 min at ~4.4 cores average CPU with no OOM, so the
+fixed request is very likely over-sized for many configurations. `sacct`/`sstat` MaxRSS is unreliable
+here (double-counts pages shared across the anchor-pool workers), so peaks must be measured directly.
+
+Plan:
+1. Add an optional per-task peak-memory sampler (summed PSS over the process tree from `/proc`, plus wall
+   time and mean CPU) that writes a small JSON next to each result.
+2. Measure a grid of runs, one representative tile per cell (mid-slit and a wide/edge tile):
+   number of bands (1 / 2 / 4) and which bands; state-vector size (n_free); aerosol free or not
+   (single_scatter vs xrtm); number of tiles / tile width (rows and anchors per tile); anchor density;
+   g_ratio (1 / 0.5 / 0.25); `--anchor-workers` (CPUs) and `GEOCARB_ANCHOR_POOL_MAXTASKS`.
+3. Fit peak memory and wall time against those drivers (expected: anchors x bands x n_free for the
+   Jacobian, times workers for the pool) and publish a table of recommended `--cpus-per-task`, `--mem`,
+   `--time`, and tasks-per-node, with a safety margin (previous 60G under-request caused OOM-kills).
+4. Have the sbatch wrappers (or a helper that prints the `sbatch` line) pick the request from the table
+   and the 6-distinct-atmos-node cap, replacing the hand-set per-sweep values.

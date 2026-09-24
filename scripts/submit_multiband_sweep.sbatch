@@ -11,7 +11,7 @@
 # width tier on the command line (docs/MULTIBAND_PLAN.md phase 5/6). A failed window exits
 # non-zero (Slurm FAILED) -- unlike the single-band driver it does not record an error and
 # exit 0. Pass the free set through the environment (--export splits at commas):
-#   FREE=co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo [PRIOR=realistic] sbatch --export=ALL --array=... scripts/submit_multiband_sweep.sbatch
+#   [FPAS=0,2 default; e.g. FPAS=0,3] FREE=co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo [PRIOR=realistic] sbatch --export=ALL --array=... scripts/submit_multiband_sweep.sbatch
 # SOLVER: if unset, gd_multiband_window.py itself now defaults to xrtm when AEROSOL=1 else
 # single_scatter (2026-09-23, user: "when aerosol is not included, the RT model should default to
 # single_scatter" -- single_scatter's own I_scatter term is unconditionally zero without aerosol
@@ -34,6 +34,6 @@ export GEOCARB_ANCHOR_POOL_MAXTASKS="${MAXTASKS:-15}"
 SHM_NAME="/dev/shm/geocarb_L_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID:-0}"
 trap 'rm -f "${SHM_NAME}"*' EXIT
 /gpfs/fs1/home/scrowel3/miniforge3/envs/analysis/bin/python -u scripts/gd_multiband_window.py \
-    --fpas 0,2 --tile "${SLURM_ARRAY_TASK_ID}" --anchor-mode cover --g-ratio 1 \
+    --fpas "${FPAS:-0,2}" --tile "${SLURM_ARRAY_TASK_ID}" --anchor-mode cover --g-ratio 1 \
     --free "${FREE}" --prior-fields "${PRIOR:-structural}" --anchor-workers "${SLURM_CPUS_PER_TASK}" \
     ${SOLVER:+--solver "${SOLVER}"} ${AEROSOL:+--aerosol}
