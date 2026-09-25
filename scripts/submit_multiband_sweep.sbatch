@@ -20,6 +20,7 @@
 # AEROSOL=1 requires AEROSOL_TYPE=<smoke|dust|sulfate|sea_salt|cloud_water|registry_smoke...> (gd_multiband_window.py --aerosol-type;
 # no default). realistic per-band properties for the named types; registry_<type> reproduces the earlier two-slot runs.
 # PRIOR = als.PRIOR_FIELD_SETS name (default structural); realistic = ACOS-like prior that never equals the truth.
+# GEOM=<geometry config json> selects tile geometry+bin centres from a config (the tile index is then a config index; use for single-band runs so bins match a multi-band run).
 # MAXTASKS overrides GEOCARB_ANCHOR_POOL_MAXTASKS (2026-09-22: xrtm's own C save_tree cache leaks real,
 # reachable memory on every RT call, never freed until the model is destroyed -- confirmed via malloc_trim
 # NOT reclaiming it; jacobians.LinearizePool respawns an anchor-pool worker after this many anchor tasks
@@ -37,5 +38,5 @@ SHM_NAME="/dev/shm/geocarb_L_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID:-0}"
 trap 'rm -f "${SHM_NAME}"*' EXIT
 /gpfs/fs1/home/scrowel3/miniforge3/envs/analysis/bin/python -u scripts/gd_multiband_window.py \
     --fpas "${FPAS:-0,2}" --tile "${SLURM_ARRAY_TASK_ID}" --anchor-mode cover --g-ratio 1 \
-    --free "${FREE}" --prior-fields "${PRIOR:-structural}" --anchor-workers "${SLURM_CPUS_PER_TASK}" \
+    --free "${FREE}" ${GEOM:+--geometry-config "${GEOM}"} --prior-fields "${PRIOR:-structural}" --anchor-workers "${SLURM_CPUS_PER_TASK}" \
     ${SOLVER:+--solver "${SOLVER}"} ${AEROSOL:+--aerosol} ${AEROSOL_TYPE:+--aerosol-type "${AEROSOL_TYPE}"} ${NOISE_SEED:+--noise-seed "${NOISE_SEED}"}
