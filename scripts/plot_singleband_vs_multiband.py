@@ -48,7 +48,21 @@ if PAIR != 2:
 ROWS += [("p_surface_hpa", "surface pressure [hPa]"),
          ("h2o_surface_vmr", "H$_2$O surface vmr"), ("t_offset_k", "T offset [K]")]
 
-sb = pickle.load(open(glob.glob(str(REPO / SB_DIR / "*.pkl"))[0], "rb"))["results"]
+# Single-band arm (2026-09-25): by default the SAME single band run through the multi-band code (gd_multiband_window.py
+# --fpas <n> --geometry-config ...), so both arms share the code path and "cover" anchor grid; --sb-driver uses the
+# original single-band driver's results instead (its different anchor grid inflated the apparent single-band albedo
+# advantage; see scripts/compare_albedo_codepaths.py).
+SB_DRIVER = "--sb-driver" in sys.argv
+if SB_DRIVER:
+    sb = pickle.load(open(glob.glob(str(REPO / SB_DIR / "*.pkl"))[0], "rb"))["results"]
+ALB_SB = "albedo" if SB_DRIVER else f"albedo_{LABEL}"
+
+
+def sb_params(rows):
+    if SB_DRIVER:
+        return sb[rows]["hires"]["params"]
+    f = REPO / f"results/realistic_prior/multiband/mb_fpa{PAIR}_r{PAIR}-{rows[0]}-{rows[1]}_free-{FREE_TAG}_cover_g1.0_etaslit_prior-realistic_geomcfg{NSUF}.pkl"
+    return pickle.load(open(f, "rb"))["joint"]["params"]
 geom = json.load(open(GEOM))["tiles"]
 mb = {}
 for g in glob.glob(str(REPO / f"results/realistic_prior/multiband/mb_fpa0-{PAIR}_r0-*_r{PAIR}-*_free-{FREE_TAG}_cover_g1.0_etaslit_prior-realistic{NSUF}.pkl")):
@@ -57,7 +71,7 @@ for g in glob.glob(str(REPO / f"results/realistic_prior/multiband/mb_fpa0-{PAIR}
 tile_params = []
 for t in geom:
     rows = tuple(t["rows_by_fpa"][str(PAIR)])
-    tile_params.append((sb[rows]["hires"]["params"], mb[rows]))
+    tile_params.append((sb_params(rows), mb[rows]))
 print(f"{len(tile_params)} tiles (single-band and multi-band, identical bins)")
 
 
@@ -124,9 +138,9 @@ for name, ylabel in ROWS:
 # albedo: overlay only (different grids)
 Xs, Es, Xm, Em = [], [], [], []
 for ps, pm in tile_params:
-    xs = np.asarray(ps["albedo"]["positions"]) * als.SLIT_HALF_KM
+    xs = np.asarray(ps[ALB_SB]["positions"]) * als.SLIT_HALF_KM
     xm = np.asarray(pm[f"albedo_{LABEL}"]["positions"]) * als.SLIT_HALF_KM
-    Xs += list(xs[1:-1]); Es += list((np.asarray(ps["albedo"]["values"]) - truth("albedo", xs, LABEL))[1:-1])
+    Xs += list(xs[1:-1]); Es += list((np.asarray(ps[ALB_SB]["values"]) - truth("albedo", xs, LABEL))[1:-1])
     Xm += list(xm[1:-1]); Em += list((np.asarray(pm[f"albedo_{LABEL}"]["values"]) - truth("albedo", xm, LABEL))[1:-1])
 Xs, Es, Xm, Em = map(np.array, (Xs, Es, Xm, Em))
 rs, rm = np.sqrt(np.mean(Es ** 2)), np.sqrt(np.mean(Em ** 2))

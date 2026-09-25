@@ -33,6 +33,7 @@ SHARED = {1: ["co2_ppm", "p_surface_hpa", "h2o_surface_vmr", "t_offset_k"],
           2: ["co2_ppm", "p_surface_hpa", "h2o_surface_vmr", "t_offset_k"],
           3: ["ch4_ppb", "co_ppb", "p_surface_hpa", "h2o_surface_vmr", "t_offset_k"]}
 ETA_NORM = plt.Normalize(vmin=-1400, vmax=1400)
+SB_DRIVER = "--sb-driver" in sys.argv      # default: the single band is run through the multi-band code (same anchor grid)
 
 
 def config(pair):
@@ -50,7 +51,7 @@ def truth(name, x, label=None):
 def tile_frame(params, pair, arm):
     """One tile's error DataFrame on the albedo (finest) grid."""
     lab = LABELS[pair]
-    alb = ({f"albedo {lab}": (f"albedo_{lab}", lab)} if arm == "mb" else {f"albedo {lab}": ("albedo", lab)})
+    alb = ({f"albedo {lab}": (f"albedo_{lab}", lab)} if (arm == "mb" or not SB_DRIVER) else {f"albedo {lab}": ("albedo", lab)})
     if arm == "mb":
         alb["albedo O2_A"] = ("albedo_O2_A", "O2_A")
     first = next(iter(alb.values()))[0]
@@ -70,7 +71,9 @@ def tile_frame(params, pair, arm):
 def frames(pair, arm, seed):
     tag, nw, geom = config(pair)
     nsuf = f"_noise{seed}" if seed else ""
-    if arm == "sb":
+    if arm == "sb" and not SB_DRIVER:      # single band through the multi-band code (default since 2026-09-25)
+        get = lambda key: pickle.load(open(REPO / f"results/realistic_prior/multiband/mb_fpa{pair}_r{pair}-{key[0]}-{key[1]}_free-{tag}_cover_g1.0_etaslit_prior-realistic_geomcfg{nsuf}.pkl", "rb"))["joint"]["params"]
+    elif arm == "sb":
         sd = (f"results/realistic_prior/gd_joint_block_whole_slit_fpa{pair}_gratio1_adens4_free-{tag}_nwin{nw}"
               f"_analytic_prior-realistic_valb_spos-anchor_fapos-anchor_etaslit{nsuf}")
         res = pickle.load(open(glob.glob(str(REPO / sd / "*.pkl"))[0], "rb"))["results"]

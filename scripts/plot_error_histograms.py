@@ -52,7 +52,11 @@ def load(pair, seed):
     nsuf = f"_noise{seed}" if seed else ""
     sb_dir = (f"results/realistic_prior/gd_joint_block_whole_slit_fpa{pair}_gratio1_adens4_free-{tag}_nwin{nw}"
               f"_analytic_prior-realistic_valb_spos-anchor_fapos-anchor_etaslit{nsuf}")
-    sb = pickle.load(open(glob.glob(str(REPO / sb_dir / "*.pkl"))[0], "rb"))["results"]
+    # single-band arm: by default the same band through the multi-band code (same anchor grid as the multi-band arm;
+    # 2026-09-25, see scripts/compare_albedo_codepaths.py); --sb-driver = the original single-band driver's results
+    SB_DRIVER = "--sb-driver" in sys.argv
+    if SB_DRIVER:
+        sb = pickle.load(open(glob.glob(str(REPO / sb_dir / "*.pkl"))[0], "rb"))["results"]
     mb = {}
     for g in glob.glob(str(REPO / f"results/realistic_prior/multiband/mb_fpa0-{pair}_r0-*_r{pair}-*_free-{tag}_cover_g1.0_etaslit_prior-realistic{nsuf}.pkl")):
         d = pickle.load(open(g, "rb"))
@@ -60,15 +64,20 @@ def load(pair, seed):
     out = {n: dict(sb=[], mb=[], prior=[]) for n in rows}
     for t in json.load(open(geom))["tiles"]:
         key = tuple(t["rows_by_fpa"][str(pair)])
-        ps, pm = sb[key]["hires"]["params"], mb[key]
+        if SB_DRIVER:
+            ps = sb[key]["hires"]["params"]
+        else:
+            ps = pickle.load(open(REPO / f"results/realistic_prior/multiband/mb_fpa{pair}_r{pair}-{key[0]}-{key[1]}_free-{tag}_cover_g1.0_etaslit_prior-realistic_geomcfg{nsuf}.pkl", "rb"))["joint"]["params"]
+        pm = mb[key]
         for n in rows:
             mname = f"albedo_{LABELS[pair]}" if n == "albedo" else n
-            xs = np.asarray(ps[n]["positions"]) * als.SLIT_HALF_KM
+            sname = n if (SB_DRIVER or n != "albedo") else mname
+            xs = np.asarray(ps[sname]["positions"]) * als.SLIT_HALF_KM
             xm = np.asarray(pm[mname]["positions"]) * als.SLIT_HALF_KM
             k = slice(1, -1)
-            out[n]["sb"].append((np.asarray(ps[n]["values"]) - truth(n, xs, LABELS[pair]))[k])
+            out[n]["sb"].append((np.asarray(ps[sname]["values"]) - truth(n, xs, LABELS[pair]))[k])
             out[n]["mb"].append((np.asarray(pm[mname]["values"]) - truth(n, xm, LABELS[pair]))[k])
-            out[n]["prior"].append((np.asarray(ps[n]["prior"]) - truth(n, xs, LABELS[pair]))[k])
+            out[n]["prior"].append((np.asarray(ps[sname]["prior"]) - truth(n, xs, LABELS[pair]))[k])
     return {n: {q: np.concatenate(v) for q, v in d.items()} for n, d in out.items()}, rows
 
 
