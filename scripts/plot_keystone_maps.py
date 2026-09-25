@@ -42,7 +42,7 @@ def lam_range(f):
 
 NAMES = {0: "FPA0 O2-A", 1: "FPA1 CO2 weak", 2: "FPA2 CO2 strong", 3: "FPA3 CH4/CO"}
 cols, rows = np.meshgrid(np.arange(N_PX, dtype=float), np.arange(N_PX, dtype=float))   # [row, col]
-shift = {}
+shift, EE = {}, {}
 for f in range(4):
     _, s = xy_to_wavelength_slit(f, cols.ravel(), rows.ravel())
     eta = eta_of_s(f, s).reshape(N_PX, N_PX)
@@ -51,25 +51,77 @@ for f in range(4):
     # this column sees the scene point farther out along the slit (larger |row - null|) than the centre column
     # does, i.e. the slit projection GROWS with wavelength in the increasing-wavelength direction (user,
     # 2026-09-25). (The earlier eta shift AT FIXED ROW had the opposite sign.)
+    EE[f] = eta
     bt = band_tables(f)
     r512 = np.interp(eta.ravel(), bt["eta_c"], np.arange(N_PX, dtype=float)).reshape(N_PX, N_PX)
     shift[f] = (rows - r512) * bt["spacing"]            # eta units, so the km/rows scaling below is unchanged
     print(f"FPA{f}: keystone shift range {shift[f].min()*als.SLIT_HALF_KM:+.2f} .. {shift[f].max()*als.SLIT_HALF_KM:+.2f} km, "
           f"{shift[f].min()/band_tables(f)['spacing']:+.2f} .. {shift[f].max()/band_tables(f)['spacing']:+.2f} rows", flush=True)
 
-for unit, scale_fn, tag, lab in (("km", lambda f: als.SLIT_HALF_KM, "", "keystone: scene-point displacement vs centre column [km]"),
-                                 ("rows", lambda f: 1.0 / abs(band_tables(f)["spacing"]), "_rows", "keystone: scene-point displacement vs centre column [rows]")):
-    fig, axs = plt.subplots(2, 2, figsize=(11, 10), constrained_layout=True)
-    for a, f in zip(axs.ravel(), range(4)):
+COLORS = ["#111111", "#1b7f3b", "#7b3fb5", "#d98a00", "#c2185b"]
+ROWV = np.arange(N_PX, dtype=float)
+
+
+def sample_paths(f):
+    """Scene-point paths across the columns (2026-09-25): start at the centre column on the null row (the row
+    whose keystone stays ~0 across all columns) plus rows half-way and all the way toward each edge that has room
+    (>=100 rows), where the displacement is largest. Path row at column c = the row whose eta equals the start
+    eta, so path_row(c) - start_row is exactly the keystone map's value along the path."""
+    null = int(np.argmin(np.abs(shift[f]).max(axis=1)))
+    starts = [null]
+    for edge in (15, 1008):
+        if abs(edge - null) >= 100:
+            starts += [int(round(null + 0.5 * (edge - null))), edge]
+    starts = sorted(set(starts), key=lambda r: (r != null, r))
+    paths = []
+    for r0 in starts:
+        e0 = EE[f][r0, 512]
+        paths.append((r0, np.array([np.interp(e0, EE[f][:, c], ROWV) for c in range(N_PX)])))
+    return null, paths
+
+
+PATHS = {f: sample_paths(f) for f in range(4)}
+XC = np.arange(N_PX)
+
+for unit, scale_fn, tag, lab in (("km", lambda f: als.SLIT_HALF_KM, "", "keystone [km]"),
+                                 ("rows", lambda f: 1.0 / abs(band_tables(f)["spacing"]), "_rows", "keystone [rows]")):
+    fig = plt.figure(figsize=(12, 14), constrained_layout=True)
+    gs = fig.add_gridspec(4, 2, height_ratios=[3, 1.1, 3, 1.1])
+    for k, f in enumerate(range(4)):
+        ax = fig.add_subplot(gs[2 * (k // 2), k % 2])
+        st = fig.add_subplot(gs[2 * (k // 2) + 1, k % 2])
         img = oriented(shift[f] * scale_fn(f), f)
         v = np.abs(img).max()
-        im = a.imshow(img, origin="lower", cmap="RdBu_r", vmin=-v, vmax=v, aspect="equal", interpolation="nearest")
+        im = ax.imshow(img, origin="lower", cmap="RdBu_r", vmin=-v, vmax=v, aspect="equal", interpolation="nearest")
         lo, hi = lam_range(f)
-        a.set_title(f"{NAMES[f]}  ({lo:.3f}-{hi:.3f} um; max |shift| {v:.3g} {unit})", loc="left", fontsize=10)
-        a.set_xlabel("detector column, wavelength increasing ->" + ("" if wavelength_ascending_cols(f) else " (flipped)"))
-        a.set_ylabel("detector row")
-        fig.colorbar(im, ax=a, shrink=0.8, label=lab)
-    fig.suptitle(f"Keystone: displacement of a scene point relative to the centre column (signed rows; + above / - below the null row on the long-wavelength side = slit projection grows with wavelength) ({unit})", fontsize=11)
+        asc = wavelength_ascending_cols(f)
+        xs = XC if asc else XC[::-1]                     # display column (flipped for FPA1/FPA3)
+        null, paths = PATHS[f]
+        for j, (r0, pr) in enumerate(paths):
+            col = COLORS[j % len(COLORS)]
+            name = "null row" if r0 == null else f"row {r0}"
+            ax.plot(xs, pr, color="white", lw=3.2, alpha=0.9)
+            ax.plot(xs, pr, color=col, lw=1.6)
+            ax.text(1015, r0, f"{r0}", color=col, fontsize=7, va="bottom", ha="right",
+                    bbox=dict(fc="white", ec="none", alpha=0.75, pad=0.6))
+            disp = (pr - r0) * (scale_fn(f) * abs(band_tables(f)["spacing"]))
+            st.plot(xs, disp, color=col, lw=1.6, label=f"{name} (end-to-end {disp[np.argmax(xs)] - disp[np.argmin(xs)]:+.2g})")
+        ax.set_title(f"{NAMES[f]}  ({lo:.3f}-{hi:.3f} um; max |keystone| {v:.3g} {unit})", loc="left", fontsize=10)
+        if k % 2 == 0:
+            ax.set_ylabel("detector row")
+        else:
+            ax.set_yticklabels([])
+        ax.tick_params(labelbottom=False)
+        fig.colorbar(im, ax=ax, shrink=0.8, label=lab)
+        st.axhline(0, color="#c3c2b7", lw=1)
+        st.set_xlim(0, N_PX - 1)
+        st.set_xlabel("detector column, wavelength increasing ->" + ("" if asc else " (flipped)"))
+        st.set_ylabel(f"path row - start row [{unit}]", fontsize=8)
+        st.legend(frameon=False, fontsize=6.5, loc="best", ncol=2)
+        st.grid(True, color="#e6e5e0", lw=0.8)
+    fig.suptitle(f"Keystone: displacement of a scene point relative to the centre column (signed; + above / - below the null row on the "
+                 f"long-wavelength side = slit projection grows with wavelength) [{unit}]\nLines: paths a fixed slit position traces across the "
+                 f"columns from the centre column (labelled by start row); strips below show each path's displacement.", fontsize=10)
     out = REPO / f"plots/keystone_maps{tag}_fpa0-3.png"
     fig.savefig(out, dpi=130, bbox_inches="tight")
     plt.close(fig)
