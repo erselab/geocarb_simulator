@@ -30,6 +30,8 @@ from geocarb_gert import along_slit_scene as als  # noqa: E402
 # --pair 1|3 (2026-09-24): single-band FPA<pair> vs multi-band FPA0+FPA<pair>, free set
 # co2,ch4,co,p,h2o,T,albedo (no aerosol). Default (no --pair) = the original FPA2 vs FPA0+FPA2 comparison.
 PAIR = int(sys.argv[sys.argv.index("--pair") + 1]) if "--pair" in sys.argv else 2
+NZ = int(sys.argv[sys.argv.index("--noise-seed") + 1]) if "--noise-seed" in sys.argv else None   # noisy-observation runs (2026-09-25)
+NSUF = f"_noise{NZ}" if NZ is not None else ""
 LABEL = {1: "CO2_weak", 2: "CO2_strong", 3: "CH4_CO"}[PAIR]
 if PAIR == 2:
     FREE_TAG, NW, GEOM = "co2-p-h2o-t-albedo", 33, REPO / "geometry_config_noaero_realistic.json"
@@ -37,7 +39,7 @@ if PAIR == 2:
 else:
     FREE_TAG, NW, GEOM = "co2-ch4-co-p-h2o-t-albedo", {1: 60, 3: 47}[PAIR], REPO / f"geometry_config_fpa0-{PAIR}_realistic.json"
     OUT = f"fpa{PAIR}_singleband_vs_multiband"
-SB_DIR = f"results/realistic_prior/gd_joint_block_whole_slit_fpa{PAIR}_gratio1_adens4_free-{FREE_TAG}_nwin{NW}_analytic_prior-realistic_valb_spos-anchor_fapos-anchor_etaslit"
+SB_DIR = f"results/realistic_prior/gd_joint_block_whole_slit_fpa{PAIR}_gratio1_adens4_free-{FREE_TAG}_nwin{NW}_analytic_prior-realistic_valb_spos-anchor_fapos-anchor_etaslit{NSUF}"
 BAND = f"FPA{PAIR}"
 MBTAG = f"FPA0+{BAND}"
 ROWS = [("co2_ppm", "CO$_2$ [ppm]")]
@@ -49,7 +51,7 @@ ROWS += [("p_surface_hpa", "surface pressure [hPa]"),
 sb = pickle.load(open(glob.glob(str(REPO / SB_DIR / "*.pkl"))[0], "rb"))["results"]
 geom = json.load(open(GEOM))["tiles"]
 mb = {}
-for g in glob.glob(str(REPO / f"results/realistic_prior/multiband/mb_fpa0-{PAIR}_r0-*_r{PAIR}-*_free-{FREE_TAG}_cover_g1.0_etaslit_prior-realistic.pkl")):
+for g in glob.glob(str(REPO / f"results/realistic_prior/multiband/mb_fpa0-{PAIR}_r0-*_r{PAIR}-*_free-{FREE_TAG}_cover_g1.0_etaslit_prior-realistic{NSUF}.pkl")):
     d = pickle.load(open(g, "rb"))
     mb[tuple(d["rows_by_fpa"][PAIR])] = d["joint"]["params"]
 tile_params = []
@@ -114,7 +116,7 @@ for name, ylabel in ROWS:
     a.set_ylabel("error", color=ink)
     a.legend(frameon=False, loc="lower right", fontsize=8)
     plt.tight_layout()
-    out = REPO / f"plots/{name}_{OUT}_prior-realistic.png"
+    out = REPO / f"plots/{name}_{OUT}_prior-realistic{NSUF}.png"
     fig.savefig(out, dpi=140, bbox_inches="tight")
     plt.close(fig)
     print("  saved", out)
@@ -139,7 +141,7 @@ ax.set_ylabel("albedo ({LABEL}) error", color=ink)
 ax.set_title("Albedo error: single-band vs. multi-band (each on its own grid -- not bin-matched)", loc="left", color=ink, fontsize=12)
 ax.legend(frameon=False, loc="upper right", fontsize=8)
 plt.tight_layout()
-out = REPO / f"plots/albedo_{LABEL}_{OUT}_prior-realistic.png"
+out = REPO / f"plots/albedo_{LABEL}_{OUT}_prior-realistic{NSUF}.png"
 fig.savefig(out, dpi=140, bbox_inches="tight")
 plt.close(fig)
 print("  saved", out)
@@ -163,6 +165,6 @@ for a in axs.ravel()[len(ROWS):]:
 fig.colorbar(sc, ax=axs, shrink=0.6, label="along-slit position [km]")
 fig.suptitle("Per-bin retrieval error: single-band vs. multi-band (identical bins; points above the dashed 1:1 line = single-band worse)",
              fontsize=10)
-out = REPO / f"plots/{OUT}_error_scatter_prior-realistic.png"
+out = REPO / f"plots/{OUT}_error_scatter_prior-realistic{NSUF}.png"
 fig.savefig(out, dpi=140, bbox_inches="tight")
 print("saved", out)
