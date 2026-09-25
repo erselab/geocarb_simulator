@@ -237,9 +237,10 @@ def main():
                          "reanalysis-like T/p/h2o/aerosol, never exactly the truth (2026-09-21)")
     ap.add_argument("--overlap", type=int, default=2)
     ap.add_argument("--aerosol-type", default=None,
-                    help="aerosol optical-property set: default None = legacy gert registry 'smoke' (O2-A slot for FPA0, the 1.6 um "
-                         "slot for FPA1-3); 'smoke_mie' = per-FPA Mie properties (geocarb_gert/aerosol_mie.py). Truth and "
-                         "retrieval use the same set. Sets GEOCARB_AEROSOL_TYPE so worker processes inherit it.")
+                    help="aerosol type, realistic per-band optical properties (geocarb_gert/aerosol_mie.py: Mie at each FPA's centre; "
+                         "AOD defined at O2-A): smoke | dust | sulfate | sea_salt | cloud_water. Default None = legacy two-slot registry "
+                         "smoke (FPA1-3 share values, AOD defined at 1.6 um), also reachable as registry_<type>, kept so earlier runs "
+                         "stay reproducible. Truth and retrieval use the same set. Sets GEOCARB_AEROSOL_TYPE so workers inherit it.")
     ap.add_argument("--check-aerosol", action="store_true",
                     help="print the per-band aerosol optical properties that this command line selects, then exit "
                          "(no inputs are loaded)")
@@ -316,12 +317,13 @@ def main():
         os.environ["GEOCARB_AEROSOL_TYPE"] = a.aerosol_type
     if a.aerosol:
         # what the forward model will actually use per band: (ssa, g, tau relative to the 1.6 um reference)
-        print(f"aerosol type: {resolve_aerosol_type()} (amplitude_aerosol is referenced to the 1.6 um band)", flush=True)
+        from geocarb_gert.aerosol_defaults import amplitude_reference_um
+        print(f"aerosol type: {resolve_aerosol_type()} (amplitude_aerosol / scene AOD defined at {amplitude_reference_um():.3f} um)", flush=True)
         for f in fpas:
             wn_lo, wn_hi = GEOCARB_BANDS[f][1], GEOCARB_BANDS[f][2]
             wl = 1e4 / (0.5 * (wn_lo + wn_hi))
             ssa, g, ts = band_props_for_wavelength(None, wl)
-            print(f"  FPA{f} ({wl:.3f} um): ssa={ssa:.3f} g={g:.3f} tau/tau(1.6um)={ts:.3f}", flush=True)
+            print(f"  FPA{f} ({wl:.3f} um): ssa={ssa:.3f} g={g:.3f} tau/tau(ref)={ts:.3f}", flush=True)
     if a.check_aerosol:
         return
     res = solve_window_multiband(rows, a.free.split(","), noise_seed=a.noise_seed, g_ratio=a.g_ratio, anchor_density=a.anchor_density,

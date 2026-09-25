@@ -36,8 +36,8 @@ from gert.rt_solver import SingleScatterSolver, XRTMSolver
 
 from . import along_slit_scene as als
 from .aerosol_defaults import (aerosol_scalars_for, aerosol_band_props,
-                               band_slot_for_wavelength_um, resolve_aerosol_type, SMOKE_MIE,
-                               mie_band_props_for_wavelength, band_props_for_wavelength)
+                               band_slot_for_wavelength_um, resolve_aerosol_type,
+                               band_props_for_wavelength)
 
 #: 2026-09-15 (Phase 2 of the XRTM integration plan): the one place a
 #: `solver="single_scatter"|"xrtm"` string resolves to an actual gert

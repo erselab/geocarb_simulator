@@ -29,7 +29,7 @@ _BAND_INDEX = 1
 def aerosol_scalars_for(aerosol_type: str) -> tuple[float, float, float]:
     """`(ssa, g, qext_norm)` for `aerosol_type`, at this project's fixed
     band-1 convention."""
-    scalars = get_aerosol_scalars(aerosol_type)
+    scalars = get_aerosol_scalars(aerosol_type[len(LEGACY_PREFIX):] if aerosol_type.startswith(LEGACY_PREFIX) else aerosol_type)
     return (float(scalars["ssa"][_BAND_INDEX]),
             float(scalars["g"][_BAND_INDEX]),
             float(scalars["qext_norm"][_BAND_INDEX]))
@@ -55,7 +55,7 @@ def band_slot_for_wavelength_um(wl_um: float) -> int:
 def aerosol_band_props(aerosol_type: str, slot: int) -> tuple[float, float, float]:
     """`(ssa, g, tau_scale)` for registry `slot`; `tau_scale` multiplies the
     reference-wavelength column tau."""
-    sc = get_aerosol_scalars(aerosol_type)
+    sc = get_aerosol_scalars(aerosol_type[len(LEGACY_PREFIX):] if aerosol_type.startswith(LEGACY_PREFIX) else aerosol_type)
     q = sc["qext_norm"]
     return (float(sc["ssa"][slot]), float(sc["g"][slot]),
             float(q[slot]) / float(q[_REF_SLOT]))
@@ -63,38 +63,44 @@ def aerosol_band_props(aerosol_type: str, slot: int) -> tuple[float, float, floa
 
 import os
 
-SMOKE_MIE = "smoke_mie"
-_MIE_CENTRES_UM = None
+REGISTRY_TYPES = ("smoke", "dust", "sulfate", "sea_salt", "cloud_water")
+LEGACY_PREFIX = "registry_"
+LEGACY_DEFAULT = LEGACY_PREFIX + "smoke"      # what a run without --aerosol-type has always used
+SMOKE_MIE = "smoke_mie"                        # older alias of "smoke" (per-FPA Mie properties)
 
 
 def resolve_aerosol_type(aerosol_type=None) -> str:
     """The aerosol type in effect: an explicit argument, else the GEOCARB_AEROSOL_TYPE environment variable (set by
-    the drivers' --aerosol-type, and inherited by worker processes), else the legacy registry "smoke"."""
-    return aerosol_type or os.environ.get("GEOCARB_AEROSOL_TYPE", "smoke")
+    the drivers' --aerosol-type, and inherited by worker processes), else the legacy two-slot registry smoke
+    ('registry_smoke') so runs made before per-band properties existed stay reproducible.
 
-
-def mie_band_props_for_wavelength(wl_um: float) -> tuple[float, float, float]:
-    """`(ssa, g, tau_scale)` of the Mie smoke model (aerosol_mie.py) for the FPA whose centre is nearest `wl_um`;
-    `tau_scale` = qext(band)/qext(reference band, 1.6 um)."""
-    from .aerosol_mie import BAND_CENTRES_UM, smoke_band_properties
-    fpa = min(BAND_CENTRES_UM, key=lambda f: abs(BAND_CENTRES_UM[f] - wl_um))
-    ssa, g, q = smoke_band_properties()[fpa]
-    return float(ssa), float(g), float(q)
-
-
-REGISTRY_TYPES = ("smoke", "dust", "sulfate", "sea_salt", "cloud_water")
+    2026-09-25 (user): a named type -- smoke, dust, sulfate, sea_salt, cloud_water -- now means REALISTIC PER-BAND
+    properties (aerosol_mie.py: Mie at each FPA's centre; extinction relative to O2-A, where the scene AOD is defined),
+    never shared values across the SWIR bands. The legacy scheme is only reachable as 'registry_<type>' (or by
+    omitting the flag)."""
+    t = aerosol_type or os.environ.get("GEOCARB_AEROSOL_TYPE", LEGACY_DEFAULT)
+    return "smoke" if t == SMOKE_MIE else t
 
 
 def validate_aerosol_type(aerosol_type: str) -> str:
-    if aerosol_type not in REGISTRY_TYPES + (SMOKE_MIE,):
-        raise ValueError(f"unknown aerosol type {aerosol_type!r}; choose from {REGISTRY_TYPES + (SMOKE_MIE,)}")
+    ok = REGISTRY_TYPES + (SMOKE_MIE,) + tuple(LEGACY_PREFIX + t for t in REGISTRY_TYPES)
+    if aerosol_type not in ok:
+        raise ValueError(f"unknown aerosol type {aerosol_type!r}; choose from {ok}")
     return aerosol_type
 
 
 def band_props_for_wavelength(aerosol_type, wl_um: float) -> tuple[float, float, float]:
-    """`(ssa, g, tau_scale)` in effect for a band centred at `wl_um` (tau_scale relative to the 1.6 um reference):
-    the per-FPA Mie table for `smoke_mie`, else the legacy two-slot registry scheme."""
+    """`(ssa, g, tau_scale)` in effect for a band centred at `wl_um`: the per-FPA Mie table for a named type (tau_scale
+    relative to O2-A), or the legacy two-slot registry scheme for 'registry_<type>' (tau_scale relative to 1.6 um)."""
     t = resolve_aerosol_type(aerosol_type)
-    if t == SMOKE_MIE:
-        return mie_band_props_for_wavelength(wl_um)
-    return aerosol_band_props(t, band_slot_for_wavelength_um(wl_um))
+    if t.startswith(LEGACY_PREFIX):
+        return aerosol_band_props(t[len(LEGACY_PREFIX):], band_slot_for_wavelength_um(wl_um))
+    from .aerosol_mie import BAND_CENTRES_UM, band_properties
+    fpa = min(BAND_CENTRES_UM, key=lambda f: abs(BAND_CENTRES_UM[f] - wl_um))
+    ssa, g, q = band_properties(t)[fpa]
+    return float(ssa), float(g), float(q)
+
+
+def amplitude_reference_um(aerosol_type=None) -> float:
+    """Wavelength at which `amplitude_aerosol` / the scene AOD are defined for this type."""
+    return 1.608 if resolve_aerosol_type(aerosol_type).startswith(LEGACY_PREFIX) else 0.765
