@@ -238,7 +238,7 @@ def main():
     ap.add_argument("--overlap", type=int, default=2)
     ap.add_argument("--aerosol-type", default=None,
                     help="aerosol type, realistic per-band optical properties (geocarb_gert/aerosol_mie.py: Mie at each FPA's centre; "
-                         "AOD defined at O2-A): smoke | dust | sulfate | sea_salt | cloud_water. Default None = legacy two-slot registry "
+                         "AOD defined at O2-A): smoke | dust | sulfate | sea_salt | cloud_water. Required with --aerosol (no default). Legacy two-slot registry "
                          "smoke (FPA1-3 share values, AOD defined at 1.6 um), also reachable as registry_<type>, kept so earlier runs "
                          "stay reproducible. Truth and retrieval use the same set. Sets GEOCARB_AEROSOL_TYPE so workers inherit it.")
     ap.add_argument("--check-aerosol", action="store_true",
@@ -310,6 +310,10 @@ def main():
         print(f"--solver not given: defaulting to '{a.solver}' ({'aerosol' if a.aerosol else 'no aerosol'})")
     from geocarb_gert.aerosol_defaults import (band_props_for_wavelength, resolve_aerosol_type,
                                               validate_aerosol_type)
+    if a.aerosol and not a.aerosol_type:
+        ap.error("--aerosol requires --aerosol-type (2026-09-25: no silent default). Choose smoke | dust | sulfate | "
+                 "sea_salt | cloud_water for realistic per-band properties, or registry_<type> (e.g. registry_smoke) to "
+                 "reproduce the earlier two-slot runs.")
     if a.aerosol_type:
         validate_aerosol_type(a.aerosol_type)
         if not a.aerosol:

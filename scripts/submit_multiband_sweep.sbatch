@@ -17,6 +17,8 @@
 # single_scatter" -- single_scatter's own I_scatter term is unconditionally zero without aerosol
 # kwargs, so it's already exactly absorption/extinction-only there; xrtm's multiple-scattering cost
 # only buys real accuracy once aerosol is actually free). Set SOLVER explicitly to override either way.
+# AEROSOL=1 requires AEROSOL_TYPE=<smoke|dust|sulfate|sea_salt|cloud_water|registry_smoke...> (gd_multiband_window.py --aerosol-type;
+# no default). realistic per-band properties for the named types; registry_<type> reproduces the earlier two-slot runs.
 # PRIOR = als.PRIOR_FIELD_SETS name (default structural); realistic = ACOS-like prior that never equals the truth.
 # MAXTASKS overrides GEOCARB_ANCHOR_POOL_MAXTASKS (2026-09-22: xrtm's own C save_tree cache leaks real,
 # reachable memory on every RT call, never freed until the model is destroyed -- confirmed via malloc_trim
