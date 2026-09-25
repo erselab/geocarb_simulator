@@ -52,7 +52,7 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
                            g_ratio=None, anchor_density=4, anchor_mode="cover", solver="xrtm",
                            state_interp=None, prior_form=None, gamma=None, anchor_workers=1,
                            psf_fwhm_px=1.5, verbose=True, hook=None, aerosol=False,
-                           bin_centers_override=None):
+                           bin_centers_override=None, noise_seed=None):
     """Joint hi-res solve of one window.
 
     rows_by_fpa : {fpa: (row_lo, row_hi)}; the FIRST entry is the reference band (sets G).
@@ -115,7 +115,7 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
     # ---- truth per band (the retrieval's own forward model at a fully frozen state) ----
     strip = () if aerosol else _NO_AEROSOL     # aerosol arm: the truth scene carries the aerosol layer
     truth_surface = {k: v for k, v in als.SURFACE_FIELDS.items() if k not in strip}
-    y_true, Sy = {}, {}
+    y_true, Sy, noise_check = {}, {}, {}
     for f in fpas:
         b = B[f]
         truth_spec = state_spec_from_scene(anchor_etas, free=(), fields=als.STATE_FIELDS, band_label=b["label"],
@@ -127,6 +127,15 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
         y_true[f] = fwd_t(np.array([]))
         sigma = gjr.geocarb_noise_model(f).sigma([y_true[f]], [None])
         Sy[f] = 1.0 / np.maximum(sigma, gjr._SIGMA_FLOOR) ** 2
+        if noise_seed is not None:
+            # signal-dependent shot noise (sigma^2 = N0^2 + N1|I|, the band's own noise model) drawn on
+            # top of the noiseless representative truth; Sy above stays the noiseless-signal sigma, as in
+            # the single-band driver. Seed keyed on (seed, fpa, row range) so the SAME band/tile gets the
+            # bit-identical realization in the single-band driver (paired comparison).
+            rng = np.random.default_rng([int(noise_seed), int(f), int(rows_by_fpa[f][0]), int(rows_by_fpa[f][1])])
+            nz = rng.normal(0.0, sigma)
+            noise_check[f] = (int(nz.size), float(nz.sum()))
+            y_true[f] = y_true[f] + nz
 
     # ---- joint state -----------------------------------------------------------------
     free_set = set(free)
@@ -198,7 +207,7 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
     sizes = [y_true[f].size for f in fpas]
     splits = np.cumsum([0] + sizes)
     return dict(fpas=fpas, rows_by_fpa={f: tuple(rows_by_fpa[f]) for f in fpas}, G=G, bin_centers=bin_centers,
-                anchor_etas=anchor_etas, anchor_mode=anchor_mode, free=free, solver=solver, aerosol=aerosol,
+                anchor_etas=anchor_etas, anchor_mode=anchor_mode, free=free, solver=solver, aerosol=aerosol, noise_seed=noise_seed, noise_check=noise_check,
                 joint=mb.joint.snapshot(x, resid=resid, resid_rms=float(np.sqrt(np.mean(resid ** 2))),
                                         cov=S_ret, avk=avk, dof=float(np.trace(avk))),
                 x=x, resid=resid, resid_rms=float(np.sqrt(np.mean(resid ** 2))),
@@ -226,6 +235,9 @@ def main():
                     help="named prior set (als.PRIOR_FIELD_SETS); 'realistic' = ACOS-like climatological gases + "
                          "reanalysis-like T/p/h2o/aerosol, never exactly the truth (2026-09-21)")
     ap.add_argument("--overlap", type=int, default=2)
+    ap.add_argument("--noise-seed", type=int, default=None,
+                    help="add signal-dependent shot noise (the band's geocarb_noise_model) to the observed spectrum; "
+                         "default off. Realization keyed on (seed, fpa, rows) -- identical in the single-band driver.")
     ap.add_argument("--aerosol", action="store_true",
                     help="truth scene and retrieval include the Gaussian aerosol layer (rows in --free are retrieved, "
                          "the rest frozen at truth); default off = no aerosol")
@@ -287,13 +299,13 @@ def main():
     if a.solver is None:
         a.solver = "xrtm" if a.aerosol else "single_scatter"
         print(f"--solver not given: defaulting to '{a.solver}' ({'aerosol' if a.aerosol else 'no aerosol'})")
-    res = solve_window_multiband(rows, a.free.split(","), g_ratio=a.g_ratio, anchor_density=a.anchor_density,
+    res = solve_window_multiband(rows, a.free.split(","), noise_seed=a.noise_seed, g_ratio=a.g_ratio, anchor_density=a.anchor_density,
                                  anchor_mode=a.anchor_mode, solver=a.solver, anchor_workers=a.anchor_workers, prior_fields=a.prior_fields,
                                  aerosol=a.aerosol, bin_centers_override=geom_bin_centers)
     name = f"mb_fpa{'-'.join(map(str, fpas))}_" + "_".join(f"r{f}-{rows[f][0]}-{rows[f][1]}" for f in fpas) \
         + f"_free-{'-'.join(t.split('_')[0] for t in a.free.split(','))}_{a.anchor_mode}_g{a.g_ratio if a.g_ratio is not None else 'cfg'}_etaslit" \
         + ("" if a.prior_fields == "structural" else f"_prior-{a.prior_fields}") + ("_aero" if a.aerosol else "") \
-        + ("_geomcfg" if a.geometry_config else "")
+        + ("_geomcfg" if a.geometry_config else "") + (f"_noise{a.noise_seed}" if a.noise_seed is not None else "")
     out = Path(a.out) if a.out else REPO / "results/realistic_prior/multiband" / f"{name}.pkl"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "wb") as fh:

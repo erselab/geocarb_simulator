@@ -543,9 +543,19 @@ def _solve_window(row_lo: int, row_hi: int):
         noise_model = geocarb_noise_model(FPA)
         sigma = noise_model.sigma([y_true], [None])
         Sy_inv_diag = 1.0 / np.maximum(sigma, _SIGMA_FLOOR) ** 2
+    noise_check = None
+    if _SWEEP.get("noise_seed") is not None:
+        # Signal-dependent shot noise (sigma^2 = N0^2 + N1|I|) drawn on top of the noiseless representative
+        # truth; Sy_inv_diag stays from the noiseless signal. Seed keyed on (seed, fpa, row range) so the
+        # multi-band driver draws the bit-identical realization for the same band/tile (paired comparison).
+        # Not in the truth-cache key: noise is added after the cached truth is served.
+        rng = np.random.default_rng([int(_SWEEP["noise_seed"]), int(FPA), int(row_lo), int(row_hi)])
+        nz = rng.normal(0.0, np.asarray(sigma).reshape(y_true.shape))
+        noise_check = (int(nz.size), float(nz.sum()))
+        y_true = y_true + nz
 
     out = dict(row_lo=row_lo, row_hi=row_hi, width=width, G=G, bin_centers=bin_centers,
-              prior_co2_ppm_bins=prior_co2_ppm_bins)
+              prior_co2_ppm_bins=prior_co2_ppm_bins, noise_check=noise_check)
 
     # Analytic Jacobians: derivatives from gert's per-layer arrays composed with
     # the detector operator, rather than n_free+1 forward evaluations.
@@ -1322,6 +1332,9 @@ def main() -> int:
                          "only the first config in a sweep pays the render cost. Pass this "
                          "to force a fresh render, e.g. after a change to the rendering code "
                          "itself that hasn't bumped truth_cache.TRUTH_CACHE_VERSION yet.")
+    ap.add_argument("--noise-seed", type=int, default=None,
+                    help="add signal-dependent shot noise (geocarb_noise_model) to the observed spectrum; "
+                         "default off. Realization keyed on (seed, fpa, row range), identical in gd_multiband_window.py.")
     ap.add_argument("--flat-sy-inv", action="store_true",
                     help="reproduce the pre-Phase-D Sy_inv weighting exactly (Sy_inv_diag = "
                          "1/mean(|signal|)^2, uniform across the whole window) instead of the "
@@ -1969,7 +1982,7 @@ def main() -> int:
                        prior_fields=prior_fields_resolved,
                        surface_fields=surface_fields_resolved,
                        prior_anchor_density=args.prior_anchor_density,
-                       flat_sy_inv=args.flat_sy_inv, vary_albedo=args.vary_albedo,
+                       flat_sy_inv=args.flat_sy_inv, noise_seed=args.noise_seed, vary_albedo=args.vary_albedo,
                        row_sub_bin_anomaly=row_sub_bin_anomaly,
                        surface_positions_mode=args.surface_positions,
                        frozen_atmosphere_positions_mode=args.frozen_atmosphere_positions,
@@ -2095,6 +2108,8 @@ def main() -> int:
     # new run gets this tag so its results can never be mistaken for the earlier
     # (untagged) s/s_max runs, whose scene positions differ by up to ~10 rows.
     suffix += "_etaslit"
+    if args.noise_seed is not None:
+        suffix += f"_noise{args.noise_seed}"
     if args.run_tag:
         suffix += f"_{args.run_tag}"
     if args.retrieval_psf_fwhm_px != 1.5:
@@ -2122,7 +2137,7 @@ def main() -> int:
               "window_scale": window_scale, "prior_fields": args.prior_fields,
               "n_lookup_samples": n_lookup_samples,
               "prior_anchor_density": args.prior_anchor_density,
-              "flat_sy_inv": args.flat_sy_inv, "overlap": args.overlap,
+              "flat_sy_inv": args.flat_sy_inv, "noise_seed": args.noise_seed, "overlap": args.overlap,
               "vary_albedo": args.vary_albedo, "sub_bin_anomaly": args.sub_bin_anomaly,
               "anchor_workers": args.anchor_workers,
               "retrieval_psf_fwhm_px": args.retrieval_psf_fwhm_px,

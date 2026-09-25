@@ -32,4 +32,4 @@ find /dev/shm -maxdepth 1 -user "${USER}" -name 'geocarb_L_*' -mmin +30 2>/dev/n
     --anchor-workers "${SLURM_CPUS_PER_TASK}" \
     --geometry-config "${GEOM}" \
     --task-id "${SLURM_ARRAY_TASK_ID}" --n-tasks "${N_TASKS}" \
-    --free "${FREE}"
+    --free "${FREE}" ${NOISE_SEED:+--noise-seed "${NOISE_SEED}"}

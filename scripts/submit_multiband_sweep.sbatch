@@ -36,4 +36,4 @@ trap 'rm -f "${SHM_NAME}"*' EXIT
 /gpfs/fs1/home/scrowel3/miniforge3/envs/analysis/bin/python -u scripts/gd_multiband_window.py \
     --fpas "${FPAS:-0,2}" --tile "${SLURM_ARRAY_TASK_ID}" --anchor-mode cover --g-ratio 1 \
     --free "${FREE}" --prior-fields "${PRIOR:-structural}" --anchor-workers "${SLURM_CPUS_PER_TASK}" \
-    ${SOLVER:+--solver "${SOLVER}"} ${AEROSOL:+--aerosol}
+    ${SOLVER:+--solver "${SOLVER}"} ${AEROSOL:+--aerosol} ${NOISE_SEED:+--noise-seed "${NOISE_SEED}"}
