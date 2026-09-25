@@ -1,9 +1,9 @@
 """Keystone maps (2026-09-25): for each FPA, the row displacement of a scene point at each detector pixel
 relative to where the same slit position lands in the centre column (col 512), from the real GD mapping
 polynomials (geocarb_gert.gd_polynomials.xy_to_wavelength_slit, eta via eta_of_s). Signed: the slit projection grows with wavelength when the displacement is positive above the null row and
-negative below it on the long-wavelength side (the antisymmetric pattern all four FPAs show). Shown in km along the slit (eta * SLIT_HALF_KM) and in detector rows.
+negative below it on the long-wavelength side (the antisymmetric pattern all four FPAs show). Shown in detector rows (the km version was dropped 2026-09-25 as a duplicate).
 Columns are oriented so wavelength increases left->right in every panel (FPA1/FPA3 are flipped).
-Output: plots/keystone_maps_fpa0-3.png (km) and plots/keystone_maps_rows_fpa0-3.png (rows).
+Output: plots/keystone_maps_rows_fpa0-3.png.
     PYTHONPATH=.:<gert> python scripts/plot_keystone_maps.py
 """
 import sys
@@ -83,8 +83,7 @@ def sample_paths(f):
 PATHS = {f: sample_paths(f) for f in range(4)}
 XC = np.arange(N_PX)
 
-for unit, scale_fn, tag, lab in (("km", lambda f: als.SLIT_HALF_KM, "", "keystone [km]"),
-                                 ("rows", lambda f: 1.0 / abs(band_tables(f)["spacing"]), "_rows", "keystone [rows]")):
+for unit, scale_fn, tag, lab in (("rows", lambda f: 1.0 / abs(band_tables(f)["spacing"]), "_rows", "keystone [rows]"),):
     fig = plt.figure(figsize=(12, 14), constrained_layout=True)
     gs = fig.add_gridspec(4, 2, height_ratios=[3, 1.1, 3, 1.1])
     for k, f in enumerate(range(4)):
