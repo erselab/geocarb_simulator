@@ -59,3 +59,24 @@ def aerosol_band_props(aerosol_type: str, slot: int) -> tuple[float, float, floa
     q = sc["qext_norm"]
     return (float(sc["ssa"][slot]), float(sc["g"][slot]),
             float(q[slot]) / float(q[_REF_SLOT]))
+
+
+import os
+
+SMOKE_MIE = "smoke_mie"
+_MIE_CENTRES_UM = None
+
+
+def resolve_aerosol_type(aerosol_type=None) -> str:
+    """The aerosol type in effect: an explicit argument, else the GEOCARB_AEROSOL_TYPE environment variable (set by
+    the drivers' --aerosol-type, and inherited by worker processes), else the legacy registry "smoke"."""
+    return aerosol_type or os.environ.get("GEOCARB_AEROSOL_TYPE", "smoke")
+
+
+def mie_band_props_for_wavelength(wl_um: float) -> tuple[float, float, float]:
+    """`(ssa, g, tau_scale)` of the Mie smoke model (aerosol_mie.py) for the FPA whose centre is nearest `wl_um`;
+    `tau_scale` = qext(band)/qext(reference band, 1.6 um)."""
+    from .aerosol_mie import BAND_CENTRES_UM, smoke_band_properties
+    fpa = min(BAND_CENTRES_UM, key=lambda f: abs(BAND_CENTRES_UM[f] - wl_um))
+    ssa, g, q = smoke_band_properties()[fpa]
+    return float(ssa), float(g), float(q)

@@ -36,7 +36,8 @@ from gert.rt_solver import SingleScatterSolver, XRTMSolver
 
 from . import along_slit_scene as als
 from .aerosol_defaults import (aerosol_scalars_for, aerosol_band_props,
-                               band_slot_for_wavelength_um)
+                               band_slot_for_wavelength_um, resolve_aerosol_type, SMOKE_MIE,
+                               mie_band_props_for_wavelength)
 
 #: 2026-09-15 (Phase 2 of the XRTM integration plan): the one place a
 #: `solver="single_scatter"|"xrtm"` string resolves to an actual gert
@@ -111,6 +112,9 @@ def aerosol_band_for(wide_inst, aerosol_type: str) -> tuple[float, float, float]
     scaled by qext_norm[0]/qext_norm[1], every longer-wavelength band slot 1
     and scale 1 -- so FPA1-3 results are unchanged)."""
     wn = np.asarray(wide_inst.windows[0].wn_hires, dtype=float)
+    aerosol_type = resolve_aerosol_type(aerosol_type)
+    if aerosol_type == SMOKE_MIE:          # 2026-09-25: per-FPA Mie properties (aerosol_mie.py), all four bands distinct
+        return mie_band_props_for_wavelength(1e4 / float(wn.mean()))
     return aerosol_band_props(aerosol_type,
                               band_slot_for_wavelength_um(1e4 / float(wn.mean())))
 
@@ -163,7 +167,7 @@ def _build_aerosol_kwargs(surface: Optional[dict], n_wn: int, geo,
 
 def simulate_spectrum(atm_params: dict, surface: Optional[dict], absco, wide_inst,
                       geo, solar, jacobians: bool = False,
-                      aerosol_type: str = "smoke",
+                      aerosol_type: str | None = None,
                       solver: str = "xrtm") -> SpectrumResult:
     """Build the atmosphere from `atm_params` (the kwargs
     `along_slit_scene.atmosphere_from_params` takes) and run one
@@ -206,7 +210,7 @@ def simulate_spectrum(atm_params: dict, surface: Optional[dict], absco, wide_ins
 
 def spectrum_and_jacobian(atm_params: dict, rows, absco, wide_inst, geo, solar,
                           surface: Optional[dict] = None,
-                          aerosol_type: str = "smoke",
+                          aerosol_type: str | None = None,
                           solver: str = "xrtm"):
     """``(S_hires, {row: dS/d(param)})`` -- the analytic-Jacobian
     counterpart of `simulate_spectrum`. Row dispatch is delegated to

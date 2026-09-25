@@ -14,6 +14,7 @@ Usage (real polynomials only -- keystone is never turned off):
   python gd_multiband_window.py --fpas 0,2 --tile 12 --free p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo
 """
 import argparse
+import os
 import pickle
 import sys
 import time
@@ -235,6 +236,10 @@ def main():
                     help="named prior set (als.PRIOR_FIELD_SETS); 'realistic' = ACOS-like climatological gases + "
                          "reanalysis-like T/p/h2o/aerosol, never exactly the truth (2026-09-21)")
     ap.add_argument("--overlap", type=int, default=2)
+    ap.add_argument("--aerosol-type", default=None,
+                    help="aerosol optical-property set: default None = legacy gert registry 'smoke' (O2-A slot for FPA0, the 1.6 um "
+                         "slot for FPA1-3); 'smoke_mie' = per-FPA Mie properties (geocarb_gert/aerosol_mie.py). Truth and "
+                         "retrieval use the same set. Sets GEOCARB_AEROSOL_TYPE so worker processes inherit it.")
     ap.add_argument("--noise-seed", type=int, default=None,
                     help="add signal-dependent shot noise (the band's geocarb_noise_model) to the observed spectrum; "
                          "default off. Realization keyed on (seed, fpa, rows) -- identical in the single-band driver.")
@@ -299,13 +304,17 @@ def main():
     if a.solver is None:
         a.solver = "xrtm" if a.aerosol else "single_scatter"
         print(f"--solver not given: defaulting to '{a.solver}' ({'aerosol' if a.aerosol else 'no aerosol'})")
+    if a.aerosol_type:
+        os.environ["GEOCARB_AEROSOL_TYPE"] = a.aerosol_type
     res = solve_window_multiband(rows, a.free.split(","), noise_seed=a.noise_seed, g_ratio=a.g_ratio, anchor_density=a.anchor_density,
                                  anchor_mode=a.anchor_mode, solver=a.solver, anchor_workers=a.anchor_workers, prior_fields=a.prior_fields,
                                  aerosol=a.aerosol, bin_centers_override=geom_bin_centers)
     name = f"mb_fpa{'-'.join(map(str, fpas))}_" + "_".join(f"r{f}-{rows[f][0]}-{rows[f][1]}" for f in fpas) \
         + f"_free-{'-'.join(t.split('_')[0] for t in a.free.split(','))}_{a.anchor_mode}_g{a.g_ratio if a.g_ratio is not None else 'cfg'}_etaslit" \
         + ("" if a.prior_fields == "structural" else f"_prior-{a.prior_fields}") + ("_aero" if a.aerosol else "") \
-        + ("_geomcfg" if a.geometry_config else "") + (f"_noise{a.noise_seed}" if a.noise_seed is not None else "")
+        + ("_geomcfg" if a.geometry_config else "") + (f"_{a.aerosol_type}" if (a.aerosol and a.aerosol_type) else "") + (f"_noise{a.noise_seed}" if a.noise_seed is not None else "")
+    from geocarb_gert.aerosol_defaults import resolve_aerosol_type
+    res["aerosol_type"] = resolve_aerosol_type() if a.aerosol else None
     out = Path(a.out) if a.out else REPO / "results/realistic_prior/multiband" / f"{name}.pkl"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "wb") as fh:

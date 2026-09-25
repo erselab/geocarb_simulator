@@ -267,7 +267,7 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6,
                         absco=None, wide_inst=None, geo=None, solar=None,
                         alb=None, slope=None, tau_aer=None, height_aer=None, aer_props=None,
                         thickness_aer=None, h_rel_rt: float = 1e-3,
-                        surface=None, solver=None, aerosol_type="smoke"):
+                        surface=None, solver=None, aerosol_type=None):
     """``dI_hires/d(p_surface_hpa)`` -- dispatches to the fast analytic
     composition (`_p_surface_dI_dparam_analytic`) when no aerosol row is
     present (`tau_aer is None` -- every existing caller, zero behavior
