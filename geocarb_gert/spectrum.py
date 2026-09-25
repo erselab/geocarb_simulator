@@ -37,7 +37,7 @@ from gert.rt_solver import SingleScatterSolver, XRTMSolver
 from . import along_slit_scene as als
 from .aerosol_defaults import (aerosol_scalars_for, aerosol_band_props,
                                band_slot_for_wavelength_um, resolve_aerosol_type, SMOKE_MIE,
-                               mie_band_props_for_wavelength)
+                               mie_band_props_for_wavelength, band_props_for_wavelength)
 
 #: 2026-09-15 (Phase 2 of the XRTM integration plan): the one place a
 #: `solver="single_scatter"|"xrtm"` string resolves to an actual gert
@@ -112,11 +112,8 @@ def aerosol_band_for(wide_inst, aerosol_type: str) -> tuple[float, float, float]
     scaled by qext_norm[0]/qext_norm[1], every longer-wavelength band slot 1
     and scale 1 -- so FPA1-3 results are unchanged)."""
     wn = np.asarray(wide_inst.windows[0].wn_hires, dtype=float)
-    aerosol_type = resolve_aerosol_type(aerosol_type)
-    if aerosol_type == SMOKE_MIE:          # 2026-09-25: per-FPA Mie properties (aerosol_mie.py), all four bands distinct
-        return mie_band_props_for_wavelength(1e4 / float(wn.mean()))
-    return aerosol_band_props(aerosol_type,
-                              band_slot_for_wavelength_um(1e4 / float(wn.mean())))
+    # 2026-09-25: 'smoke_mie' = per-FPA Mie properties (aerosol_mie.py), all four bands distinct
+    return band_props_for_wavelength(aerosol_type, 1e4 / float(wn.mean()))
 
 
 def _build_aerosol_kwargs(surface: Optional[dict], n_wn: int, geo,

@@ -80,3 +80,21 @@ def mie_band_props_for_wavelength(wl_um: float) -> tuple[float, float, float]:
     fpa = min(BAND_CENTRES_UM, key=lambda f: abs(BAND_CENTRES_UM[f] - wl_um))
     ssa, g, q = smoke_band_properties()[fpa]
     return float(ssa), float(g), float(q)
+
+
+REGISTRY_TYPES = ("smoke", "dust", "sulfate", "sea_salt", "cloud_water")
+
+
+def validate_aerosol_type(aerosol_type: str) -> str:
+    if aerosol_type not in REGISTRY_TYPES + (SMOKE_MIE,):
+        raise ValueError(f"unknown aerosol type {aerosol_type!r}; choose from {REGISTRY_TYPES + (SMOKE_MIE,)}")
+    return aerosol_type
+
+
+def band_props_for_wavelength(aerosol_type, wl_um: float) -> tuple[float, float, float]:
+    """`(ssa, g, tau_scale)` in effect for a band centred at `wl_um` (tau_scale relative to the 1.6 um reference):
+    the per-FPA Mie table for `smoke_mie`, else the legacy two-slot registry scheme."""
+    t = resolve_aerosol_type(aerosol_type)
+    if t == SMOKE_MIE:
+        return mie_band_props_for_wavelength(wl_um)
+    return aerosol_band_props(t, band_slot_for_wavelength_um(wl_um))

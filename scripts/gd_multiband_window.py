@@ -240,6 +240,9 @@ def main():
                     help="aerosol optical-property set: default None = legacy gert registry 'smoke' (O2-A slot for FPA0, the 1.6 um "
                          "slot for FPA1-3); 'smoke_mie' = per-FPA Mie properties (geocarb_gert/aerosol_mie.py). Truth and "
                          "retrieval use the same set. Sets GEOCARB_AEROSOL_TYPE so worker processes inherit it.")
+    ap.add_argument("--check-aerosol", action="store_true",
+                    help="print the per-band aerosol optical properties that this command line selects, then exit "
+                         "(no inputs are loaded)")
     ap.add_argument("--noise-seed", type=int, default=None,
                     help="add signal-dependent shot noise (the band's geocarb_noise_model) to the observed spectrum; "
                          "default off. Realization keyed on (seed, fpa, rows) -- identical in the single-band driver.")
@@ -304,8 +307,23 @@ def main():
     if a.solver is None:
         a.solver = "xrtm" if a.aerosol else "single_scatter"
         print(f"--solver not given: defaulting to '{a.solver}' ({'aerosol' if a.aerosol else 'no aerosol'})")
+    from geocarb_gert.aerosol_defaults import (band_props_for_wavelength, resolve_aerosol_type,
+                                              validate_aerosol_type)
     if a.aerosol_type:
+        validate_aerosol_type(a.aerosol_type)
+        if not a.aerosol:
+            ap.error("--aerosol-type has no effect without --aerosol")
         os.environ["GEOCARB_AEROSOL_TYPE"] = a.aerosol_type
+    if a.aerosol:
+        # what the forward model will actually use per band: (ssa, g, tau relative to the 1.6 um reference)
+        print(f"aerosol type: {resolve_aerosol_type()} (amplitude_aerosol is referenced to the 1.6 um band)", flush=True)
+        for f in fpas:
+            wn_lo, wn_hi = GEOCARB_BANDS[f][1], GEOCARB_BANDS[f][2]
+            wl = 1e4 / (0.5 * (wn_lo + wn_hi))
+            ssa, g, ts = band_props_for_wavelength(None, wl)
+            print(f"  FPA{f} ({wl:.3f} um): ssa={ssa:.3f} g={g:.3f} tau/tau(1.6um)={ts:.3f}", flush=True)
+    if a.check_aerosol:
+        return
     res = solve_window_multiband(rows, a.free.split(","), noise_seed=a.noise_seed, g_ratio=a.g_ratio, anchor_density=a.anchor_density,
                                  anchor_mode=a.anchor_mode, solver=a.solver, anchor_workers=a.anchor_workers, prior_fields=a.prior_fields,
                                  aerosol=a.aerosol, bin_centers_override=geom_bin_centers)
