@@ -4,6 +4,7 @@ results/fpa_images/. One figure per FPA (plots/fpa_images_fpa<n>.png), shared co
 truth image's 1st-99th percentile so the three panels are directly comparable; plus a
 prior-minus-truth panel. Image index is [detector row, detector column]; columns are flipped for FPA1/FPA3 (reversed dispersion) so
 wavelength increases left->right in every FPA.
+Radiance units: W m^-2 um^-1 sr^-1 (gert convention, geocarb_gert/radiometry.py).
     PYTHONPATH=.:<gert> python scripts/plot_fpa_images.py
 """
 import sys
@@ -39,13 +40,13 @@ for f in range(4):
     for a, (k, t) in zip(axs[:3], (("prior", "realistic-prior scene"), ("truth", "truth"), ("noise", "truth + noise"))):
         im = a.imshow(img[k], origin="lower", cmap="viridis", vmin=lo, vmax=hi, aspect="equal", interpolation="nearest")
         a.set_title(t, loc="left", fontsize=10)
-    fig.colorbar(im, ax=list(axs[:3]), shrink=0.9, label="radiance (native units)")
+    fig.colorbar(im, ax=list(axs[:3]), shrink=0.9, label="radiance [W m$^{-2}$ $\\mu$m$^{-1}$ sr$^{-1}$]")
     diff = img["prior"] - img["truth"]
     v = np.percentile(np.abs(diff), 99) or 1.0
     a = axs[3]
     im2 = a.imshow(diff, origin="lower", cmap="RdBu_r", vmin=-v, vmax=v, aspect="equal", interpolation="nearest")
     a.set_title("prior scene - truth", loc="left", fontsize=10)
-    fig.colorbar(im2, ax=a, shrink=0.9, label="radiance difference")
+    fig.colorbar(im2, ax=a, shrink=0.9, label="radiance difference [W m$^{-2}$ $\\mu$m$^{-1}$ sr$^{-1}$]")
     for a in axs:
         a.set_xlabel("detector column, wavelength increasing ->" + ("" if asc else " (flipped)"))
         a.set_ylabel("detector row")
