@@ -53,7 +53,7 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
                            g_ratio=None, anchor_density=4, anchor_mode="cover", solver="xrtm",
                            state_interp=None, prior_form=None, gamma=None, anchor_workers=1,
                            psf_fwhm_px=1.5, verbose=True, hook=None, aerosol=False,
-                           bin_centers_override=None, noise_seed=None):
+                           bin_centers_override=None, noise_seed=None, truth_cloud=None):
     """Joint hi-res solve of one window.
 
     rows_by_fpa : {fpa: (row_lo, row_hi)}; the FIRST entry is the reference band (sets G).
@@ -116,16 +116,33 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
     # ---- truth per band (the retrieval's own forward model at a fully frozen state) ----
     strip = () if aerosol else _NO_AEROSOL     # aerosol arm: the truth scene carries the aerosol layer
     truth_surface = {k: v for k, v in als.SURFACE_FIELDS.items() if k not in strip}
+    if truth_cloud is not None:
+        # CLOUD CONTAMINATION (2026-09-25): the truth carries a liquid cloud (cloud_scene.Cloud) rendered with the XRTM
+        # multiple-scattering solver, while the retrieval below stays as configured (typically single_scatter, no
+        # aerosol/cloud). The truth is therefore NOT the retrieval's own forward model here -- that is the point. A
+        # truth_cloud with tau0 = 0 is the matching clear-sky control (same XRTM truth, no cloud), so the clear-sky
+        # multiple-scattering vs single_scatter difference can be subtracted out of any cloud effect.
+        truth_surface = {**als.SURFACE_FIELDS, **truth_cloud.surface_fields()}
     y_true, Sy, noise_check = {}, {}, {}
     for f in fpas:
         b = B[f]
         truth_spec = state_spec_from_scene(anchor_etas, free=(), fields=als.STATE_FIELDS, band_label=b["label"],
                                            surface_fields=truth_surface, surface_positions=anchor_etas,
                                            kinds=gjr.ROW_KINDS, sigmas=gjr.ROW_SIGMAS)
-        fwd_t = build_forward_state(f, b["rows"], anchor_etas, truth_spec, b["spectrum"], b["wn_hires"], b["ils"],
+        truth_spectrum = b["spectrum"]
+        prev_type = os.environ.get("GEOCARB_AEROSOL_TYPE")
+        if truth_cloud is not None:
+            truth_spectrum = gjr._make_state_spectrum(absco, b["wide_inst"], geo, solar, b["albedo"], solver="xrtm")
+            os.environ["GEOCARB_AEROSOL_TYPE"] = "cloud_water"      # truth only; restored right after the truth forward
+        fwd_t = build_forward_state(f, b["rows"], anchor_etas, truth_spec, truth_spectrum, b["wn_hires"], b["ils"],
                                     pad=retrieval_pad, state_interp=state_interp, n_workers=anchor_workers,
                                     spatial_psf_fwhm_px=psf_fwhm_px)
         y_true[f] = fwd_t(np.array([]))
+        if truth_cloud is not None:
+            if prev_type is None:
+                os.environ.pop("GEOCARB_AEROSOL_TYPE", None)
+            else:
+                os.environ["GEOCARB_AEROSOL_TYPE"] = prev_type
         sigma = gjr.geocarb_noise_model(f).sigma([y_true[f]], [None])
         Sy[f] = 1.0 / np.maximum(sigma, gjr._SIGMA_FLOOR) ** 2
         if noise_seed is not None:
@@ -241,6 +258,13 @@ def main():
                          "AOD defined at O2-A): smoke | dust | sulfate | sea_salt | cloud_water. Required with --aerosol (no default). Legacy two-slot registry "
                          "smoke (FPA1-3 share values, AOD defined at 1.6 um), also reachable as registry_<type>, kept so earlier runs "
                          "stay reproducible. Truth and retrieval use the same set. Sets GEOCARB_AEROSOL_TYPE so workers inherit it.")
+    ap.add_argument("--cloud-tau", type=float, default=None,
+                    help="put a liquid cloud in the TRUTH (retrieval unaware): plateau optical depth at O2-A; 0 = the clear-sky "
+                         "control (same XRTM truth, no cloud). Needs --cloud-p-hpa. geocarb_gert/cloud_scene.py")
+    ap.add_argument("--cloud-p-hpa", type=float, default=None, help="cloud layer centre pressure [hPa]")
+    ap.add_argument("--cloud-x0-km", type=float, default=700.0)
+    ap.add_argument("--cloud-plateau-km", type=float, default=30.0)
+    ap.add_argument("--cloud-edge-km", type=float, default=150.0, help="taper width: optical depth fades to 0 over this distance")
     ap.add_argument("--check-aerosol", action="store_true",
                     help="print the per-band aerosol optical properties that this command line selects, then exit "
                          "(no inputs are loaded)")
@@ -330,15 +354,23 @@ def main():
             print(f"  FPA{f} ({wl:.3f} um): ssa={ssa:.3f} g={g:.3f} tau/tau(ref)={ts:.3f}", flush=True)
     if a.check_aerosol:
         return
-    res = solve_window_multiband(rows, a.free.split(","), noise_seed=a.noise_seed, g_ratio=a.g_ratio, anchor_density=a.anchor_density,
+    cloud = None
+    if a.cloud_tau is not None:
+        if a.cloud_p_hpa is None or a.aerosol:
+            ap.error("--cloud-tau needs --cloud-p-hpa and cannot be combined with --aerosol")
+        from geocarb_gert.cloud_scene import Cloud
+        cloud = Cloud(tau0=a.cloud_tau, p_centre_hpa=a.cloud_p_hpa, x0_km=a.cloud_x0_km, plateau_km=a.cloud_plateau_km,
+                      edge_km=a.cloud_edge_km)
+    res = solve_window_multiband(rows, a.free.split(","), noise_seed=a.noise_seed, truth_cloud=cloud, g_ratio=a.g_ratio, anchor_density=a.anchor_density,
                                  anchor_mode=a.anchor_mode, solver=a.solver, anchor_workers=a.anchor_workers, prior_fields=a.prior_fields,
                                  aerosol=a.aerosol, bin_centers_override=geom_bin_centers)
     name = f"mb_fpa{'-'.join(map(str, fpas))}_" + "_".join(f"r{f}-{rows[f][0]}-{rows[f][1]}" for f in fpas) \
         + f"_free-{'-'.join(t.split('_')[0] for t in a.free.split(','))}_{a.anchor_mode}_g{a.g_ratio if a.g_ratio is not None else 'cfg'}_etaslit" \
         + ("" if a.prior_fields == "structural" else f"_prior-{a.prior_fields}") + ("_aero" if a.aerosol else "") \
-        + ("_geomcfg" if a.geometry_config else "") + (f"_{a.aerosol_type}" if (a.aerosol and a.aerosol_type) else "") + (f"_noise{a.noise_seed}" if a.noise_seed is not None else "")
+        + ("_geomcfg" if a.geometry_config else "") + (f"_{a.aerosol_type}" if (a.aerosol and a.aerosol_type) else "") + (f"_noise{a.noise_seed}" if a.noise_seed is not None else "") + (f"_cloud-tau{a.cloud_tau:g}-p{a.cloud_p_hpa:g}" if a.cloud_tau is not None else "")
     from geocarb_gert.aerosol_defaults import resolve_aerosol_type
     res["aerosol_type"] = resolve_aerosol_type() if a.aerosol else None
+    res["truth_cloud"] = None if cloud is None else dict(vars(cloud))
     out = Path(a.out) if a.out else REPO / "results/realistic_prior/multiband" / f"{name}.pkl"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "wb") as fh:
