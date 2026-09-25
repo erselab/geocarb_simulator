@@ -169,3 +169,12 @@ Plan:
    `--time`, and tasks-per-node, with a safety margin (previous 60G under-request caused OOM-kills).
 4. Have the sbatch wrappers (or a helper that prints the `sbatch` line) pick the request from the table
    and the 6-distinct-atmos-node cap, replacing the hand-set per-sweep values.
+
+## 10. Planned: one common tiling for all multi-band sweeps (added 2026-09-25, user request)
+
+Today the tiling is standardized only within a band pairing (single-band vs multi-band of the same pair, via
+an exported `--geometry-config`): FPA0+FPA2 = 33 tiles, FPA0+FPA1 = 60, FPA0+FPA3 = 47 (tile width follows
+the largest keystone of the bands in the pair). Cross-pairing plots therefore do not share tile edges or
+bin positions. Goal: a single geometry config (tile eta ranges + explicit `bin_centers`) used by every
+multi-band sweep, so all results share spatial locations. Open choices: which tiling (e.g. all-four-band
+max keystone vs the finest pair's), and the rerun cost (noiseless + noise seeds 1-3 for every band set).
