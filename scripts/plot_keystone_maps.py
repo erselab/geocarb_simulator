@@ -1,8 +1,7 @@
-"""Keystone maps (2026-09-25): for each FPA, the slit-position shift of every detector pixel relative
-to its own row's nominal (centre-column, col 512) slit position -- i.e. how far along the slit the
-pixel actually looks compared with what the row is assumed to see -- from the real GD mapping
-polynomials (geocarb_gert.gd_polynomials.xy_to_wavelength_slit, eta via eta_of_s). Shown in
-km along the slit (eta * SLIT_HALF_KM) and in rows (eta / the band's mean row spacing).
+"""Keystone maps (2026-09-25): for each FPA, the row displacement of a scene point at each detector pixel
+relative to where the same slit position lands in the centre column (col 512), from the real GD mapping
+polynomials (geocarb_gert.gd_polynomials.xy_to_wavelength_slit, eta via eta_of_s). Signed: the slit projection grows with wavelength when the displacement is positive above the null row and
+negative below it on the long-wavelength side (the antisymmetric pattern all four FPAs show). Shown in km along the slit (eta * SLIT_HALF_KM) and in detector rows.
 Columns are oriented so wavelength increases left->right in every panel (FPA1/FPA3 are flipped).
 Output: plots/keystone_maps_fpa0-3.png (km) and plots/keystone_maps_rows_fpa0-3.png (rows).
     PYTHONPATH=.:<gert> python scripts/plot_keystone_maps.py
@@ -47,12 +46,19 @@ shift = {}
 for f in range(4):
     _, s = xy_to_wavelength_slit(f, cols.ravel(), rows.ravel())
     eta = eta_of_s(f, s).reshape(N_PX, N_PX)
-    shift[f] = eta - eta[:, [512]]                       # eta shift vs the row's centre column
+    # Keystone as the ROW DISPLACEMENT of a scene point relative to where the same slit position lands in the
+    # centre column: row - r512, with r512 the row whose centre-column eta equals this pixel's eta. Positive =
+    # this column sees the scene point farther out along the slit (larger |row - null|) than the centre column
+    # does, i.e. the slit projection GROWS with wavelength in the increasing-wavelength direction (user,
+    # 2026-09-25). (The earlier eta shift AT FIXED ROW had the opposite sign.)
+    bt = band_tables(f)
+    r512 = np.interp(eta.ravel(), bt["eta_c"], np.arange(N_PX, dtype=float)).reshape(N_PX, N_PX)
+    shift[f] = (rows - r512) * bt["spacing"]            # eta units, so the km/rows scaling below is unchanged
     print(f"FPA{f}: keystone shift range {shift[f].min()*als.SLIT_HALF_KM:+.2f} .. {shift[f].max()*als.SLIT_HALF_KM:+.2f} km, "
           f"{shift[f].min()/band_tables(f)['spacing']:+.2f} .. {shift[f].max()/band_tables(f)['spacing']:+.2f} rows", flush=True)
 
-for unit, scale_fn, tag, lab in (("km", lambda f: als.SLIT_HALF_KM, "", "shift along slit [km]"),
-                                 ("rows", lambda f: 1.0 / abs(band_tables(f)["spacing"]), "_rows", "shift along slit [detector rows]")):
+for unit, scale_fn, tag, lab in (("km", lambda f: als.SLIT_HALF_KM, "", "keystone: scene-point displacement vs centre column [km]"),
+                                 ("rows", lambda f: 1.0 / abs(band_tables(f)["spacing"]), "_rows", "keystone: scene-point displacement vs centre column [rows]")):
     fig, axs = plt.subplots(2, 2, figsize=(11, 10), constrained_layout=True)
     for a, f in zip(axs.ravel(), range(4)):
         img = oriented(shift[f] * scale_fn(f), f)
@@ -63,7 +69,7 @@ for unit, scale_fn, tag, lab in (("km", lambda f: als.SLIT_HALF_KM, "", "shift a
         a.set_xlabel("detector column, wavelength increasing ->" + ("" if wavelength_ascending_cols(f) else " (flipped)"))
         a.set_ylabel("detector row")
         fig.colorbar(im, ax=a, shrink=0.8, label=lab)
-    fig.suptitle(f"Keystone: slit position of each pixel relative to its row's centre column ({unit})", fontsize=11)
+    fig.suptitle(f"Keystone: displacement of a scene point relative to the centre column (signed rows; + above / - below the null row on the long-wavelength side = slit projection grows with wavelength) ({unit})", fontsize=11)
     out = REPO / f"plots/keystone_maps{tag}_fpa0-3.png"
     fig.savefig(out, dpi=130, bbox_inches="tight")
     plt.close(fig)
