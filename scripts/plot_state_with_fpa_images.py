@@ -32,8 +32,15 @@ prior_alb = als.SURFACE_PRIOR_FIELD_SETS["realistic"]["albedo"]
 UNIT = "W m$^{-2}$ $\\mu$m$^{-1}$ sr$^{-1}$"
 
 ratios = [1.0] * len(VARS) + [1.0, 3.6] * 4
-fig, axs = plt.subplots(1, len(ratios), figsize=(sum(ratios) * 1.45, 11), sharey=True,
-                        gridspec_kw=dict(width_ratios=ratios, wspace=0.08), constrained_layout=False)
+# Two grid rows: the panels (all the same height, so every FPA image spans exactly the state panels' extent)
+# and a thin strip below them holding the manually placed image colorbars (2026-09-25).
+fig = plt.figure(figsize=(sum(ratios) * 1.45, 11.6))
+gs = fig.add_gridspec(2, len(ratios), width_ratios=ratios, height_ratios=[1.0, 0.025], wspace=0.08, hspace=0.16)
+axs = np.empty(len(ratios), dtype=object)
+for j in range(len(ratios)):
+    axs[j] = fig.add_subplot(gs[0, j], sharey=axs[0] if j else None)
+    if j:
+        plt.setp(axs[j].get_yticklabels(), visible=False)
 ink = "#0b0b0b"
 for a, (name, lab) in zip(axs, VARS):
     a.plot(np.asarray(als.STATE_FIELDS[name](x)), x, color="#111", lw=1.4, label="truth")
@@ -63,7 +70,8 @@ for f in range(4):
                   extent=[0, 1023, eta_c[0] * H, eta_c[-1] * H])
     a.set_title(f"{NAMES[f]}\n{min(lam):.3f}-{max(lam):.3f} $\\mu$m", fontsize=9, color=ink)
     a.set_xlabel("column, $\\lambda$ increasing $\\rightarrow$" + ("" if lam[1] > lam[0] else " (flipped)"), fontsize=8)
-    cb = fig.colorbar(im, ax=a, orientation="horizontal", fraction=0.03, pad=0.07)
+    cax = fig.add_subplot(gs[1, len(VARS) + 2 * f + 1])
+    cb = fig.colorbar(im, cax=cax, orientation="horizontal")
     cb.set_label(f"truth radiance [{UNIT}]", fontsize=7)
     cb.ax.tick_params(labelsize=6)
 axs[len(VARS)].plot([], [], color="#111", lw=1, label="truth")
