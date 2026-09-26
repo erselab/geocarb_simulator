@@ -92,7 +92,11 @@ def _build_solver(solver: str, jacobians: bool):
         return SingleScatterSolver(jacobians=jacobians)
     if solver == "xrtm":
         _ensure_xrtm_importable()
-        return XRTMSolver(method="two_stream", jacobians=jacobians)
+        import inspect
+        kw = {}
+        if "psurf_seed" in inspect.signature(XRTMSolver.__init__).parameters:      # gert >= psurf-analytic-jacobian
+            kw["psurf_seed"] = bool(jacobians)     # one extra XRTM derivative slot -> analytic p_surface under aerosol
+        return XRTMSolver(method="two_stream", jacobians=jacobians, **kw)
     raise ValueError(f"unknown solver {solver!r} -- expected 'single_scatter' or 'xrtm'")
 
 

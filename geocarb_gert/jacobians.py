@@ -125,6 +125,8 @@ direction and someone will otherwise re-derive the same worry.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from . import gd_render
@@ -299,6 +301,12 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6,
     """
     if tau_aer is None:
         return _p_surface_dI_dparam_analytic(res, params, window=window, h_rel=h_rel)
+    if (solver == "xrtm" and height_aer is not None and not os.environ.get("GEOCARB_PSURF_FD")
+            and getattr(res, "K_coef_ray_lnp_hires", None) is not None
+            and res.K_coef_ray_lnp_hires[window] is not None):
+        # 2026-09-26: fully analytic under XRTM + aerosol (needs gert's psurf_seed slot); GEOCARB_PSURF_FD=1 forces the FD
+        return _p_surface_dI_dparam_xrtm_aerosol(res, params, window=window, h_rel=h_rel, height_aer=height_aer,
+                                                 thickness_aer=thickness_aer)
 
     from gert.forward_model import ForwardModel
     from gert.rt_solver import SingleScatterSolver
@@ -337,6 +345,45 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6,
         return np.asarray(res_.I_hires[0], dtype=float)
 
     return (_I(p_sfc_hpa + h) - _I(p_sfc_hpa - h)) / (2.0 * h)
+
+
+def _p_surface_dI_dparam_xrtm_aerosol(res, params, window: int, h_rel: float, height_aer, thickness_aer):
+    """``dI_hires/d(p_surface_hpa)`` under XRTM with an aerosol layer -- analytic, no extra RT calls (2026-09-26).
+
+    The no-aerosol composition (`_p_surface_dI_dparam_analytic`: gas pressure/T/H2O paths through ``K_mol_lay`` and the
+    Rayleigh optical-depth path through ``K_ray_lay``, whose ``omega_eff`` already includes the aerosol) is exact except for
+    two things that only exist once an aerosol layer does; both are added here, per ln(p_surface), then divided by p_surface:
+
+    (e) the Gaussian aerosol layer weights move with the layer pressures. gert's ``aer_frac_l = w_l / sum(w)`` with
+        ``w_l = exp(-0.5 ((p_l - height)/sigma)^2)`` and ``p_l = sigma_l * p_sfc``, so
+        ``dw_l/dlnp = -w_l (p_l - height)/sigma^2 * p_l`` and ``d frac_l = (dw_l - frac_l sum(dw)) / sum(w)``; the response
+        is ``sum_l K_aer_lay[l] * tau_aer_col * d frac_l`` (``K_aer_lay`` already carries the aerosol phase-moment term).
+        ``height_aerosol`` is its own state row (absolute Pa), so it does not move with p_sfc.
+    (f) in a layer holding both Rayleigh and aerosol the Rayleigh fraction sets the mixed phase-function moments; XRTM only
+        returns that response when seeded, so gert's ``K_coef_ray_lnp`` (one directional slot) supplies it.
+
+    Not included (also absent from the FD's exact reproduction): the layer-altitude dependence of XRTM's pseudo-spherical
+    correction -- the validation script measures the residual.
+    """
+    from . import along_slit_scene as als
+
+    out = _p_surface_dI_dparam_analytic(res, params, window=window, h_rel=h_rel)
+    p_sfc_hpa = float(params["p_surface_hpa"])
+    atm = als.atmosphere_from_params(**params)
+    p_l = np.asarray(atm.p_layers, dtype=float)
+    sigma = max(float(thickness_aer), 100.0) if thickness_aer is not None else 1.0e4
+    w = np.exp(-0.5 * ((p_l - float(height_aer)) / sigma) ** 2)
+    w_sum = w.sum()
+    dlnp = np.zeros(np.shape(out))
+    K_aer = res.K_aer_lay_hires[window] if res.K_aer_lay_hires else None
+    tau_col = res.tau_aer_col_hires[window] if res.tau_aer_col_hires else None
+    if K_aer is not None and tau_col is not None and w_sum > 0:
+        frac = w / w_sum
+        dw = w * (-(p_l - float(height_aer)) / sigma ** 2) * p_l
+        dfrac = (dw - frac * dw.sum()) / w_sum                       # d(aer_frac_l)/d ln(p_sfc)
+        dlnp += np.einsum("lw,l->w", np.asarray(K_aer, dtype=float), dfrac) * np.asarray(tau_col, dtype=float)
+    dlnp += np.asarray(res.K_coef_ray_lnp_hires[window], dtype=float)
+    return out + dlnp / p_sfc_hpa
 
 
 def _p_surface_dI_dparam_analytic(res, params, window: int = 0, h_rel: float = 1e-6):
