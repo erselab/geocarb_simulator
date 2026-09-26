@@ -27,10 +27,17 @@ from geocarb_gert.cloud_scene import ALTITUDES_HPA, OPTICAL_DEPTHS, Cloud  # noq
 
 H = als.SLIT_HALF_KM
 TILES = range(42, 55)
+# --noise: the same experiment with shot noise (seeds 1-3; each seed's clear control has the identical noise draw, so the
+# scenario-minus-control difference cancels most of the noise). Lines are per seed; the residual panel shows the seed mean
+# with the min-max band.
+NOISE = "--noise" in sys.argv
+SEEDS = (1, 2, 3) if NOISE else (None,)
+OUTSUF = "_noise" if NOISE else ""
 
 
-def load(tau, p):
-    fs = sorted(glob.glob(str(REPO / f"results/realistic_prior/multiband/mb_fpa0_r0-*_free-p-albedo_cover_g1.0_etaslit_prior-realistic_cloud-tau{tau:g}-p{p:g}.pkl")))
+def load(tau, p, seed=None):
+    ns = f"_noise{seed}" if seed else ""
+    fs = sorted(glob.glob(str(REPO / f"results/realistic_prior/multiband/mb_fpa0_r0-*_free-p-albedo_cover_g1.0_etaslit_prior-realistic{ns}_cloud-tau{tau:g}-p{p:g}.pkl")))
     x, pr, pe, res, xt, rr = [], [], [], [], [], []
     for f in fs:
         d = pickle.load(open(f, "rb"))
@@ -42,53 +49,52 @@ def load(tau, p):
     return np.array(x)[o], np.array(pr)[o], np.array(pe)[o], np.array(xt), np.array(rr), len(fs)
 
 
-xc, pc, prior, xt0, rr0, n0 = load(0.0, 850.0)
-print(f"control: {n0} tiles")
+CTRL = {sd: load(0.0, 850.0, sd) for sd in SEEDS}
+print("control tiles:", {sd: v[5] for sd, v in CTRL.items()})
 fig, axs = plt.subplots(3, 3, figsize=(15, 10), sharex=True, constrained_layout=True)
 fig2, axs2 = plt.subplots(3, 3, figsize=(15, 9), sharex=True, constrained_layout=True)
-print(f"{'scenario':16s} {'max |effect| [hPa]':>20s}  half-width where |effect| > 1 / 5 / 10 hPa [km from cloud centre]")
+SCOL = {None: "#8e44ad", 1: "#8e44ad", 2: "#1baf7a", 3: "#eb6834"}
+print(f"{'scenario':16s} {'max |effect| [hPa], per seed':>32s}  tau where mean residual/control first exceeds 1.1 / 1.5 (outermost tile)")
 for i, (an, p) in enumerate(ALTITUDES_HPA.items()):
     for j, (tn, tau) in enumerate(OPTICAL_DEPTHS.items()):
-        x, ps, _, xt, rr, n = load(tau, p)
         cloud = Cloud(tau0=tau, p_centre_hpa=p)
-        a = axs[i, j]
-        if n < len(TILES):
-            a.text(0.5, 0.5, f"incomplete ({n}/{len(TILES)} tiles)", transform=a.transAxes, ha="center")
+        a, a2 = axs[i, j], axs2[i, j]
+        runs = {sd: load(tau, p, sd) for sd in SEEDS}
+        if any(r[5] < len(TILES) for r in runs.values()):
+            for aa in (a, a2):
+                aa.text(0.5, 0.5, "incomplete", transform=aa.transAxes, ha="center")
             continue
-        eff = ps - np.interp(x, xc, pc)
-        a.plot(x, ps - prior, color="#8e44ad", lw=1.4, label="scenario: retrieved - prior")
-        a.plot(xc, pc - prior, color="#8a93a1", lw=1.0, ls="--", label="clear control")
-        a.plot(x, eff, color="#eb6834", lw=1.4, label="cloud effect (scenario - control)")
+        maxeff, ratios = [], []
+        for sd, (x, ps, _, xt, rr, n) in runs.items():
+            xc, pc, prior, xt0, rr0, _ = CTRL[sd]
+            eff = ps - np.interp(x, xc, pc)
+            maxeff.append(np.max(np.abs(eff)))
+            a.plot(x, eff, color=SCOL[sd], lw=1.0, alpha=0.85, label=("cloud effect" if sd in (None, 1) else None) if not NOISE else f"seed {sd}")
+            ratios.append(rr / np.interp(xt, xt0, rr0))
+        a.plot(xc, pc - prior, color="#8a93a1", lw=0.9, ls="--", label="clear control (retrieved - prior)")
         a.axhline(0, color="#c3c2b7", lw=0.8)
-        b = a.twinx()
-        b.fill_between(x, cloud.tau(x), color="#2a78d6", alpha=0.18, lw=0)
-        b.set_ylim(0, max(OPTICAL_DEPTHS.values()) * 1.1 if False else tau * 1.6)
-        b.set_yticks([])
+        b = a.twinx(); b.fill_between(x, cloud.tau(x), color="#2a78d6", alpha=0.18, lw=0); b.set_ylim(0, tau * 1.6); b.set_yticks([])
         a.set_title(f"{an} ({p:g} hPa), tau0 = {tau:g}", loc="left", fontsize=10)
+        R = np.array(ratios)
+        a2.fill_between(xt, R.min(0), R.max(0), color="#1baf7a", alpha=0.25, lw=0)
+        a2.plot(xt, R.mean(0), "o-", color="#1baf7a")
+        a2.axhline(1, color="#c3c2b7", lw=0.8)
+        b2 = a2.twinx(); b2.fill_between(x, cloud.tau(x), color="#2a78d6", alpha=0.18, lw=0); b2.set_ylim(0, tau * 1.6); b2.set_yticks([])
+        a2.set_title(f"{an} ({p:g} hPa), tau0 = {tau:g}", loc="left", fontsize=10)
+        thr = []
+        for t_ in (1.1, 1.5):
+            idx = np.where(R.mean(0) > t_)[0]
+            thr.append(f"{min(cloud.tau(xt[idx[0]]), cloud.tau(xt[idx[-1]])):.3f}" if idx.size else "-")
+        print(f"{an + '_' + tn:16s} " + " ".join(f"{m:8.1f}" for m in maxeff) + f"   {thr[0]:>7s} / {thr[1]:>7s}")
         if j == 0:
-            a.set_ylabel("surface pressure [hPa]")
+            a.set_ylabel("surface pressure [hPa]"); a2.set_ylabel("fit residual rms / clear control")
         if i == 2:
-            a.set_xlabel("along-slit position [km]")
+            a.set_xlabel("along-slit position [km]"); a2.set_xlabel("along-slit position [km]")
         if i == 0 and j == 0:
             a.legend(frameon=False, fontsize=7, loc="lower left")
-        hw = []
-        for thr in (1, 5, 10):
-            m = np.abs(eff) > thr
-            hw.append(f"{np.max(np.abs(x[m] - cloud.x0_km)):.0f}" if m.any() else "-")
-        print(f"{an + '_' + tn:16s} {np.max(np.abs(eff)):20.2f}  " + " / ".join(hw))
-        a2 = axs2[i, j]
-        a2.plot(xt, rr / np.interp(xt, xt0, rr0), "o-", color="#1baf7a")
-        a2.axhline(1, color="#c3c2b7", lw=0.8)
-        b2 = a2.twinx()
-        b2.fill_between(x, cloud.tau(x), color="#2a78d6", alpha=0.18, lw=0)
-        b2.set_ylim(0, tau * 1.6); b2.set_yticks([])
-        a2.set_title(f"{an} ({p:g} hPa), tau0 = {tau:g}", loc="left", fontsize=10)
-        if j == 0:
-            a2.set_ylabel("fit residual rms / clear control")
-        if i == 2:
-            a2.set_xlabel("along-slit position [km]")
-fig.suptitle("O2-A-only, non-scattering retrieval of surface pressure through a tapering-edge cloud (blue shading = cloud optical depth)", fontsize=11)
-fig2.suptitle("Fit residual (rms per tile) relative to the clear-sky control (blue shading = cloud optical depth)", fontsize=11)
-fig.savefig(REPO / "plots/cloud_o2a_pressure.png", dpi=120, bbox_inches="tight")
-fig2.savefig(REPO / "plots/cloud_o2a_residual.png", dpi=120, bbox_inches="tight")
-print("saved plots/cloud_o2a_pressure.png, plots/cloud_o2a_residual.png")
+ttl = "with noise, 3 seeds" if NOISE else "no noise"
+fig.suptitle(f"O2-A-only, non-scattering retrieval: cloud effect on retrieved surface pressure ({ttl}; blue = cloud optical depth)", fontsize=11)
+fig2.suptitle(f"Fit residual per tile relative to the clear control ({ttl}; blue = cloud optical depth)", fontsize=11)
+fig.savefig(REPO / f"plots/cloud_o2a_pressure{OUTSUF}.png", dpi=120, bbox_inches="tight")
+fig2.savefig(REPO / f"plots/cloud_o2a_residual{OUTSUF}.png", dpi=120, bbox_inches="tight")
+print(f"saved plots/cloud_o2a_pressure{OUTSUF}.png, plots/cloud_o2a_residual{OUTSUF}.png")
