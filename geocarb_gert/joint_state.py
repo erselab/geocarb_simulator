@@ -981,8 +981,24 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
                        return_cov: bool = False, return_avk: bool = False,
                        g_cov: dict | None = None,
                        lm_lambda0: float = 1e-3, lm_up: float = 10.0,
-                       lm_down: float = 10.0, lm_max_tries: int = 12):
+                       lm_down: float = 10.0, lm_max_tries: int = 12,
+                       lm_reuse_lin: bool = False, lm_gain_ratio: bool = False):
     """Regularized Gauss-Newton over whatever :class:`StateSpec` says is free.
+
+    **Two opt-in speedups (2026-09-26; both default False, so every earlier result is reproducible)** -- profiled on a
+    4-band aerosol tile (one forward 184 s, one linearization 318 s, both dominated by XRTM), the log showed ~31
+    forward evaluations over 15 iterations: (1) the damping ``lam`` sat at 0.001 every iteration, i.e. the first trial
+    (lam/lm_down after the previous acceptance) was rejected and the second accepted, every time; (2) each accepted
+    trial's forward was then recomputed inside the next linearization at the same ``x``.
+
+    * ``lm_reuse_lin`` (needs ``jacobian_fn``): each trial is evaluated with ``jacobian_fn(x_trial)``, which returns the
+      forward value AND the Jacobian, and on acceptance that ``(y, K, K_g)`` is kept for the next iteration instead of
+      re-linearizing (also the initial ``forward(x0)`` becomes a linearization at ``x0``). A REJECTED trial then costs a
+      linearization instead of a forward, so this pays off only when rejections are rare -- pair it with
+      ``lm_gain_ratio``.
+    * ``lm_gain_ratio``: damping update from the gain ratio rho = actual/predicted reduction (Nielsen 1999): on acceptance
+      ``lam *= max(1/3, 1 - (2 rho - 1)^3)`` (``nu`` reset to 2); on rejection ``lam *= nu; nu *= 2``. Replaces the fixed
+      ``/lm_down`` / ``*lm_up`` steps. Predicted reduction of ``J`` for the damped step is ``b.dx + lam dx.D.dx``.
 
     The generic counterpart of `gd_joint_block_retrieve.gauss_newton_
     regularized`, which hardwired a single flat CO2 vector and a
@@ -1131,13 +1147,21 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
         return float(np.sum(Sy_inv_diag * resid ** 2) + dxp @ Sa_inv @ dxp)
 
     K_g_dict: dict = {}
-    y0 = forward(x)
+    reuse = bool(lm_reuse_lin and jacobian_fn is not None)
+    cache = None                      # (y0, K, K_g_dict) of the accepted x, when lm_reuse_lin
+    if reuse:
+        cache = jacobian_fn(x)
+        y0 = cache[0]
+    else:
+        y0 = forward(x)
     resid = y_true - y0
     J_cur = _objective(resid, x)
     lam = lm_lambda0
+    nu = 2.0
     for it in range(max_iter):
         if jacobian_fn is not None:
-            y0, K, K_g_dict = jacobian_fn(x)
+            y0, K, K_g_dict = cache if cache is not None else jacobian_fn(x)
+            cache = None
             resid = y_true - y0
         else:
             y0 = forward(x)
@@ -1205,18 +1229,34 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
             # whatever isn't (or can't be) bounded this way: reject an
             # invalid trial and damp harder, not propagate the exception.
             try:
-                resid_trial = y_true - forward(x_trial)
+                if reuse:
+                    trial_lin = jacobian_fn(x_trial)          # (y, K, K_g): the forward value AND the next Jacobian
+                    resid_trial = y_true - trial_lin[0]
+                else:
+                    resid_trial = y_true - forward(x_trial)
             except ValueError:
                 lam *= lm_up
                 continue
             J_trial = _objective(resid_trial, x_trial)
             if J_trial < J_cur:
+                if lm_gain_ratio:
+                    pred = float(b @ dx_trial + lam * (dx_trial * diagA) @ dx_trial)   # predicted reduction of J
+                    rho = (J_cur - J_trial) / pred if pred > 0 else 1.0
+                    lam = max(lam * max(1.0 / 3.0, 1.0 - (2.0 * rho - 1.0) ** 3), 1e-12)
+                    nu = 2.0
+                else:
+                    lam = max(lam / lm_down, 1e-12)
                 dx = dx_trial
                 x, resid, J_cur = x_trial, resid_trial, J_trial
-                lam = max(lam / lm_down, 1e-12)
+                if reuse:
+                    cache = trial_lin
                 accepted = True
                 break
-            lam *= lm_up
+            if lm_gain_ratio:
+                lam *= nu
+                nu *= 2.0
+            else:
+                lam *= lm_up
         if verbose:
             rms = float(np.sqrt(np.mean(resid ** 2)))
             print(f"  [{label}] iter {it}: |dx/sigma|={np.linalg.norm(dx / dxs):.3e} "
@@ -1235,7 +1275,7 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
             # returned covariance/AVK, mirroring what the pre-LM code did
             # every iteration regardless of convergence.
             if jacobian_fn is not None:
-                y0, K, K_g_dict = jacobian_fn(x)
+                y0, K, K_g_dict = cache if cache is not None else jacobian_fn(x)
                 resid = y_true - y0
             else:
                 y0 = forward(x)
