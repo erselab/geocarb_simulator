@@ -52,8 +52,8 @@ for i, (an, p) in enumerate(ALTITUDES_HPA.items()):
         x, ps, _, xt, rr, n = load(tau, p)
         cloud = Cloud(tau0=tau, p_centre_hpa=p)
         a = axs[i, j]
-        if n == 0:
-            a.text(0.5, 0.5, "not run yet", transform=a.transAxes, ha="center")
+        if n < len(TILES):
+            a.text(0.5, 0.5, f"incomplete ({n}/{len(TILES)} tiles)", transform=a.transAxes, ha="center")
             continue
         eff = ps - np.interp(x, xc, pc)
         a.plot(x, ps - prior, color="#8e44ad", lw=1.4, label="scenario: retrieved - prior")
