@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from geocarb_gert.joint_state import gauss_newton_state  # noqa: E402
+from geocarb_gert.joint_state import format_gn_diagnostics, gauss_newton_state  # noqa: E402
 
 
 class Spec:
@@ -35,12 +35,17 @@ def run(n, m, seed, **kw):
         return f(x)
     y = f(xt)
     cnt = {"fwd": 0, "lin": 0}
-    x = gauss_newton_state(fwd, y, Spec(n), np.full(m, 100.0), verbose=False, jacobian_fn=jac, max_iter=40, tol=1e-8, **kw)
-    return x, cnt
+    d = {}
+    x = gauss_newton_state(fwd, y, Spec(n), np.full(m, 100.0), verbose=False, jacobian_fn=jac, max_iter=40, tol=1e-8, diag=d, **kw)
+    assert d["totals"]["n_lin"] == cnt["lin"] and d["totals"]["n_fwd"] == cnt["fwd"], (d["totals"], cnt)
+    return x, cnt, d
 
 
 for seed in range(4):
-    x0, c0 = run(20, 60, seed)
-    x1, c1 = run(20, 60, seed, lm_reuse_lin=True, lm_gain_ratio=True)
+    x0, c0, d0 = run(20, 60, seed)
+    x1, c1, d1 = run(20, 60, seed, lm_reuse_lin=True, lm_gain_ratio=True)
     print(f"seed {seed}: default fwd {c0['fwd']:3d} lin {c0['lin']:3d} | fast fwd {c1['fwd']:3d} lin {c1['lin']:3d} | "
           f"|dx| between solutions {np.linalg.norm(x0 - x1):.2e} (|x| {np.linalg.norm(x0):.2f})")
+
+print()
+print(format_gn_diagnostics(d1))

@@ -982,8 +982,22 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
                        g_cov: dict | None = None,
                        lm_lambda0: float = 1e-3, lm_up: float = 10.0,
                        lm_down: float = 10.0, lm_max_tries: int = 12,
-                       lm_reuse_lin: bool = False, lm_gain_ratio: bool = False):
+                       lm_reuse_lin: bool = False, lm_gain_ratio: bool = False,
+                       diag: dict | None = None, lm_stop_pred_rel: float = 0.0):
     """Regularized Gauss-Newton over whatever :class:`StateSpec` says is free.
+
+    **Diagnostics (2026-09-26).** Pass an empty ``diag`` dict to have every outer iteration and every trial step recorded
+    in it (nothing else changes; zero cost when ``None``). ``diag["iterations"]`` is a list with, per iteration: wall
+    time in the linearization and in the trial evaluations, the damping at the start, one record per trial (``lam``, wall
+    time, ``J_trial``, actual and predicted reduction of ``J``, gain ratio ``rho``, accepted), the objective split into
+    data and prior terms, ``|dx/sigma|`` overall and per state row, and the residual rms; ``diag["totals"]`` has the number
+    of linearizations / forward evaluations / rejected trials and the wall time in each. :func:`format_gn_diagnostics`
+    renders it as a table (``gd_multiband_window.py --diagnostics`` prints it and saves it in the result).
+
+    ``lm_stop_pred_rel`` (default 0 = off; ``--lm-fast`` sets 1e-5, i.e. a predicted gain below 0.001% of J, ~0.016 chi2 units at J~1600): stop, without spending any trial, when even the least
+    damped step is predicted to lower the objective by less than ``lm_stop_pred_rel * J``. Found with the diagnostics: on a
+    converged tile the last iteration spent 5 rejected linearizations (about half the solve) on steps whose true and predicted
+    change were both at the rounding floor of ``J`` (rho ~ -0.4), because the |dx/sigma| test alone did not fire (there the least-damped step was predicted to gain 3e-6 of J = 1577, but the forward-model rounding noise in J is ~1e-6, so no trial could pass).
 
     **Two opt-in speedups (2026-09-26; both default False, so every earlier result is reproducible)** -- profiled on a
     4-band aerosol tile (one forward 184 s, one linearization 318 s, both dominated by XRTM), the log showed ~31
@@ -1146,31 +1160,76 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
         dxp = x - x_a
         return float(np.sum(Sy_inv_diag * resid ** 2) + dxp @ Sa_inv @ dxp)
 
+    import time as _time
+    rec = diag is not None
+    if rec:
+        diag.clear()
+        diag["iterations"] = []
+        diag["totals"] = dict(n_lin=0, n_fwd=0, n_rejected=0, t_lin=0.0, t_fwd=0.0)
+        diag["settings"] = dict(lm_reuse_lin=bool(lm_reuse_lin), lm_gain_ratio=bool(lm_gain_ratio), lm_lambda0=lm_lambda0,
+                                lm_up=lm_up, lm_down=lm_down, max_iter=max_iter, tol=tol, n_free=int(n))
+        try:
+            _slices = spec.slices()
+        except Exception:
+            _slices = {}
+
+    def _lin_call(xx):
+        t0 = _time.time()
+        out = jacobian_fn(xx)
+        if rec:
+            diag["totals"]["n_lin"] += 1
+            diag["totals"]["t_lin"] += _time.time() - t0
+        return out
+
+    def _fwd_call(xx):
+        t0 = _time.time()
+        out = forward(xx)
+        if rec:
+            diag["totals"]["n_fwd"] += 1
+            diag["totals"]["t_fwd"] += _time.time() - t0
+        return out
+
     K_g_dict: dict = {}
     reuse = bool(lm_reuse_lin and jacobian_fn is not None)
     cache = None                      # (y0, K, K_g_dict) of the accepted x, when lm_reuse_lin
+    _t_init = _time.time()
     if reuse:
-        cache = jacobian_fn(x)
+        cache = _lin_call(x)
         y0 = cache[0]
     else:
-        y0 = forward(x)
+        y0 = _fwd_call(x)
+    if rec:
+        diag["t_initial"] = _time.time() - _t_init
     resid = y_true - y0
     J_cur = _objective(resid, x)
     lam = lm_lambda0
     nu = 2.0
     for it in range(max_iter):
+        t_it0 = _time.time()
+        if rec:
+            it_rec = dict(it=it, lam_start=lam, trials=[], t_lin=0.0, t_trials=0.0)
+            diag["iterations"].append(it_rec)
+            _tl0 = diag["totals"]["t_lin"]
         if jacobian_fn is not None:
-            y0, K, K_g_dict = cache if cache is not None else jacobian_fn(x)
+            if cache is not None:
+                y0, K, K_g_dict = cache
+            else:
+                y0, K, K_g_dict = _lin_call(x)
             cache = None
             resid = y_true - y0
         else:
-            y0 = forward(x)
+            y0 = _fwd_call(x)
             resid = y_true - y0
             K = np.empty((y0.size, n))
             for k in range(n):
                 xp = x.copy()
                 xp[k] += step
-                K[:, k] = (forward(xp) - y0) / step
+                K[:, k] = (_fwd_call(xp) - y0) / step
+        if rec:
+            it_rec["t_lin"] = diag["totals"]["t_lin"] - _tl0 if jacobian_fn is not None and not reuse else it_rec["t_lin"]
+            dxp_ = x - x_a
+            it_rec["J_data"] = float(np.sum(Sy_inv_diag * resid ** 2))
+            it_rec["J_prior"] = float(dxp_ @ Sa_inv @ dxp_)
         KtSyinv = K.T * Sy_inv_diag[None, :]
         A = KtSyinv @ K + Sa_inv
         b = KtSyinv @ resid - Sa_inv @ (x - x_a)
@@ -1193,7 +1252,12 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
         # is unaffected -- this only short-circuits when the cheapest
         # trial was ALREADY going to be tiny.
         dx_cheap = np.linalg.solve(A + lam * np.diag(diagA), b)
-        if np.linalg.norm(dx_cheap / dxs) < tol:
+        pred_cheap = float(b @ dx_cheap + lam * (dx_cheap * diagA) @ dx_cheap)
+        if np.linalg.norm(dx_cheap / dxs) < tol or (lm_stop_pred_rel > 0.0 and pred_cheap < lm_stop_pred_rel * abs(J_cur)):
+            if rec:
+                it_rec.update(accepted=False, tries=0, lam_end=lam, J=J_cur, t_iter=_time.time() - t_it0, converged_early=True,
+                              rms_resid=float(np.sqrt(np.mean(resid ** 2))), step_sigma=float(np.linalg.norm(dx_cheap / dxs)),
+                              step_by_row={})
             if verbose:
                 print(f"  [{label}] iter {it}: |dx_cheap/sigma|={np.linalg.norm(dx_cheap / dxs):.3e} "
                      f"(raw |dx_cheap|={np.linalg.norm(dx_cheap):.3e}) < tol "
@@ -1230,16 +1294,29 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
             # try/except stays as the general-purpose backstop for
             # whatever isn't (or can't be) bounded this way: reject an
             # invalid trial and damp harder, not propagate the exception.
+            _tt0 = _time.time()
             try:
                 if reuse:
-                    trial_lin = jacobian_fn(x_trial)          # (y, K, K_g): the forward value AND the next Jacobian
+                    trial_lin = _lin_call(x_trial)          # (y, K, K_g): the forward value AND the next Jacobian
                     resid_trial = y_true - trial_lin[0]
                 else:
-                    resid_trial = y_true - forward(x_trial)
+                    resid_trial = y_true - _fwd_call(x_trial)
             except ValueError:
+                if rec:
+                    it_rec["trials"].append(dict(lam=lam, t=_time.time() - _tt0, error="ValueError (invalid trial state)", accepted=False))
+                    diag["totals"]["n_rejected"] += 1
                 lam *= lm_up
                 continue
             J_trial = _objective(resid_trial, x_trial)
+            if rec:
+                pred_ = float(b @ dx_trial + lam * (dx_trial * diagA) @ dx_trial)
+                tr_ = dict(lam=lam, t=_time.time() - _tt0, J_trial=J_trial, actual=J_cur - J_trial, predicted=pred_,
+                           rho=((J_cur - J_trial) / pred_ if pred_ > 0 else float("nan")), accepted=bool(J_trial < J_cur),
+                           step_sigma=float(np.linalg.norm(dx_trial / dxs)))
+                it_rec["trials"].append(tr_)
+                it_rec["t_trials"] += tr_["t"]
+                if not tr_["accepted"]:
+                    diag["totals"]["n_rejected"] += 1
             if J_trial < J_cur:
                 if lm_gain_ratio:
                     pred = float(b @ dx_trial + lam * (dx_trial * diagA) @ dx_trial)   # predicted reduction of J
@@ -1265,6 +1342,10 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
                   f"(raw |dx|={np.linalg.norm(dx):.3e}) "
                   f"rms_resid={rms:.4g} J={J_cur:.6g} lam={lam:.3g} "
                   f"accepted={accepted} tries={n_tries}", flush=True)
+        if rec:
+            it_rec.update(accepted=accepted, tries=n_tries, lam_end=lam, J=J_cur, t_iter=_time.time() - t_it0,
+                          rms_resid=float(np.sqrt(np.mean(resid ** 2))), step_sigma=float(np.linalg.norm(dx / dxs)),
+                          step_by_row={nm: float(np.linalg.norm(dx[sl_] / dxs[sl_])) for nm, sl_ in _slices.items()} if _slices else {})
         if not accepted:
             # No damping level (up to lm_max_tries) improved the objective
             # -- a genuine stationary point (or numerical floor), not a
@@ -1317,6 +1398,39 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
     if return_cov:
         return (x, S_ret, avk) if s_g_total is None else (x, S_ret, avk, s_g_total)
     return (x, avk) if s_g_total is None else (x, avk, s_g_total)
+
+
+def format_gn_diagnostics(diag: dict, top_rows: int = 3) -> str:
+    """Render the ``diag`` dict filled by :func:`gauss_newton_state` as a per-iteration table plus totals."""
+    lines = []
+    st = diag.get("settings", {})
+    lines.append(f"Gauss-Newton diagnostics: n_free {st.get('n_free')}, lm_reuse_lin={st.get('lm_reuse_lin')}, "
+                 f"lm_gain_ratio={st.get('lm_gain_ratio')}, max_iter {st.get('max_iter')}, tol {st.get('tol')}")
+    lines.append(f"{'it':>3} {'tries':>5} {'lam start':>10} {'lam end':>10} {'J':>10} {'dJ(acc)':>9} {'rho(acc)':>9} "
+                 f"{'|dx/s|':>8} {'t_lin[s]':>9} {'t_trials[s]':>11}  largest step rows (|dx/sigma|)")
+    J_prev = None
+    for r in diag["iterations"]:
+        acc = next((t for t in r["trials"] if t.get("accepted")), None)
+        rows = ""
+        if r.get("step_by_row"):
+            top = sorted(r["step_by_row"].items(), key=lambda kv: -kv[1])[:top_rows]
+            rows = ", ".join(f"{k} {v:.2f}" for k, v in top)
+        lines.append(f"{r['it']:3d} {r.get('tries', len(r['trials'])):5d} {r['lam_start']:10.2e} {r.get('lam_end', float('nan')):10.2e} "
+                     f"{r.get('J', float('nan')):10.2f} {(acc['actual'] if acc else 0.0):9.2f} {(acc['rho'] if acc else float('nan')):9.2f} "
+                     f"{r.get('step_sigma', float('nan')):8.3f} {r['t_lin']:9.1f} {r['t_trials']:11.1f}  {rows}")
+        for t in r["trials"]:
+            if not t.get("accepted"):
+                lines.append(f"      rejected trial: lam {t['lam']:.2e}, |dx/s| {t.get('step_sigma', float('nan')):.3f}, "
+                             f"J_trial {t.get('J_trial', float('nan')):.2f}, actual dJ {t.get('actual', float('nan')):.2f} vs predicted "
+                             f"{t.get('predicted', float('nan')):.2f} (rho {t.get('rho', float('nan')):.2f}), {t['t']:.0f} s"
+                             + (f" [{t['error']}]" if t.get("error") else ""))
+    tot = diag["totals"]
+    wall = diag.get("t_initial", 0.0) + sum(r.get("t_iter", 0.0) for r in diag["iterations"])
+    lines.append(f"totals: {len(diag['iterations'])} iterations, {tot['n_lin']} linearizations ({tot['t_lin']:.0f} s), "
+                 f"{tot['n_fwd']} forward evaluations ({tot['t_fwd']:.0f} s), {tot['n_rejected']} rejected trials; "
+                 f"solver wall time {wall:.0f} s (incl. {diag.get('t_initial', 0.0):.0f} s initial evaluation; linearization {100 * tot['t_lin'] / max(wall, 1e-9):.0f}%, "
+                 f"forward {100 * tot['t_fwd'] / max(wall, 1e-9):.0f}%, other {100 * (wall - tot['t_lin'] - tot['t_fwd']) / max(wall, 1e-9):.0f}%)")
+    return "\n".join(lines)
 
 
 _RENDER_AT_ANCHORS_G: dict = {}

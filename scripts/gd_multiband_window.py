@@ -53,7 +53,7 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
                            g_ratio=None, anchor_density=4, anchor_mode="cover", solver="xrtm",
                            state_interp=None, prior_form=None, gamma=None, anchor_workers=1,
                            psf_fwhm_px=1.5, verbose=True, hook=None, aerosol=False,
-                           bin_centers_override=None, noise_seed=None, truth_cloud=None, lm_fast=False):
+                           bin_centers_override=None, noise_seed=None, truth_cloud=None, lm_fast=False, diagnostics=False):
     """Joint hi-res solve of one window.
 
     rows_by_fpa : {fpa: (row_lo, row_hi)}; the FIRST entry is the reference band (sets G).
@@ -214,10 +214,15 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
                              B=B, bin_centers=bin_centers, anchor_etas=anchor_etas, G=G,
                              n_data_by_band={f: y_true[f].size for f in fpas}))
         t0 = time.time()
+        gn_diag = {}
         label = "+".join(f"FPA{f}[{rows_by_fpa[f][0]}-{rows_by_fpa[f][1]}]" for f in fpas)
         x, S_ret, avk = gauss_newton_state(fwd, y, mb.joint, Sy_inv, label=label, verbose=verbose,
                                            jacobian_fn=jac_joint, return_cov=True, return_avk=True,
-                                           lm_reuse_lin=lm_fast, lm_gain_ratio=lm_fast)
+                                           lm_reuse_lin=lm_fast, lm_gain_ratio=lm_fast, lm_stop_pred_rel=(1e-5 if lm_fast else 0.0),
+                                           diag=gn_diag if diagnostics else None)
+        if diagnostics:
+            from geocarb_gert.joint_state import format_gn_diagnostics
+            print(format_gn_diagnostics(gn_diag), flush=True)
         resid = y - fwd(x)
     finally:
         for holder in pools:
@@ -226,6 +231,7 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
     sizes = [y_true[f].size for f in fpas]
     splits = np.cumsum([0] + sizes)
     return dict(fpas=fpas, rows_by_fpa={f: tuple(rows_by_fpa[f]) for f in fpas}, G=G, bin_centers=bin_centers,
+                gn_diagnostics=(gn_diag if diagnostics else None),
                 anchor_etas=anchor_etas, anchor_mode=anchor_mode, free=free, solver=solver, aerosol=aerosol, noise_seed=noise_seed, noise_check=noise_check,
                 joint=mb.joint.snapshot(x, resid=resid, resid_rms=float(np.sqrt(np.mean(resid ** 2))),
                                         cov=S_ret, avk=avk, dof=float(np.trace(avk))),
@@ -266,6 +272,9 @@ def main():
     ap.add_argument("--cloud-x0-km", type=float, default=700.0)
     ap.add_argument("--cloud-plateau-km", type=float, default=30.0)
     ap.add_argument("--cloud-edge-km", type=float, default=150.0, help="taper width: optical depth fades to 0 over this distance")
+    ap.add_argument("--diagnostics", action="store_true",
+                    help="record every Gauss-Newton iteration and trial step (damping, gain ratio, wall time, per-row step sizes), "
+                         "print the table at the end and save it as result['gn_diagnostics']")
     ap.add_argument("--lm-fast", action="store_true",
                     help="opt-in Gauss-Newton speedups (joint_state.gauss_newton_state lm_reuse_lin + lm_gain_ratio): "
                          "Nielsen gain-ratio damping and reuse of each accepted trial's linearization; default off")
@@ -365,7 +374,7 @@ def main():
         from geocarb_gert.cloud_scene import Cloud
         cloud = Cloud(tau0=a.cloud_tau, p_centre_hpa=a.cloud_p_hpa, x0_km=a.cloud_x0_km, plateau_km=a.cloud_plateau_km,
                       edge_km=a.cloud_edge_km)
-    res = solve_window_multiband(rows, a.free.split(","), noise_seed=a.noise_seed, truth_cloud=cloud, lm_fast=a.lm_fast, g_ratio=a.g_ratio, anchor_density=a.anchor_density,
+    res = solve_window_multiband(rows, a.free.split(","), noise_seed=a.noise_seed, truth_cloud=cloud, lm_fast=a.lm_fast, diagnostics=a.diagnostics, g_ratio=a.g_ratio, anchor_density=a.anchor_density,
                                  anchor_mode=a.anchor_mode, solver=a.solver, anchor_workers=a.anchor_workers, prior_fields=a.prior_fields,
                                  aerosol=a.aerosol, bin_centers_override=geom_bin_centers)
     name = f"mb_fpa{'-'.join(map(str, fpas))}_" + "_".join(f"r{f}-{rows[f][0]}-{rows[f][1]}" for f in fpas) \
