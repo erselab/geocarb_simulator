@@ -1203,7 +1203,9 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
 
         accepted = False
         dx = np.zeros(n)
+        n_tries = 0
         for _try in range(lm_max_tries):
+            n_tries += 1
             A_damped = A + lam * np.diag(diagA)
             dx_trial = np.linalg.solve(A_damped, b)
             x_trial = spec.clip_trial(x + dx_trial)
@@ -1262,7 +1264,7 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
             print(f"  [{label}] iter {it}: |dx/sigma|={np.linalg.norm(dx / dxs):.3e} "
                   f"(raw |dx|={np.linalg.norm(dx):.3e}) "
                   f"rms_resid={rms:.4g} J={J_cur:.6g} lam={lam:.3g} "
-                  f"accepted={accepted}", flush=True)
+                  f"accepted={accepted} tries={n_tries}", flush=True)
         if not accepted:
             # No damping level (up to lm_max_tries) improved the objective
             # -- a genuine stationary point (or numerical floor), not a
