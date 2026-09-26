@@ -53,7 +53,7 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
                            g_ratio=None, anchor_density=4, anchor_mode="cover", solver="xrtm",
                            state_interp=None, prior_form=None, gamma=None, anchor_workers=1,
                            psf_fwhm_px=1.5, verbose=True, hook=None, aerosol=False,
-                           bin_centers_override=None, noise_seed=None, truth_cloud=None, lm_fast=False, diagnostics=False):
+                           bin_centers_override=None, noise_seed=None, truth_cloud=None, lm_fast=True, diagnostics=False):
     """Joint hi-res solve of one window.
 
     rows_by_fpa : {fpa: (row_lo, row_hi)}; the FIRST entry is the reference band (sets G).
@@ -275,9 +275,11 @@ def main():
     ap.add_argument("--diagnostics", action="store_true",
                     help="record every Gauss-Newton iteration and trial step (damping, gain ratio, wall time, per-row step sizes), "
                          "print the table at the end and save it as result['gn_diagnostics']")
-    ap.add_argument("--lm-fast", action="store_true",
-                    help="opt-in Gauss-Newton speedups (joint_state.gauss_newton_state lm_reuse_lin + lm_gain_ratio): "
-                         "Nielsen gain-ratio damping and reuse of each accepted trial's linearization; default off")
+    ap.add_argument("--lm-fast", action=argparse.BooleanOptionalAction, default=True,
+                    help="Gauss-Newton speedups (joint_state.gauss_newton_state lm_reuse_lin + lm_gain_ratio + lm_stop_pred_rel): "
+                         "Nielsen gain-ratio damping, reuse of each accepted trial's linearization, stop when the predicted gain is "
+                         "below 1e-5 of J. DEFAULT ON since 2026-09-26 (the old damping left the aerosol solves unconverged); "
+                         "--no-lm-fast restores the earlier scheme. Results carry the _lmfast filename tag when on.")
     ap.add_argument("--check-aerosol", action="store_true",
                     help="print the per-band aerosol optical properties that this command line selects, then exit "
                          "(no inputs are loaded)")
