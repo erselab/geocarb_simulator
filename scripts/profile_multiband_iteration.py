@@ -16,6 +16,7 @@ Also reports the sizes that drive them (anchors, wavelengths, state columns, sha
 """
 import argparse
 import collections
+import os
 import sys
 import time
 from pathlib import Path
@@ -56,7 +57,11 @@ def main():
     ap.add_argument("--tile", type=int, required=True)
     ap.add_argument("--free", required=True)
     ap.add_argument("--anchor-workers", type=int, default=8)
+    ap.add_argument("--aerosol-type", default=None,
+                    help="profile the aerosol solve (XRTM; pass amplitude_aerosol,height_aerosol in --free) with this type")
     a = ap.parse_args()
+    if a.aerosol_type:
+        os.environ["GEOCARB_AEROSOL_TYPE"] = a.aerosol_type
     fpas = [int(t) for t in a.fpas.split(",")]
     rows = dict(build_window_tiles_multiband(fpas, gjr.MIN_WINDOW, 1.0, 2)[a.tile].rows)
 
@@ -101,7 +106,9 @@ def main():
         return True
 
     gmw.solve_window_multiband(rows, a.free.split(","), g_ratio=1.0, anchor_mode="cover",
-                               anchor_workers=a.anchor_workers, hook=hook, verbose=False)
+                               anchor_workers=a.anchor_workers, hook=hook, verbose=False,
+                               aerosol=bool(a.aerosol_type), prior_fields="realistic",
+                               solver="xrtm" if a.aerosol_type else "single_scatter")
 
 
 if __name__ == "__main__":
