@@ -178,3 +178,44 @@ the largest keystone of the bands in the pair). Cross-pairing plots therefore do
 bin positions. Goal: a single geometry config (tile eta ranges + explicit `bin_centers`) used by every
 multi-band sweep, so all results share spatial locations. Open choices: which tiling (e.g. all-four-band
 max keystone vs the finest pair's), and the rerun cost (noiseless + noise seeds 1-3 for every band set).
+
+## 11. Assessment: analytic surface-pressure Jacobian under XRTM with aerosol (2026-09-26, not implemented)
+
+Today `jacobians.p_surface_dI_dparam` uses an RT finite difference (2 extra XRTM calls per anchor per iteration) whenever an
+aerosol row is present; every other row (amplitude, height via `height_aerosol_dI_dparam_xrtm`, gases, T, H2O, albedo) is
+analytic. So p_surface is the ONLY finite-difference column in the 4-band aerosol solve. Measured cost of one 4-band aerosol tile
+(tile 12, 744 unknowns, smoke Mie): 4.3 h on 16 CPUs, ~200 GB peak; the same tile without aerosol: 16 min, ~31 GB.
+
+**Physics.** p_l = sigma_l * p_sfc (pure sigma levels), so every layer quantity moves with p_sfc:
+1. gas optical depth (pressure, temperature, H2O paths) -- ALREADY analytic: `sum_l K_mol_lay * dtau_l/dp_sfc` (T and H2O
+   paths by algebra-only central differences of `atmosphere_from_params`);
+2. Rayleigh optical depth: `dtau_ray_l/dp_sfc = tau_ray_l/p_sfc` exactly. Its effect on I needs, per layer, dI/dtau_ray_l =
+   K_tau_lay + K_ssa_lay * d(omega_l)/dtau_ray_l + K_coef_ray_lay. The first two are available from existing per-layer arrays
+   (omega_l = tau_sca/tau_tot -> d omega/d tau_ray = (1 - omega)/tau_tot); K_coef_ray_lay (the layer phase-function-moment
+   response to Rayleigh fraction) is NOT: gert's XRTM coefficient seeds exist only for aerosol (`combined_layer_coef_aer_deriv`,
+   slots 2n+n_surf+l);
+3. aerosol layer profile: the Gaussian layer fractions `aer_frac_l` (gert `forward_model.py`, the layer-weight function near line 67)
+   are functions of the layer pressures, hence of p_sfc: `sum_l K_aer_lay[l] * tau_aer_col * d(aer_frac_l)/dp_sfc`, where the
+   fraction derivative is algebra only (analogous to height_aerosol_dI_dparam_xrtm). `K_aer_lay` already includes its own
+   coefficient term (`K_coef_aer_lay`, gert commit 1f095b9). height_aerosol is its own state row, so it does not move with p_sfc.
+
+**Work items.**
+- gert (private repo): a Rayleigh phase-moment derivative `combined_layer_coef_ray_deriv` (mirror of the aerosol one) and XRTM
+  seeds for it. Cheapest form: ONE extra derivative slot seeded with the directional derivative along p_sfc
+  (`d chi_l/d tau_ray_l * tau_ray_l/p_sfc` summed as a direction), instead of n_layers extra slots; expose it as a new ForwardResult
+  field. Confirm XRTM's per-slot cost so the extra slot is cheaper than the 2 RT calls it replaces.
+- geocarb_gert/jacobians.py: `_p_surface_dI_dparam_xrtm_aerosol` composing the three parts; dispatch when `solver == "xrtm"` and an
+  aerosol row is present; keep the FD as an option (`GEOCARB_PSURF_FD=1`) for regression.
+- Check first whether the existing no-aerosol XRTM path (`_p_surface_dI_dparam_analytic` under XRTM) already omits the Rayleigh
+  coefficient term; if so it has a small residual that this work would also fix.
+- Validation: cosine and relative error against the current FD over anchors spanning p_sfc 750-1000 hPa (the mountain), thin and
+  thick aerosol, all four bands, two-stream and a higher-stream XRTM run; target < 1e-3 relative. Then re-converge tile 12 and
+  compare the retrieved state and iteration count.
+- Profile before committing: time the RT calls per GN iteration on one tile to measure the FD share (by call count it is 2 of 3 RT
+  calls per anchor iteration, i.e. a possible 2-3x; not yet measured).
+
+**Cheaper alternatives / partial wins.** (a) one-sided instead of central FD: 1 extra RT call, O(h) error; (b) a fully general
+directional-derivative seed in gert (one slot carrying all per-layer tau/omega/coef perturbations) -- exact but a larger gert change;
+(c) more frequent anchor-pool respawns to cut memory (does not reduce time); (d) run a tile subset.
+**Risk.** Changes live in gert; the Rayleigh phase-moment term is the only new physics; a mistake there gives a biased Jacobian that
+still converges (see the earlier 6-10% p_surface error found with aerosol), so the FD comparison is the gate.
