@@ -298,6 +298,10 @@ def p_surface_dI_dparam(res, params, window: int = 0, h_rel: float = 1e-6,
     `height_aerosol_dI_dparam`'s own accepted cost tradeoff -- this
     falls back to 2 extra full RT calls rather than trying to patch in
     just the missing piece analytically.
+
+    **Update 2026-09-26:** under ``solver="xrtm"`` (with gert's ``psurf_seed`` slot) the aerosol case is now fully analytic
+    via `_p_surface_dI_dparam_xrtm_aerosol` (aerosol layer-weight shift + the Rayleigh phase-moment term); the RT finite
+    difference described above remains the path for ``single_scatter`` + aerosol and when ``GEOCARB_PSURF_FD=1``.
     """
     if tau_aer is None:
         return _p_surface_dI_dparam_analytic(res, params, window=window, h_rel=h_rel)

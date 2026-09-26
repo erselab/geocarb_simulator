@@ -179,7 +179,7 @@ bin positions. Goal: a single geometry config (tile eta ranges + explicit `bin_c
 multi-band sweep, so all results share spatial locations. Open choices: which tiling (e.g. all-four-band
 max keystone vs the finest pair's), and the rerun cost (noiseless + noise seeds 1-3 for every band set).
 
-## 11. Assessment: analytic surface-pressure Jacobian under XRTM with aerosol (2026-09-26, not implemented)
+## 11. Analytic surface-pressure Jacobian under XRTM with aerosol (assessed and IMPLEMENTED 2026-09-26; see PROJECT_STATUS Sec.40)
 
 Today `jacobians.p_surface_dI_dparam` uses an RT finite difference (2 extra XRTM calls per anchor per iteration) whenever an
 aerosol row is present; every other row (amplitude, height via `height_aerosol_dI_dparam_xrtm`, gases, T, H2O, albedo) is
@@ -219,3 +219,5 @@ directional-derivative seed in gert (one slot carrying all per-layer tau/omega/c
 (c) more frequent anchor-pool respawns to cut memory (does not reduce time); (d) run a tile subset.
 **Risk.** Changes live in gert; the Rayleigh phase-moment term is the only new physics; a mistake there gives a biased Jacobian that
 still converges (see the earlier 6-10% p_surface error found with aerosol), so the FD comparison is the gate.
+
+**Status 2026-09-26: implemented as planned** (gert `psurf-analytic-jacobian`, merged; `_p_surface_dI_dparam_xrtm_aerosol`). One directional derivative slot (not n_layers) carries the Rayleigh phase-moment term. Relative L2 error vs the FD 5e-6..1.2e-3; per-anchor Jacobian evaluation ~2.4x faster. `GEOCARB_PSURF_FD=1` keeps the FD available.

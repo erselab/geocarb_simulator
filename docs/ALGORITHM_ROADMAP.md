@@ -396,7 +396,7 @@ diagnostic run") FPA2 retrieval should look like, and why:
    (pre-aerosol) analytic Jacobian is missing a real cross-term through
    the SAME hard pressure-grid/aerosol-mask threshold -- fixed via a
    conditional RT-level-FD fallback, zero behavior change when aerosol
-   is absent; (4) **the actual truth-rendering path** (`gd_per_row_retrieve.py::
+   is absent (2026-09-26: under XRTM this is now fully analytic, PROJECT_STATUS Sec.40; the FD remains for single_scatter+aerosol and via GEOCARB_PSURF_FD=1); (4) **the actual truth-rendering path** (`gd_per_row_retrieve.py::
    _band_setup`'s own THIRD independent inline spectrum-builder, used
    by `--prior-fields exact` and every standard run) **never threaded
    aerosol through at all** -- a genuine truth-vs-model physics
