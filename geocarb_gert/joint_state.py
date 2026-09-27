@@ -1253,16 +1253,20 @@ def gauss_newton_state(forward, y_true, spec: StateSpec, Sy_inv_diag,
         # trial was ALREADY going to be tiny.
         dx_cheap = np.linalg.solve(A + lam * np.diag(diagA), b)
         pred_cheap = float(b @ dx_cheap + lam * (dx_cheap * diagA) @ dx_cheap)
-        if np.linalg.norm(dx_cheap / dxs) < tol or (lm_stop_pred_rel > 0.0 and pred_cheap < lm_stop_pred_rel * abs(J_cur)):
+        stop_step = np.linalg.norm(dx_cheap / dxs) < tol
+        stop_pred = lm_stop_pred_rel > 0.0 and pred_cheap < lm_stop_pred_rel * abs(J_cur)
+        if stop_step or stop_pred:
+            stop_reason = ("step: |dx_cheap/sigma| < tol" if stop_step else
+                           f"predicted gain {pred_cheap:.3g} < {lm_stop_pred_rel:g} * J ({lm_stop_pred_rel * abs(J_cur):.3g})")
             if rec:
                 it_rec.update(accepted=False, tries=0, lam_end=lam, J=J_cur, t_iter=_time.time() - t_it0, converged_early=True,
+                              stop_reason=stop_reason,
                               rms_resid=float(np.sqrt(np.mean(resid ** 2))), step_sigma=float(np.linalg.norm(dx_cheap / dxs)),
                               step_by_row={})
             if verbose:
-                print(f"  [{label}] iter {it}: |dx_cheap/sigma|={np.linalg.norm(dx_cheap / dxs):.3e} "
-                     f"(raw |dx_cheap|={np.linalg.norm(dx_cheap):.3e}) < tol "
-                     f"-- converged, skipping the {lm_max_tries}-try inner search "
-                     f"(no forward() calls spent)", flush=True)
+                print(f"  [{label}] iter {it}: converged -- {stop_reason}; least-damped step "
+                     f"|dx_cheap/sigma|={np.linalg.norm(dx_cheap / dxs):.3e} (raw |dx_cheap|={np.linalg.norm(dx_cheap):.3e}), "
+                     f"tol {tol:g}; skipping the {lm_max_tries}-try inner search (no forward() calls spent)", flush=True)
             break
 
         accepted = False
@@ -1424,6 +1428,9 @@ def format_gn_diagnostics(diag: dict, top_rows: int = 3) -> str:
                              f"J_trial {t.get('J_trial', float('nan')):.2f}, actual dJ {t.get('actual', float('nan')):.2f} vs predicted "
                              f"{t.get('predicted', float('nan')):.2f} (rho {t.get('rho', float('nan')):.2f}), {t['t']:.0f} s"
                              + (f" [{t['error']}]" if t.get("error") else ""))
+    for r in diag["iterations"]:
+        if r.get("stop_reason"):
+            lines.append(f"stopped at iteration {r['it']}: {r['stop_reason']}")
     tot = diag["totals"]
     wall = diag.get("t_initial", 0.0) + sum(r.get("t_iter", 0.0) for r in diag["iterations"])
     lines.append(f"totals: {len(diag['iterations'])} iterations, {tot['n_lin']} linearizations ({tot['t_lin']:.0f} s), "
