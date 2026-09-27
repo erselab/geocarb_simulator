@@ -33,6 +33,7 @@ tiles = build_window_tiles_multiband((0, 2), gjr.MIN_WINDOW, 1.0, 2)
 by_rows = {tuple(t.rows[0]): i for i, t in enumerate(tiles)}
 FREE_TAG = "co2-p-h2o-t-albedo-amplitude-height" if AEROSOL else "co2-p-h2o-t-albedo"
 ASUF = "_aero" if AEROSOL else ""
+LMSUF = "_registry_smoke_lmfast" if "--lmfast" in sys.argv else ""  # 2026-09-27: --lm-fast-default rerun, Mie registry_smoke
 files = sorted(glob.glob(str(REPO / (f"results/realistic_prior/multiband/mb_fpa0-2_r0-*_r2-*_free-{FREE_TAG}_cover_g1.0_etaslit" + PSUF + ASUF + ".pkl"))))
 res = {}
 for f in files:

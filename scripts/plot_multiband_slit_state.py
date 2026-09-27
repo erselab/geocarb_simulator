@@ -27,6 +27,7 @@ PRIOR = sys.argv[sys.argv.index("--prior") + 1] if "--prior" in sys.argv else "s
 AEROSOL = "--aerosol" in sys.argv
 PSUF = "" if PRIOR == "structural" else f"_prior-{PRIOR}"
 ASUF = "_aero" if AEROSOL else ""
+LMSUF = "_registry_smoke_lmfast" if "--lmfast" in sys.argv else ""  # 2026-09-27: --lm-fast-default rerun, Mie registry_smoke
 FREE_TAG = "co2-p-h2o-t-albedo-amplitude-height" if AEROSOL else "co2-p-h2o-t-albedo"
 
 ROWS = [("p_surface_hpa", None, "surface pressure [hPa]"), ("h2o_surface_vmr", None, "H$_2$O surface vmr"),
@@ -106,7 +107,7 @@ for name, label, ylabel in ROWS:
     a.set_ylabel("error", color=ink)
     a.legend(frameon=False, loc="lower right", fontsize=9)
     plt.tight_layout()
-    out = REPO / f"plots/{name}_multiband_prior_truth_posterior{PSUF}{ASUF}.png"
+    out = REPO / f"plots/{name}_multiband_prior_truth_posterior{PSUF}{ASUF}{LMSUF}.png"
     fig.savefig(out, dpi=140, bbox_inches="tight")
     plt.close(fig)
     print("  saved", out)

@@ -46,8 +46,9 @@ def load_arm(free_tag, aero_suf):
     return [pickle.load(open(f, "rb")) for f in files]
 
 
+LMSUF = "_registry_smoke_lmfast" if "--lmfast" in sys.argv else ""  # 2026-09-27: --lm-fast-default rerun, Mie registry_smoke
 noaero = load_arm("co2-p-h2o-t-albedo", "")
-aero = load_arm("co2-p-h2o-t-albedo-amplitude-height", "_aero")
+aero = load_arm("co2-p-h2o-t-albedo-amplitude-height", "_aero" + LMSUF)
 print(f"{len(noaero)} no-aerosol tiles, {len(aero)} aerosol tiles")
 by_rows_aero = {tuple(d["rows_by_fpa"][0]): d for d in aero}
 
@@ -98,7 +99,7 @@ for name, label, ylabel in ROWS:
     a_.set_ylabel("error", color=ink)
     a_.legend(frameon=False, loc="lower right", fontsize=8)
     plt.tight_layout()
-    out = REPO / f"plots/{name}_multiband_aerosol_vs_noaerosol{PSUF}.png"
+    out = REPO / f"plots/{name}_multiband_aerosol_vs_noaerosol{PSUF}{LMSUF}.png"
     fig.savefig(out, dpi=140, bbox_inches="tight")
     plt.close(fig)
     print("  saved", out)
