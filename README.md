@@ -13,9 +13,19 @@ usable:
 The joint-block retrieval is where most of this project's actual development
 has happened — see `docs/PROJECT_STATUS.md` (chronological build log) and
 `docs/ALGORITHM_ROADMAP.md` (current state and open questions) for the full
-record; auto-generated API docs are hosted at the repo's GitHub Pages site.
-The rest of this README documents the geometry engine (`geosat_geometry.py`
-and friends) in detail, plus a `geocarb_gert` overview near the bottom.
+written record; auto-generated API docs are hosted at the repo's GitHub Pages
+site. The rest of this README documents the geometry engine (`geosat_geometry.py`
+and friends) in detail, plus a `geocarb_gert` overview (including RT/retrieval
+install requirements) near the bottom.
+
+**New to this repo?** `notebooks/onboarding_retrievals_tour.ipynb` is a guided,
+runnable walkthrough of the RT/retrieval side specifically: environment checks,
+a small single-band and a small multi-band retrieval sized to run interactively,
+how to read and plot the `.pkl` result files every sweep produces, and a
+from-scratch section on sizing your own minimum working example. It's the
+fastest way to get oriented in the code before reading `PROJECT_STATUS.md`
+end to end — see [Requirements](#requirements-for-the-rtretrieval-side-geocarb_gert)
+below for what you need installed first.
 
 ---
 
@@ -755,6 +765,67 @@ PROJECT_STATUS.md` for how the joint-block retrieval came to live here). See
 *independent of GSD* — unlike a LEO pushbroom, where `t_int = GSD/v_ground`.
 That is the GEO advantage, and it is why the GSD↔dwell coupling lives here and
 not in the library.
+
+### Requirements (for the RT/retrieval side, `geocarb_gert`)
+
+Running any RT forward model or retrieval (not just the geometry engine above)
+needs two things beyond `environment.yml`'s own package list, which only
+covers the pure-geometry side:
+
+1. **A sibling [`gert`](../../gert) checkout** — the RT/retrieval library this
+   project's own `geocarb_gert` package is built on top of. `geocarb_gert.paths.
+   gert_root()` looks for it at `../../gert` relative to this repo (the
+   documented layout), then `../gert`, then `$GERT_ROOT`, then a hardcoded HPC
+   fallback (`/scratch/scrowel3_lab/gert`) — see that module's own docstring.
+   Point `GERT_ROOT` at your checkout if none of the auto-detected layouts fit.
+   `gert` needs its own `input/absco/absco.h5` (absorption cross-section
+   lookup table, **~2.3 GB**) and `input/solar/solar.h5` present — load them
+   whole into memory, so budget **at least 6–8 GB RAM** just for that, before
+   any retrieval runs. The XRTM multiple-scattering solver (needed whenever
+   aerosol is free) additionally needs `gert`'s own compiled `xrtm` extension
+   built; `single_scatter` (the no-aerosol default) needs no compiled solver.
+2. **Python packages** beyond `environment.yml`: `scipy`, `pandas`, `seaborn`
+   (used by this project's own analysis/plotting scripts), and `ipykernel`
+   (to run the onboarding notebook, or any notebook, as a Jupyter kernel).
+   Install into the same environment:
+   ```bash
+   pip install scipy pandas seaborn ipykernel
+   pip install -e /path/to/gert          # or: PYTHONPATH includes it directly
+   ```
+3. **`PYTHONPATH`** must include both this repo's root and the `gert` checkout
+   root, e.g.:
+   ```bash
+   export PYTHONPATH=/path/to/geocarb_simulator:/path/to/gert
+   ```
+
+**Anchor-level parallelism** (`--anchor-workers N` on every driver script)
+forks `N` worker processes, each running the RT solver independently — budget
+roughly 1–3 GB per worker for a small, no-aerosol tile; aerosol tiles (XRTM)
+cost substantially more in both time (~30x slower per call) and memory. A
+whole-slit sweep (~33 tiles) is a batch job (`scripts/submit_multiband_sweep.
+sbatch` on a Slurm cluster), not something to run interactively.
+
+### Quick Start (RT/retrieval)
+
+The fastest path to a working, verified setup is the onboarding notebook
+itself — open `notebooks/onboarding_retrievals_tour.ipynb` and run its first
+cell, which checks every requirement above (imports, `gert_root()` resolution,
+the `absco.h5`/`solar.h5` files, available CPUs/RAM, whether you're on an
+interactive Slurm allocation) and reports exactly what's missing before you
+touch any RT code. From there it walks through:
+
+- a small single-band retrieval and a small multi-band (joint) retrieval,
+  both sized to solve in a couple of minutes interactively;
+- reading and plotting the `.pkl` result files every sweep (interactive or
+  batch) produces, including error histograms and a pairplot of cross-row
+  error correlations;
+- how the standard along-slit tiling is built, and a from-scratch section for
+  sizing your own minimum working example (your own row range, your own free
+  state-vector rows) rather than copying someone else's tile.
+
+For command-line use once you're oriented, the production driver is
+`scripts/gd_multiband_window.py` (single- or multi-band, one tile or the
+whole slit via Slurm array) — see its own `--help` and `docs/MULTIBAND_PLAN.md`.
 
 ### Design sweep
 
