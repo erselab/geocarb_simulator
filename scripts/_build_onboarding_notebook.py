@@ -351,6 +351,62 @@ cells.append(code(
 ))
 
 cells.append(md(
+"### 6a. Error histograms and a pairplot",
+"",
+"Two more views of the same multi-band result, both common enough in this project's own sweep-analysis",
+"scripts to be worth knowing from the start:",
+"",
+"- A **histogram** of `retrieved - truth` for each row -- shows whether a row's error is tight and centred on",
+"  zero (a healthy retrieval) or biased/spread out, without needing to eyeball a noisy along-slit curve.",
+"- A **pairplot** -- every row's error plotted against every other row's error -- surfaces real degeneracies",
+"  directly (e.g. a surface-pressure error that correlates with an aerosol-amplitude error means the two are",
+"  compensating for each other) rather than needing to read a posterior covariance matrix.",
+"",
+"The pairplot needs every row on the SAME set of along-slit positions, but rows are retrieved on different",
+"grids (albedo is on the finest one -- see Section 6's own schema note) -- so we interpolate the coarser rows",
+"onto albedo's own grid first (`np.interp`; already smooth, since it's a coarse retrieval grid to begin with).",
+))
+
+cells.append(code(
+"import pandas as pd",
+"",
+"with open(multi_pkl, \"rb\") as f:",
+"    d = pickle.load(f)",
+"",
+"hist_rows = [(\"co2_ppm\", None), (\"p_surface_hpa\", None), (\"h2o_surface_vmr\", None), (\"t_offset_k\", None),",
+"            (\"albedo_O2_A\", \"O2_A\"), (\"albedo_CO2_strong\", \"CO2_strong\")]",
+"fig, axes = plt.subplots(2, 3, figsize=(14, 6))",
+"for ax, (name, band_label) in zip(axes.ravel(), hist_rows):",
+"    err = row_frame(d, name, band_label)",
+"    e = err[\"retrieved\"] - err[\"truth\"]",
+"    ax.hist(e, bins=20, color=\"tab:blue\", alpha=0.8)",
+"    ax.axvline(0.0, color=\"k\", lw=0.8)",
+"    ax.set_title(f\"{name} error  (mean {e.mean():.3g}, sd {e.std():.3g})\", fontsize=9)",
+"fig.suptitle(\"Error histograms: joint FPA0+FPA2 retrieval, tile 12\")",
+"fig.tight_layout()",
+"plt.show()",
+))
+
+cells.append(code(
+"import seaborn as sns",
+"",
+"# One shared eta grid (albedo's own, the finest) -- interpolate the coarser rows onto it.",
+"x_fine = row_frame(d, \"albedo_O2_A\", \"O2_A\")[\"x_km\"]",
+"pair_df = {}",
+"for name, band_label in hist_rows:",
+"    r = row_frame(d, name, band_label)",
+"    e = r[\"retrieved\"] - r[\"truth\"]",
+"    pair_df[name] = e if name.startswith(\"albedo\") else np.interp(x_fine, r[\"x_km\"], e)",
+"pair_df = pd.DataFrame(pair_df)",
+"",
+"g = sns.PairGrid(pair_df, height=1.8)",
+"g.map_diag(plt.hist, bins=15)",
+"g.map_offdiag(plt.scatter, s=8, alpha=0.5)",
+"g.figure.suptitle(\"Error pairplot: joint FPA0+FPA2 retrieval, tile 12\", y=1.02)",
+"plt.show()",
+))
+
+cells.append(md(
 "## 7. Where the example tiles/windows came from, and how to define your own",
 "",
 "Both examples above used a tile someone else already picked. This section shows the machinery behind that",
