@@ -73,6 +73,9 @@ def build_dataset(pattern):
                                                   # the quality filter's own dp/chi2_red even when the
                                                   # regression itself only stacks a subset at the end below)
     err_cols = {t: [] for t in TARGETS}
+    val_cols = {t: [] for t in TARGETS}    # raw retrieved value (not just error) -- for along-slit plots
+    truth_cols = {t: [] for t in TARGETS}
+    x_cols = []
     for f in sorted(glob.glob(pattern)):
         d = pickle.load(open(f, "rb"))
         params = d["joint"]["params"]
@@ -101,22 +104,29 @@ def build_dataset(pattern):
             va = np.asarray(pa["values"], dtype=float)
             cov_cols[name].append(np.interp(xc, xa, va))
 
+        x_cols.append(xc)
         for name in TARGETS:
             v = np.asarray(params[name]["values"], dtype=float)[keep]
-            err_cols[name].append(v - truth_of(name, xc))
+            t = truth_of(name, xc)
+            err_cols[name].append(v - t)
+            val_cols[name].append(v)
+            truth_cols[name].append(t)
 
     X_full = {c: np.concatenate(cov_cols[c]) for c in all_cov_names}
     X = np.column_stack([X_full[c] for c in COV_NAMES])     # the regression's own (lean) covariate subset
     Y = {t: np.concatenate(err_cols[t]) for t in TARGETS}
+    V = {t: np.concatenate(val_cols[t]) for t in TARGETS}
+    T = {t: np.concatenate(truth_cols[t]) for t in TARGETS}
+    x_km = np.concatenate(x_cols)
     n_tiles = len(glob.glob(pattern))
-    return X, X_full, Y, n_tiles
+    return X, X_full, Y, V, T, x_km, n_tiles
 
 
 print("Loading TRAIN (sulfate + noise seed 1) ...")
-X_train, Xf_train, Y_train, n_train_tiles = build_dataset(TRAIN_PATTERN)
+X_train, Xf_train, Y_train, V_train, T_train, x_train, n_train_tiles = build_dataset(TRAIN_PATTERN)
 print(f"  {n_train_tiles} tiles, {X_train.shape[0]} bins")
 print("Loading TEST (sulfate, noiseless) ...")
-X_test, Xf_test, Y_test, n_test_tiles = build_dataset(TEST_PATTERN)
+X_test, Xf_test, Y_test, V_test, T_test, x_test, n_test_tiles = build_dataset(TEST_PATTERN)
 print(f"  {n_test_tiles} tiles, {X_test.shape[0]} bins\n")
 
 X_train1 = np.column_stack([X_train, np.ones(X_train.shape[0])])
@@ -214,3 +224,32 @@ fig.tight_layout()
 out = REPO / "plots/aerosol_quality_filter_bias_correction.png"
 fig.savefig(out, dpi=140, bbox_inches="tight")
 print(f"\nsaved {out}")
+
+# ---- along-slit view, TEST (noiseless) set: pre-filter, post-filter, and bias-corrected VALUES vs eta,
+# alongside truth -- one panel per target, sharing the X axis (2026-10-01, user's own follow-up request)
+order = np.argsort(x_test)
+fig, axes = plt.subplots(len(TARGETS), 1, figsize=(13, 3.2 * len(TARGETS)), sharex=True)
+for ax, name in zip(axes, TARGETS):
+    r = results[name]
+    xs = x_test[order]
+    truth_s = T_test[name][order]
+    before_s = V_test[name][order]                       # pre-filter: every retrieved value, uncorrected
+    corrected_s = (r["y_corr"] + T_test[name])[order]     # bias-corrected: full set, shifted by -predicted bias
+    keep_s = r["keep_te"][order]
+
+    ax.plot(xs, truth_s, color="k", lw=1.2, label="truth", zorder=5)
+    ax.plot(xs, before_s, color="tab:red", lw=0.9, alpha=0.8, label="pre-filter (retrieved)")
+    # scatter, not a connected line: `keep_s` has real gaps (filtered-out bins), and a line would bridge
+    # straight across them -- a misleading artifact, not real data.
+    ax.scatter(xs[keep_s], before_s[keep_s], color="tab:green", s=5, alpha=0.9, zorder=4,
+              label="post-filter (retained only)")
+    ax.plot(xs, corrected_s, color="tab:blue", lw=0.9, alpha=0.8, label="bias-corrected")
+    ax.set_ylabel(name)
+    ax.legend(fontsize=8, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.12 if ax is axes[-1] else 1.25))
+axes[-1].set_xlabel("along-slit position [km]")
+fig.suptitle("Quality filter + bias correction along the slit -- sulfate, noiseless (held-out test), "
+            "correction trained on sulfate+noise1", y=1.01)
+fig.tight_layout()
+out2 = REPO / "plots/aerosol_quality_filter_along_slit.png"
+fig.savefig(out2, dpi=140, bbox_inches="tight")
+print(f"saved {out2}")
