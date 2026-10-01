@@ -22,6 +22,12 @@ Covariates are everything operationally available without knowing truth: dp (ret
 d_amplitude/d_height (retrieved - prior aerosol), 4 retrieved per-band albedos, and the tile's own reduced
 chi^2.
 
+**Iterative (2026-10-01, user: "ACOS does this in an iterative way. Trial filter, bias correct, new trial
+filter, additional bias correction."):** matches O'Dell et al. 2018's own practice -- the quality filter and
+the regression are refit against the CURRENT residual each pass (trial filter -> fit+apply correction ->
+re-filter the now-smaller residual -> fit+apply another correction -> ...), stopping per-target once a trial
+regression fails the CV gate or an iteration's own relative RMS gain falls below `ITER_STOP_GAIN`.
+
     PYTHONPATH=.:<gert> python scripts/aerosol_quality_filter_bias_correction.py
 """
 import glob
@@ -68,7 +74,7 @@ def truth_of(name, x_km, label=None):
 
 def build_dataset(pattern):
     """One row per BIN across every tile matching `pattern`: covariates + per-target (retrieved - truth)."""
-    all_cov_names = ["dp", "d_amp", "d_height", "chi2_red"] + [n for n, _ in ALBEDO_ROWS]
+    all_cov_names = ["dp", "d_amp", "d_height", "chi2_red", "amp_ret", "h_ret"] + [n for n, _ in ALBEDO_ROWS]
     cov_cols = {c: [] for c in all_cov_names}     # compute every covariate regardless of COV_NAMES (used for
                                                   # the quality filter's own dp/chi2_red even when the
                                                   # regression itself only stacks a subset at the end below)
@@ -98,6 +104,8 @@ def build_dataset(pattern):
         cov_cols["d_amp"].append(amp_ret - amp_pri)
         cov_cols["d_height"].append(h_ret - h_pri)
         cov_cols["chi2_red"].append(np.full(n, chi2_red))
+        cov_cols["amp_ret"].append(amp_ret)
+        cov_cols["h_ret"].append(h_ret)
         for name, label in ALBEDO_ROWS:
             pa = params[name]
             xa = np.asarray(pa["positions"], dtype=float) * als.SLIT_HALF_KM
@@ -152,106 +160,153 @@ def cv_r2(X1, y, k=5, seed=0):
     return 1.0 - sse / sst
 
 
-# ---- quality filter FIRST: thresholds on |dp| and chi2_red fit on TRAIN. Computed before the regression
-# (reordered 2026-10-01, user: "did you train the bias correction only on the filtered data?" -- it hadn't
-# been; ACOS itself fits its own bias correction only on quality-filtered soundings, precisely so outlier/
-# bad-quality cases don't skew the least-squares fit via high leverage).
-#
-# **Filter design criterion (user, 2026-10-01): "the filtering should be done to restrict the relationships
-# between the error and covariates to a linear regime"** -- NOT simply whichever threshold minimizes train
-# RMS (the earlier version). A linear bias correction is only a valid model where the true error-vs-covariate
-# relationship actually IS close to linear; applying it outside that regime is model misspecification, not
-# just "a bit more uncertain" -- exactly what made the out-of-domain full-set correction above 17.2% WORSE
-# for CO2. So the threshold search below picks the MOST INCLUSIVE (dp_cut, chi2_cut) pair for which a linear
-# fit's own residuals show no remaining trend against dp or dp^2 within the retained range (|corr(resid, dp)|
-# and |corr(resid, dp^2)| both below `LIN_TOL`) -- a direct linearity diagnostic, not an RMS-outcome proxy for
-# one. Falls back to the narrowest (most conservative) grid point if no cut passes the diagnostic.
+# ---- ACOS-style ITERATIVE filter/correct loop (user, 2026-10-01: "ACOS does this in an iterative way.
+# Trial filter, bias correct, new trial filter, additional bias correction.") -- each iteration: (1) fit a
+# trial quality filter (linear-regime dp/chi2_red cut + variance-range amp_ret/h_ret cut) against the
+# CURRENT residual, (2) fit+CV-gate a bias-correction regression on the filtered TRAIN subset, (3) apply it
+# (TRAIN and TEST) to get a new, smaller residual, (4) repeat: the next iteration's filter and regression see
+# the POST-correction residual, so they can pick up any secondary structure the first pass left behind. Stops
+# per-target when a trial regression fails the CV gate (nothing left worth correcting) or the iteration's own
+# relative RMS gain (on the filtered TRAIN subset) drops below `ITER_STOP_GAIN`.
 LIN_TOL = 0.15             # |corr(residual, dp-or-dp^2)| must stay below this within the retained regime
-print(f"{'target':10s} {'dp cut':>10s} {'train retained':>14s} {'test retained':>14s}  (linear-regime filter)")
-dp_tr, chi2_tr = Xf_train["dp"], Xf_train["chi2_red"]
-dp_te, chi2_te = Xf_test["dp"], Xf_test["chi2_red"]
-filter_info = {}
-for name in TARGETS:
-    y_tr = Y_train[name]
-    best = None          # most inclusive (highest retained fraction) cut that still passes the linearity check
-    fallback = None       # narrowest cut tried, in case nothing passes
+STD_MULT = 1.5             # local std must stay within this factor of the best-constrained bin's std
+VAR_FILTER_COVS = ["amp_ret", "h_ret"]
+CV_R2_GATE = 0.05          # below this, the regression is not meaningfully predictive on TRAIN itself -- don't apply it
+ITER_STOP_GAIN = 0.01      # stop iterating once an iteration's relative RMS gain (on filtered TRAIN) drops below this
+MAX_ITERS = 4
+
+
+def linear_regime_cut(dp_tr, chi2_tr, y_tr):
+    """Most-inclusive (dp_cut, chi2_cut) quantile pair whose OWN linear-fit residuals show no remaining trend
+    against dp or dp^2 (the same diagnostic as before, now reusable per-iteration since y_tr changes)."""
+    best = None
+    fallback = None
     for dp_q in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0):
         for c2_q in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0):
             dp_cut = np.quantile(np.abs(dp_tr), dp_q)
             c2_cut = np.quantile(chi2_tr, c2_q)
-            keep_tr = (np.abs(dp_tr) <= dp_cut) & (chi2_tr <= c2_cut)
-            if keep_tr.sum() < 10:
+            keep = (np.abs(dp_tr) <= dp_cut) & (chi2_tr <= c2_cut)
+            if keep.sum() < 10:
                 continue
-            dp_k, y_k = dp_tr[keep_tr], y_tr[keep_tr]
+            dp_k, y_k = dp_tr[keep], y_tr[keep]
             A = np.column_stack([dp_k, np.ones(dp_k.size)])
             coef, *_ = np.linalg.lstsq(A, y_k, rcond=None)
             resid = y_k - A @ coef
             c1 = abs(np.corrcoef(resid, dp_k)[0, 1]) if np.std(dp_k) > 0 else 0.0
             c2v = abs(np.corrcoef(resid, dp_k ** 2)[0, 1]) if np.std(dp_k) > 0 else 0.0
             linear_ok = (c1 < LIN_TOL) and (c2v < LIN_TOL)
-            if fallback is None or keep_tr.mean() < fallback[0]:
-                fallback = (keep_tr.mean(), dp_cut, c2_cut)
-            if linear_ok and (best is None or keep_tr.mean() > best[0]):
-                best = (keep_tr.mean(), dp_cut, c2_cut)
+            if fallback is None or keep.mean() < fallback[0]:
+                fallback = (keep.mean(), dp_cut, c2_cut)
+            if linear_ok and (best is None or keep.mean() > best[0]):
+                best = (keep.mean(), dp_cut, c2_cut)
     _, dp_cut, c2_cut = best if best is not None else fallback
-    keep_tr = (np.abs(dp_tr) <= dp_cut) & (chi2_tr <= c2_cut)
-    keep_te = (np.abs(dp_te) <= dp_cut) & (chi2_te <= c2_cut)
-    filter_info[name] = dict(dp_cut=dp_cut, c2_cut=c2_cut, keep_tr=keep_tr, keep_te=keep_te)
-    print(f"{name:10s} {dp_cut:10.3g} {keep_tr.mean()*100:13.1f}% {keep_te.mean()*100:13.1f}%"
-         f"  {'(linear OK)' if best is not None else '(fallback -- no cut passed)'}")
+    return dp_cut, c2_cut, best is not None
 
-# ---- bias correction: fit ONLY on the filtered (quality-passing) TRAIN bins. Real pipeline order (both
-# here and in ACOS itself): FILTER FIRST, then correct only the survivors -- the correction is fit on, and
-# therefore only valid within, the "good" (small-dp) covariate regime the filter defines. Applying it to a
-# bin the filter would have rejected is extrapolation outside where it was ever fit, and (checked directly,
-# 2026-10-01, user: "did you train the bias correction only on the filtered data?") makes CO2 actively WORSE
-# (-17.2% applied to the full unfiltered test set) even though the same regression, applied only to the
-# filtered test bins it's actually valid for, still helps.
-print(f"\n{'target':10s} {'train CV R2':>12s} {'apply?':>7s} coefficients ({', '.join(COV_NAMES)}, intercept)")
+
+def variance_range_filter(cov_vals, y, n_bins=10, std_mult=STD_MULT, min_per_bin=15):
+    """Contiguous [lo, hi] range of `cov_vals`: bin it into quantile bins, flag bins whose local std of y
+    exceeds `std_mult` x the MEDIAN bin std (a robust "reasonable" baseline), then keep the MOST INCLUSIVE
+    (largest-population) contiguous run of non-flagged bins -- see [[geocarb-acos-bias-correction]]: these
+    covariates flag WHERE the amplitude/height degeneracy is least resolved (a variance effect), not a
+    correctable mean bias, so they're used as a range filter, not a regression covariate.
+
+    Two earlier versions both broke (caught 2026-10-01): (1) anchoring on the single lowest-std bin was too
+    noisy -- with ~90 points/bin, bin-to-bin std fluctuates by chance alone, so one unlucky-low bin could set
+    an unreasonably strict threshold and crush retention to ~4%; (2) anchoring expansion on the bin containing
+    the covariate's own median, when THAT bin itself happened to be flagged (e.g. CO2's amp_ret: the median
+    bin sat right at the edge of a genuine elevated-variance region), collapsed to a single narrow bin.
+    Picking the largest surviving contiguous run directly (the same "most inclusive passing cut" discipline
+    used by the dp/chi2_red linear-regime filter above) avoids both failure modes."""
+    edges = np.quantile(cov_vals, np.linspace(0, 1, n_bins + 1))
+    edges[0] -= 1e-12
+    edges[-1] += 1e-12
+    bin_idx = np.clip(np.digitize(cov_vals, edges) - 1, 0, n_bins - 1)
+    stds = np.full(n_bins, np.nan)
+    counts = np.zeros(n_bins, dtype=int)
+    for b in range(n_bins):
+        m = bin_idx == b
+        counts[b] = m.sum()
+        if counts[b] >= min_per_bin:
+            stds[b] = y[m].std()
+    if np.all(np.isnan(stds)):
+        return cov_vals.min(), cov_vals.max()
+    threshold = std_mult * np.nanmedian(stds)
+    good = np.where(np.isnan(stds), False, stds <= threshold)
+    best_run, best_count = (0, n_bins), -1
+    lo_b = 0
+    while lo_b < n_bins:
+        if not good[lo_b]:
+            lo_b += 1
+            continue
+        hi_b = lo_b
+        while hi_b + 1 < n_bins and good[hi_b + 1]:
+            hi_b += 1
+        run_count = counts[lo_b:hi_b + 1].sum()
+        if run_count > best_count:
+            best_run, best_count = (lo_b, hi_b), run_count
+        lo_b = hi_b + 1
+    lo_b, hi_b = best_run
+    return edges[lo_b], edges[hi_b + 1]
+
+
+def trial_filter(y_tr, name):
+    """One trial filter against the CURRENT residual y_tr: linear-regime dp/chi2_red cut, then variance-range
+    amp_ret/h_ret cut computed within that cut's survivors. Returns keep_tr, keep_te, and the cut bounds."""
+    dp_cut, c2_cut, lin_ok = linear_regime_cut(Xf_train["dp"], Xf_train["chi2_red"], y_tr)
+    keep_tr = (np.abs(Xf_train["dp"]) <= dp_cut) & (Xf_train["chi2_red"] <= c2_cut)
+    keep_te = (np.abs(Xf_test["dp"]) <= dp_cut) & (Xf_test["chi2_red"] <= c2_cut)
+    bounds = dict(dp_cut=dp_cut, c2_cut=c2_cut, lin_ok=lin_ok)
+    for cov in VAR_FILTER_COVS:
+        lo, hi = variance_range_filter(Xf_train[cov][keep_tr], y_tr[keep_tr])
+        keep_tr = keep_tr & (Xf_train[cov] >= lo) & (Xf_train[cov] <= hi)
+        keep_te = keep_te & (Xf_test[cov] >= lo) & (Xf_test[cov] <= hi)
+        bounds[f"{cov}_lo"], bounds[f"{cov}_hi"] = lo, hi
+    return keep_tr, keep_te, bounds
+
+
+print(f"\n{'target':10s} {'it':>3s} {'retained(tr)':>13s} {'retained(te)':>13s} {'CV R2':>8s} {'apply?':>7s}"
+     f" {'rms(filt te)':>13s} {'gain':>8s}  coefficients ({', '.join(COV_NAMES)}, intercept)")
 results = {}
-CV_R2_GATE = 0.05        # below this, the regression is not meaningfully predictive on TRAIN itself -- don't apply it
 for name in TARGETS:
-    keep_tr = filter_info[name]["keep_tr"]
-    y_tr_all, y_te = Y_train[name], Y_test[name]
-    X_tr_f, y_tr_f = X_train1[keep_tr], y_tr_all[keep_tr]     # filtered training subset only
-    r2 = cv_r2(X_tr_f, y_tr_f)
-    coef, *_ = np.linalg.lstsq(X_tr_f, y_tr_f, rcond=None)
-    apply_corr = r2 >= CV_R2_GATE
-    results[name] = dict(y_te=y_te, coef=coef, cv_r2=r2, applied=apply_corr)
-    coef_s = ", ".join(f"{c:+.3g}" for c in coef)
-    print(f"{name:10s} {r2:12.3f} {'yes' if apply_corr else 'NO':>7s}  [{coef_s}]")
+    y_tr_cur = Y_train[name].copy()
+    y_te_cur = Y_test[name].copy()
+    rms_before = float(np.sqrt(np.mean(Y_test[name] ** 2)))
+    history = []
+    final = None
+    for it in range(MAX_ITERS):
+        keep_tr, keep_te, bounds = trial_filter(y_tr_cur, name)
+        X_tr_f, y_tr_f = X_train1[keep_tr], y_tr_cur[keep_tr]
+        r2 = cv_r2(X_tr_f, y_tr_f) if keep_tr.sum() > 2 * X_train1.shape[1] else -np.inf
+        coef, *_ = np.linalg.lstsq(X_tr_f, y_tr_f, rcond=None)
+        applied = r2 >= CV_R2_GATE
 
-print(f"\n{'target':10s} {'dp cut':>10s} {'retained':>10s} {'rms before':>12s} {'rms filtered':>13s} {'%improved':>10s}")
-for name in TARGETS:
-    y_te = Y_test[name]
-    keep_te = filter_info[name]["keep_te"]
-    rms_before = float(np.sqrt(np.mean(y_te ** 2)))
-    rms_after = float(np.sqrt(np.mean(y_te[keep_te] ** 2))) if keep_te.any() else float("nan")
-    pct = 100.0 * (1.0 - rms_after / rms_before)
-    print(f"{name:10s} {filter_info[name]['dp_cut']:10.3g} {keep_te.mean()*100:9.1f}% {rms_before:12.4g} {rms_after:13.4g} {pct:9.1f}%")
-    results[name]["keep_te"] = keep_te
-    results[name]["rms_before"] = rms_before
+        rms_filt_before_it = float(np.sqrt(np.mean(y_te_cur[keep_te] ** 2))) if keep_te.any() else float("nan")
+        if applied:
+            y_tr_cur = y_tr_cur.copy()
+            y_te_cur = y_te_cur.copy()
+            y_tr_cur[keep_tr] = y_tr_cur[keep_tr] - X_train1[keep_tr] @ coef
+            y_te_cur[keep_te] = y_te_cur[keep_te] - X_test1[keep_te] @ coef
+        rms_filt_after_it = float(np.sqrt(np.mean(y_te_cur[keep_te] ** 2))) if keep_te.any() else float("nan")
+        gain = 1.0 - rms_filt_after_it / rms_filt_before_it if (applied and rms_filt_before_it > 0) else 0.0
 
-# ---- real combined pipeline: filter TEST, then correct ONLY the survivors. `y_corr` is a full-length array
-# with the correction applied where valid (retained bins) and left AS-IS (uncorrected) where not -- the
-# filter already drops those from any RMS/plot that only looks at retained bins; keeping them as raw rather
-# than (invalidly) corrected values if a caller ever looks at the unfiltered array by mistake.
-print(f"\n{'target':10s} {'rms before':>12s} {'rms filt+corr':>14s} {'%improved':>10s} {'retained':>10s}  (out-of-domain full-set correction, NOT the real pipeline, for comparison: %improved)")
-for name in TARGETS:
-    r = results[name]
-    y_te, keep = r["y_te"], r["keep_te"]
-    y_corr = y_te.copy()
-    if r["applied"]:
-        y_corr[keep] = y_te[keep] - X_test1[keep] @ r["coef"]
-    r["y_corr"] = y_corr
-    rms_after = float(np.sqrt(np.mean(y_corr[keep] ** 2))) if keep.any() else float("nan")
-    pct = 100.0 * (1.0 - rms_after / r["rms_before"])
-    # out-of-domain comparison number only (never applied/plotted): the full-set correction, for the record
-    pred_full = X_test1 @ r["coef"] if r["applied"] else np.zeros_like(y_te)
-    rms_full_corr = float(np.sqrt(np.mean((y_te - pred_full) ** 2)))
-    pct_full = 100.0 * (1.0 - rms_full_corr / r["rms_before"])
-    print(f"{name:10s} {r['rms_before']:12.4g} {rms_after:14.4g} {pct:9.1f}% {keep.mean()*100:9.1f}%  ({pct_full:+.1f}%)")
-    r["rms_filt_corr"] = rms_after
+        coef_s = ", ".join(f"{c:+.3g}" for c in coef)
+        print(f"{name:10s} {it:3d} {keep_tr.mean()*100:12.1f}% {keep_te.mean()*100:12.1f}% {r2:8.3f}"
+             f" {'yes' if applied else 'NO':>7s} {rms_filt_after_it:13.4g} {gain*100:7.1f}%  [{coef_s}]")
+        history.append(dict(it=it, keep_tr=keep_tr, keep_te=keep_te, bounds=bounds, r2=r2,
+                            applied=applied, coef=coef, gain=gain))
+        final = history[-1]
+        if not applied or gain < ITER_STOP_GAIN:
+            break
+
+    keep_te = final["keep_te"]
+    results[name] = dict(y_te=Y_test[name], y_corr=y_te_cur, keep_te=keep_te, rms_before=rms_before,
+                         coef=final["coef"], cv_r2=final["r2"], applied=any(h["applied"] for h in history),
+                         n_iters=len(history), dp_cut=final["bounds"]["dp_cut"])
+    rms_filt_corr = float(np.sqrt(np.mean(y_te_cur[keep_te] ** 2))) if keep_te.any() else float("nan")
+    results[name]["rms_filt_corr"] = rms_filt_corr
+    print(f"{name:10s} -> converged after {len(history)} iteration(s), final retained(te)="
+         f"{keep_te.mean()*100:.1f}%, rms {rms_before:.4g} -> {rms_filt_corr:.4g}"
+         f" ({100*(1 - rms_filt_corr/rms_before):+.1f}%)\n")
 
 fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 for ax, name in zip(axes, TARGETS):
@@ -269,10 +324,10 @@ for ax, name in zip(axes, TARGETS):
     ax.hist(y_filt_corr, bins=bins, histtype="step", lw=1.6, density=True, color="tab:green",
            label=f"filtered+corrected: rms {r['rms_filt_corr']:.3g}")
     ax.axvline(0.0, color="k", lw=0.8, alpha=0.5)
-    ax.set_title(name)
+    ax.set_title(f"{name} ({r['n_iters']} iteration{'s' if r['n_iters'] != 1 else ''})")
     ax.legend(fontsize=8)
-fig.suptitle("ACOS-style quality filter + bias correction -- trained on sulfate+noise1 (filter THEN correct, "
-            "both fit on filtered train only), evaluated on noiseless sulfate")
+fig.suptitle("ACOS-style ITERATIVE quality filter + bias correction -- trained on sulfate+noise1 (trial filter, "
+            "correct, re-filter the residual, correct again), evaluated on noiseless sulfate")
 fig.tight_layout()
 out = REPO / "plots/aerosol_quality_filter_bias_correction.png"
 fig.savefig(out, dpi=140, bbox_inches="tight")
@@ -303,7 +358,7 @@ for ax, name in zip(axes, TARGETS):
     ax.set_ylabel(name)
     ax.legend(fontsize=8, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.12 if ax is axes[-1] else 1.25))
 axes[-1].set_xlabel("along-slit position [km]")
-fig.suptitle("Quality filter + bias correction along the slit -- sulfate, noiseless (held-out test), "
+fig.suptitle("ITERATIVE quality filter + bias correction along the slit -- sulfate, noiseless (held-out test), "
             "correction trained on sulfate+noise1", y=1.01)
 fig.tight_layout()
 out2 = REPO / "plots/aerosol_quality_filter_along_slit.png"
@@ -330,8 +385,8 @@ for ax, name in zip(axes, TARGETS):
     ax.set_ylabel(f"{name} error")
     ax.legend(fontsize=8, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.12 if ax is axes[-1] else 1.25))
 axes[-1].set_xlabel("along-slit position [km]")
-fig.suptitle("Quality filter + bias correction: ERROR along the slit -- sulfate, noiseless (held-out test), "
-            "correction trained on sulfate+noise1", y=1.01)
+fig.suptitle("ITERATIVE quality filter + bias correction: ERROR along the slit -- sulfate, noiseless (held-out "
+            "test), correction trained on sulfate+noise1", y=1.01)
 fig.tight_layout()
 out3 = REPO / "plots/aerosol_quality_filter_along_slit_error.png"
 fig.savefig(out3, dpi=140, bbox_inches="tight")
