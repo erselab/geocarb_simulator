@@ -171,7 +171,7 @@ class ParamSpec:
     sigma: float                   # prior 1-sigma (in the parameter's own units)
     corr_length: float = 0.05      # correlation length in eta ("exponential" prior only)
     free: bool = True              # False -> frozen at `prior`, contributes no elements
-    kind: str = "scale"            # "scale" (multiplies prior) or "absolute"
+    kind: str = "scale"            # "scale" (multiplies prior), "absolute", or "log" (value = prior * exp(xi), 2026-09-27)
     prior_form: str = "exponential"  # "exponential" (default) or "tikhonov"
     gamma: float = 3.0             # tikhonov: first-difference smoothness strength
     target: str = "atmosphere"     # where this row enters the forward model; see TARGETS
@@ -214,8 +214,10 @@ class ParamSpec:
         if self.prior.shape != self.positions.shape:
             raise ValueError(f"{self.name}: prior {self.prior.shape} does not match "
                              f"positions {self.positions.shape}")
-        if self.kind not in ("scale", "absolute"):
-            raise ValueError(f"{self.name}: kind must be 'scale' or 'absolute', got {self.kind!r}")
+        if self.kind not in ("scale", "absolute", "log"):
+            raise ValueError(f"{self.name}: kind must be 'scale', 'absolute' or 'log', got {self.kind!r}")
+        if self.kind == "log" and np.any(self.prior <= 0):
+            raise ValueError(f"{self.name}: kind='log' needs a positive prior everywhere")
         if self.target not in TARGETS:
             raise ValueError(f"{self.name}: target must be one of {TARGETS}, got {self.target!r}")
 
@@ -232,11 +234,15 @@ class ParamSpec:
     def x0(self) -> np.ndarray:
         """This row's own starting/identity vector: ones for a scale
         parameter, the prior itself for an absolute one."""
+        if self.kind == "log":
+            return np.zeros(self.n)             # xi = ln(value/prior): the prior is xi = 0
         return np.ones(self.n) if self.kind == "scale" else self.prior.copy()
 
     def apply(self, xi: np.ndarray) -> np.ndarray:
         """Parameter values at `positions` given this row's own sub-vector."""
         xi = np.asarray(xi, dtype=float)
+        if self.kind == "log":
+            return self.prior * np.exp(xi)      # positive by construction; sigma is in ln units (0.7 ~ a factor of 2)
         return self.prior * xi if self.kind == "scale" else xi
 
     def Sa_block(self) -> np.ndarray:
@@ -426,7 +432,11 @@ class StateSpec:
                 continue
             lo_phys, hi_phys = p.bounds
             xi = x_trial[sl]
-            if p.kind == "scale":
+            if p.kind == "log":
+                lo_xi = -np.inf if not lo_phys else np.log(lo_phys / p.prior)
+                hi_xi = np.inf if not hi_phys else np.log(hi_phys / p.prior)
+                x_trial[sl] = np.clip(xi, lo_xi, hi_xi)
+            elif p.kind == "scale":
                 prior = np.where(p.prior != 0, p.prior, 1.0)
                 lo_xi = -np.inf if lo_phys is None else lo_phys / prior
                 hi_xi = np.inf if hi_phys is None else hi_phys / prior
@@ -568,7 +578,7 @@ class StateSpec:
         basis = np.eye(p.n)
         return _row_interp1d(p.positions, basis, kind, axis=0)(etas)
 
-    def cov_for(self, name: str, S_ret_scale: np.ndarray) -> np.ndarray:
+    def cov_for(self, name: str, S_ret_scale: np.ndarray, x=None) -> np.ndarray:
         """One row's own ``(n, n)`` posterior covariance sub-matrix, in
         physical units -- sliced out of `gauss_newton_state(...,
         return_cov=True)`'s own ``S_ret_scale`` (packed over ALL free
@@ -592,6 +602,9 @@ class StateSpec:
         block = np.asarray(S_ret_scale, dtype=float)[sl, sl]
         if p.kind == "scale":
             return block * np.outer(p.prior, p.prior)
+        if p.kind == "log":                 # delta method: d value/d xi = value; needs the retrieved xi (falls back to the prior)
+            v = p.prior * (np.exp(np.asarray(x, dtype=float)[sl]) if x is not None else 1.0)
+            return block * np.outer(v, v)
         return block
 
     def project_cov(self, etas, name: str, S_ret_scale: np.ndarray,

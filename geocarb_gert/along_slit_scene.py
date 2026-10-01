@@ -390,11 +390,25 @@ def albedo_for_label_prior_fine(x_km, label):
     return float(out[0]) if scalar else out
 
 
+#: 2026-09-28 (user, after the aerosol optics rewrite -- see geocarb_gert/aerosol_mie.py's own docstring): the
+#: new literature-sourced (ACOS/O'Dell et al. 2018) smoke properties carry ~3.3x more optical depth in the
+#: SWIR bands relative to O2-A than the old "entered from memory" Mie table did (qext relative to O2-A at
+#: FPA2: 0.19 now vs 0.058 before). Keeping the SAME O2-A-referenced AOD constants as before would push
+#: proportionally more real aerosol signal into the SWIR bands than this scene was ever calibrated against,
+#: making every retrieval far more nonlinear -- confirmed directly, one tile's solve time grew from ~1184 s to
+#: ~26246 s under the new smoke properties at the OLD AOD levels. Every AOD constant below is scaled by this
+#: factor so the SWIR bands' own absolute optical depth stays roughly where it was, while the per-unit-AOD
+#: spectral SHAPE stays genuinely literature-grounded (unchanged).
+AOD_RESCALE = 1.0 / 3.3
+
 #: 2026-09-21 (user): urban aerosol enhancement co-located with the large CO2 plume (see `xco2_ppm`: x0 -500 km,
 #: width 60 km). AOD is at the O2-A reference wavelength like every `tau_aerosol` value.
 URBAN_AOD_X0_KM = -500.0
 URBAN_AOD_WIDTH_KM = 60.0
-URBAN_AOD_AMP = 0.08
+URBAN_AOD_AMP = 0.08 * AOD_RESCALE
+
+#: Background AOD (truth AND structural prior share this -- "structural prior: flat background only").
+AEROSOL_TAU_BACKGROUND = 0.05 * AOD_RESCALE
 
 
 def tau_aerosol(x_km, label=None):
@@ -415,11 +429,11 @@ def tau_aerosol(x_km, label=None):
     band in play yet; see this row's own note in the implementation plan
     about what changes once multi-band coupling shares this value.
     """
-    background = 0.05
-    haze = _gauss(x_km, x0=200.0, width=120.0, amp=0.30)
+    background = AEROSOL_TAU_BACKGROUND
+    haze = _gauss(x_km, x0=200.0, width=120.0, amp=0.30 * AOD_RESCALE)
     # 2026-09-21 (user): a modest AOD increase co-located with the large CO2 hot spot (the -500 km plume,
     # 6 ppm, 60 km wide) to represent an urban aerosol signal. Same centre and width as that plume;
-    # amplitude URBAN_AOD_AMP (peak AOD ~0.13 vs the 0.05 background).
+    # amplitude URBAN_AOD_AMP (peak AOD ~0.04 vs the ~0.015 background, both post-AOD_RESCALE).
     urban = _gauss(x_km, x0=URBAN_AOD_X0_KM, width=URBAN_AOD_WIDTH_KM, amp=URBAN_AOD_AMP)
     return np.clip(background + haze + urban, 0.0, None)
 
@@ -429,7 +443,7 @@ def tau_aerosol_prior(x_km, label=None):
     background-only convention (`xco2_ppm_prior` etc.) -- no knowledge of
     the localized haze event.
     """
-    return np.full_like(np.asarray(x_km, dtype=float), 0.05)
+    return np.full_like(np.asarray(x_km, dtype=float), AEROSOL_TAU_BACKGROUND)
 
 
 #: 2026-09-21 (user): an aerosol layer's Gaussian centroid must be at least this far ABOVE the surface,

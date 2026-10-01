@@ -17,8 +17,8 @@
 # single_scatter" -- single_scatter's own I_scatter term is unconditionally zero without aerosol
 # kwargs, so it's already exactly absorption/extinction-only there; xrtm's multiple-scattering cost
 # only buys real accuracy once aerosol is actually free). Set SOLVER explicitly to override either way.
-# AEROSOL=1 requires AEROSOL_TYPE=<smoke|dust|sulfate|sea_salt|cloud_water|registry_smoke...> (gd_multiband_window.py --aerosol-type;
-# no default). realistic per-band properties for the named types; registry_<type> reproduces the earlier two-slot runs.
+# AEROSOL=1 requires AEROSOL_TYPE=<smoke|dust|sulfate|sea_salt|cloud_water> (gd_multiband_window.py --aerosol-type;
+# no default, no legacy fallback -- 2026-09-28, the earlier registry_<type> two-slot scheme was removed entirely).
 # PRIOR = als.PRIOR_FIELD_SETS name (default structural); realistic = ACOS-like prior that never equals the truth.
 # GEOM=<geometry config json> selects tile geometry+bin centres from a config (the tile index is then a config index; use for single-band runs so bins match a multi-band run).
 # EXTRA_ARGS: extra gd_multiband_window.py flags, e.g. "--cloud-tau 2 --cloud-p-hpa 600" (cloud in the truth, retrieval unaware).

@@ -1,49 +1,121 @@
-"""Mie optical properties of each aerosol type at every GeoCarb band centre (2026-09-25).
+"""Per-band aerosol optical properties, sourced directly from the operational ACOS/OCO-2 aerosol model
+(2026-09-28; supersedes the earlier "typical literature-style values entered from memory" version of this
+module -- user: "I don't want to use that setup any longer. I want a list of defined types with band-specific
+parameters that are defined in literature. If a type is called that isn't in the list, the code should error,
+not fall back to a default").
 
-Why: gert's registry only has three band slots (O2-A / 1.6 um / 1.65 um), and the simulator used the O2-A slot for
-FPA0 and the SAME 1.6 um slot for FPA1, FPA2 and FPA3 (see aerosol_defaults.py). Real aerosol extinction, single-
-scattering albedo and asymmetry all change across 0.76-2.3 um, and that spectral linkage is what ties the aerosol
-optical depth of one band to the next in a multi-band retrieval (user, 2026-09-25: "what ACOS constrains ... is
-linked by spectral information across the bands ... dependent on optical properties that are known/assumed").
-So for every type, (qext, ssa, g) are computed at the four band centres from an assumed size distribution and
-refractive index; truth and retrieval use the same values.
+SOURCE: O'Dell et al. (2018), "Improved retrievals of carbon dioxide from Orbiting Carbon Observatory-2 with
+the version 8 ACOS algorithm", Atmos. Meas. Tech. 11, 6539-6576, Figure 3 -- (Q_ext relative to 755 nm, single-
+scattering albedo, asymmetry parameter) vs wavelength for the 7 MERRA-2-derived aggregated types ACOS's own
+L2FP retrieval uses: DU (dust), SS (sea salt), BC (black carbon), OC (organic carbon), SO (sulfate), WC (water
+cloud), IC (ice cloud). The paper's own Sec. 3.1 / Crisp et al. (2017) describe how these are aggregated from
+MERRA-2's 15 native species; ACOS does not publish a numeric table, only Fig. 3's curves.
 
-ASSUMPTIONS (typical literature-style values entered from memory, not looked up in a database -- replace with an
-authoritative table, e.g. OPAC / AERONET / the MERRA-2 species used by ACOS, when one is chosen):
-  * lognormal NUMBER size distribution (geometric radius rg [um], geometric width sigma_g);
-  * complex refractive index m = n + ik at each band centre (Bohren & Huffman sign convention, k > 0 absorbs);
-  * homogeneous spheres (dust is not spherical: its g and phase function are approximate).
-Extinction is reported relative to the O2-A (FPA0, 0.765 um) band: `amplitude_aerosol` and the scene's AOD values
-(0.05 background, 0.35 haze peak) are defined there for these types. (The legacy registry scheme defines them at 1.6 um.)
-Bohren & Huffman (1983) BHMIE; no external Mie library is available in this environment.
+**These values are READ OFF Fig. 3 by eye** (dashed lines mark the OCO-2 band centres, 0.76/1.61/2.06 um --
+three of GeoCarb's four bands almost exactly), not extracted from a machine-readable table -- precision is
+roughly +/-0.05 in (ssa, g, qext-ratio), not the many-digit precision a real lookup table would give. GeoCarb's
+4th band (FPA3, 2.325 um) is just past the right edge of ACOS's 3-band plot (which stops near 2.1 um); those
+values are a short trend extrapolation of each curve's own visible slope near 2.06 um, marked below.
+
+GeoCarb type -> ACOS component mapping:
+  * "sulfate" = SO, "sea_salt" = SS, "dust" = DU, "cloud_water" = WC directly.
+  * "smoke" = an 80/20-by-optical-depth OC/BC mixture (user's own choice, 2026-09-28): real biomass-burning
+    smoke is a BC+OC mixture (Chin et al. 2002 cite a ~1:7 BC:OC mass ratio for biomass burning), not ACOS's
+    own pure "BC" end-member -- pure BC alone (ssa ~0.03-0.15 across these bands) is far more absorbing than
+    real-world smoke (typically ssa ~0.85-0.95). The two components are mixed by proper radiative-transfer
+    mixing rules (`_mix_two`, optical-depth-weighted ssa, scattering-optical-depth-weighted g), not just
+    averaged -- see that function's own docstring.
+
+No default and no silent fallback: `band_properties(name)` raises KeyError for any name not in `AEROSOL_TYPES`
+-- callers (`aerosol_defaults.validate_aerosol_type`) turn that into a clear `ValueError` listing the valid
+types. There is no legacy/registry scheme left to fall back to (removed in the same change).
 """
 from __future__ import annotations
-
-from functools import lru_cache
 
 import numpy as np
 
 BAND_CENTRES_UM = {0: 0.765, 1: 1.608, 2: 2.065, 3: 2.325}     # FPA0..FPA3 band centres
-REF_FPA = 0                                                    # amplitude_aerosol / the scene AOD refer to the O2-A band (0.765 um),
-                                                               # as the scene docstrings and ACOS-style AOD conventions say
+REF_FPA = 0                                                    # amplitude_aerosol / the scene AOD refer to the O2-A band (0.765 um)
 
-#: name -> microphysics. n, k are listed for FPA0..FPA3.
-AEROSOL_MICROPHYSICS = {
-    "smoke": dict(rg=0.09, sigma_g=1.5, n=[1.52, 1.51, 1.50, 1.50], k=[0.015, 0.015, 0.015, 0.015],
-                  note="fresh biomass-burning smoke, fine mode (volume median radius ~0.15 um), moderately absorbing"),
-    "sulfate": dict(rg=0.08, sigma_g=1.5, n=[1.52, 1.50, 1.48, 1.46], k=[1e-7, 1e-4, 5e-4, 1e-3],
-                    note="ammonium sulfate, fine mode, essentially non-absorbing (weak SWIR bands)"),
-    "sea_salt": dict(rg=0.6, sigma_g=1.8, n=[1.50, 1.49, 1.48, 1.47], k=[1e-6, 2e-4, 1e-3, 1e-3],
-                     note="sea salt, coarse mode (r_eff ~1.4 um)"),
-    "dust": dict(rg=0.7, sigma_g=1.9, n=[1.53, 1.52, 1.51, 1.50], k=[0.0030, 0.0025, 0.0020, 0.0030],
-                 note="mineral dust, coarse mode (r_eff ~2 um), weakly absorbing; spheres only approximate its phase function"),
-    "cloud_water": dict(rg=8.0, sigma_g=1.3, n=[1.329, 1.318, 1.305, 1.298], k=[1.3e-7, 8.7e-5, 1.4e-3, 3.5e-4],
-                        note="liquid water droplets, r_eff ~9.5 um"),
+#: Raw ACOS-native curves, {component: {fpa: (ssa, g, qext_relative_to_O2-A)}}, read off O'Dell et al. (2018)
+#: Fig. 3 at the three OCO-2 band centres (FPA0-2) plus a trend extrapolation to FPA3 (see module docstring).
+#: qext is already relative to ~755 nm/O2-A, matching this project's own REF_FPA=0 convention directly -- no
+#: rescaling needed (ACOS's reference wavelength, 755 nm, and GeoCarb's O2-A band centre, 765 nm, are close
+#: enough that Fig. 3's own y-axis serves as-is).
+_ACOS_CURVES = {
+    "DU": {0: (0.93, 0.73, 1.00), 1: (0.91, 0.72, 1.05), 2: (0.90, 0.72, 1.08), 3: (0.90, 0.72, 1.09)},
+    "SS": {0: (1.00, 0.73, 1.00), 1: (1.00, 0.76, 1.00), 2: (0.99, 0.80, 1.05), 3: (0.99, 0.82, 1.07)},
+    "BC": {0: (0.15, 0.28, 1.00), 1: (0.04, 0.10, 0.55), 2: (0.015, 0.05, 0.35), 3: (0.01, 0.04, 0.30)},
+    "OC": {0: (1.00, 0.60, 1.00), 1: (0.83, 0.30, 0.35), 2: (0.80, 0.18, 0.15), 3: (0.78, 0.15, 0.12)},
+    "SO": {0: (1.00, 0.73, 1.00), 1: (0.97, 0.45, 0.35), 2: (0.85, 0.27, 0.15), 3: (0.80, 0.23, 0.12)},
+    "WC": {0: (1.00, 0.83, 1.00), 1: (1.00, 0.80, 1.00), 2: (0.99, 0.83, 1.00), 3: (0.98, 0.83, 1.00)},
+    "IC": {0: (1.00, 0.73, 1.00), 1: (0.98, 0.78, 1.05), 2: (0.85, 0.83, 1.05), 3: (0.82, 0.84, 1.05)},
+}
+
+#: Optical-depth split (at the O2-A reference band) for the smoke = OC+BC mixture -- user's choice, 2026-09-28.
+_SMOKE_OC_FRAC = 0.80
+_SMOKE_BC_FRAC = 0.20
+
+
+def _mix_two(curve_a: dict, curve_b: dict, frac_a: float, frac_b: float) -> dict:
+    """Combine two components' per-band (ssa, g, qext_rel) curves into one mixture's curve, `frac_a`/`frac_b`
+    being each component's share of the total optical depth AT THE REFERENCE BAND (so `frac_a + frac_b == 1`
+    there by construction). At every other band, each component's own qext_rel curve moves its share of the
+    optical depth independently (`tau_x(fpa) = frac_x * qext_x(fpa)`, since qext_x is already relative to the
+    ref band) -- the mixture is NOT the simple average of the two curves, which would silently assume both
+    components' optical depth moves in lockstep across bands.
+
+    Standard aerosol mixing rules (external mixture, i.e. distinct particles of each type coexisting, not one
+    particle made of both -- the only kind of mixture that composes from each component's OWN Mie-derived
+    ssa/g without needing a fresh Mie calculation on a combined size/composition distribution):
+      qext_mix(fpa)  = tau_a(fpa) + tau_b(fpa)                                    -- extinction optical depths add
+      ssa_mix(fpa)   = (tau_a*ssa_a + tau_b*ssa_b) / (tau_a + tau_b)              -- scattering / total extinction
+      g_mix(fpa)     = (tau_a*ssa_a*g_a + tau_b*ssa_b*g_b) / (tau_a*ssa_a + tau_b*ssa_b)  -- g weights only the
+                        SCATTERED photons (it describes the phase function of light that scatters, not light
+                        that's absorbed), so the weight is each component's scattering optical depth, not its
+                        total extinction optical depth.
+    """
+    out = {}
+    for fpa in curve_a:
+        ssa_a, g_a, q_a = curve_a[fpa]
+        ssa_b, g_b, q_b = curve_b[fpa]
+        tau_a, tau_b = frac_a * q_a, frac_b * q_b
+        tau_ext = tau_a + tau_b
+        sca_a, sca_b = tau_a * ssa_a, tau_b * ssa_b
+        tau_sca = sca_a + sca_b
+        out[fpa] = (tau_sca / tau_ext, (sca_a * g_a + sca_b * g_b) / tau_sca, tau_ext)
+    return out
+
+
+#: {geocarb type name -> {fpa: (ssa, g, qext_relative_to_O2-A)}}. The only source of per-band aerosol optical
+#: properties in this project -- see module docstring for provenance and precision caveats.
+AEROSOL_TYPES = {
+    "sulfate": _ACOS_CURVES["SO"],
+    "sea_salt": _ACOS_CURVES["SS"],
+    "dust": _ACOS_CURVES["DU"],
+    "cloud_water": _ACOS_CURVES["WC"],
+    "smoke": _mix_two(_ACOS_CURVES["OC"], _ACOS_CURVES["BC"], _SMOKE_OC_FRAC, _SMOKE_BC_FRAC),
 }
 
 
+def band_properties(name: str) -> dict:
+    """`{fpa: (ssa, g, qext_relative_to_the_O2-A_band)}` for GeoCarb aerosol type `name`.
+
+    Raises `KeyError` for any name not in `AEROSOL_TYPES` -- no default, no fallback. Callers should use
+    `aerosol_defaults.validate_aerosol_type`/`resolve_aerosol_type`, which turn this into a clear `ValueError`
+    listing the valid types, rather than let a raw `KeyError` surface.
+    """
+    return AEROSOL_TYPES[name]
+
+
 def bhmie(x: float, m: complex):
-    """Efficiencies (Qext, Qsca) and asymmetry g for one homogeneous sphere (Bohren & Huffman BHMIE)."""
+    """Efficiencies (Qext, Qsca) and asymmetry g for one homogeneous sphere (Bohren & Huffman BHMIE).
+
+    Not used by `band_properties`/`AEROSOL_TYPES` above (those come directly from ACOS's own published
+    per-band values, not a Mie calculation) -- kept as a general-purpose utility for anyone who wants to add
+    a NEW type from an assumed refractive index and size distribution in the future, and exercised by this
+    module's own `__main__` self-checks below.
+    """
     nstop = int(x + 4.0 * x ** (1.0 / 3.0) + 2.0)
     y = x * m
     nmx = int(max(nstop, abs(y)) + 15)
@@ -78,50 +150,7 @@ def bhmie(x: float, m: complex):
     return qext, qsca, g
 
 
-@lru_cache(maxsize=None)
-def _dist_props(name: str, fpa: int):
-    """Extinction cross-section per particle, ssa, g for the type's lognormal at FPA `fpa`'s centre."""
-    mp = AEROSOL_MICROPHYSICS[name]
-    wl = BAND_CENTRES_UM[fpa]
-    rg, sg = mp["rg"], mp["sigma_g"]
-    lnr = np.linspace(np.log(rg) - 4.0 * np.log(sg), np.log(rg) + 4.0 * np.log(sg), 161)
-    r = np.exp(lnr)
-    w = np.exp(-0.5 * ((lnr - np.log(rg)) / np.log(sg)) ** 2)          # number weight per d ln r
-    m = complex(mp["n"][fpa], mp["k"][fpa])                           # B&H convention: k > 0 absorbs
-    q = np.array([bhmie(2.0 * np.pi * ri / wl, m) for ri in r])
-    area = np.pi * r ** 2
-    cext = np.sum(w * area * q[:, 0]) / np.sum(w)
-    csca = np.sum(w * area * q[:, 1]) / np.sum(w)
-    g = np.sum(w * area * q[:, 1] * q[:, 2]) / np.sum(w * area * q[:, 1])
-    return float(cext), float(csca / cext), float(g)
-
-
-@lru_cache(maxsize=None)
-def compute_band_table(name: str):
-    """{fpa: (ssa, g, qext relative to the O2-A band)} recomputed from the microphysics (slow)."""
-    raw = {f: _dist_props(name, f) for f in BAND_CENTRES_UM}
-    ref = raw[REF_FPA][0]
-    return {f: (raw[f][1], raw[f][2], raw[f][0] / ref) for f in raw}
-
-
-#: Result of `compute_band_table` stored so runtime (and every respawned pool worker) does not redo the Mie
-#: evaluations; `python aerosol_mie.py` checks it against a fresh calculation.
-BAND_TABLES = {
-    "smoke": {0: (0.89402, 0.49165, 1.00000), 1: (0.69182, 0.19139, 0.11854), 2: (0.53931, 0.11871, 0.05807), 3: (0.46141, 0.09433, 0.04307)},
-    "sulfate": {0: (1.00000, 0.44485, 1.00000), 1: (0.99594, 0.15278, 0.07771), 2: (0.95947, 0.09334, 0.02891), 3: (0.88666, 0.07330, 0.01821)},
-    "sea_salt": {0: (0.99997, 0.69708, 1.00000), 1: (0.99800, 0.69821, 1.13075), 2: (0.99209, 0.70843, 1.07637), 3: (0.99278, 0.71380, 1.01346)},
-    "dust": {0: (0.91840, 0.72775, 1.00000), 1: (0.96615, 0.68756, 1.14410), 2: (0.97865, 0.68986, 1.16310), 3: (0.97183, 0.69829, 1.14964)},
-    "cloud_water": {0: (0.99998, 0.85889, 1.00000), 1: (0.99372, 0.84411, 1.03436), 2: (0.93145, 0.85310, 1.05219), 3: (0.98278, 0.83562, 1.06681)},
-}
-
-
-def band_properties(name: str):
-    """{fpa: (ssa, g, qext_relative_to_the_O2-A_band)} for aerosol type `name` (the stored table)."""
-    return BAND_TABLES[name]
-
-
 if __name__ == "__main__":
-    import sys
     x = 0.02
     q_ext, q_sca, g = bhmie(x, 1.5 + 0j)
     m2 = 1.5 ** 2
@@ -129,17 +158,8 @@ if __name__ == "__main__":
     print(f"Rayleigh check x=0.02: Qsca {q_sca:.4e} vs analytic {ray:.4e} (ratio {q_sca / ray:.4f}); Qext-Qsca {q_ext - q_sca:.1e}; g {g:.1e}")
     q_ext, q_sca, g = bhmie(3.0, 1.33 + 0j)
     print(f"non-absorbing x=3: Qext {q_ext:.4f} Qsca {q_sca:.4f} (equal) g {g:.3f}")
-    fresh = {n: compute_band_table(n) for n in AEROSOL_MICROPHYSICS}
-    if "--print-table" in sys.argv:
-        print("BAND_TABLES = {")
-        for n, t in fresh.items():
-            print(f'    "{n}": {{' + ", ".join(f"{f}: ({a:.5f}, {b:.5f}, {c:.5f})" for f, (a, b, c) in t.items()) + "},")
-        print("}")
-    for n, t in fresh.items():
-        mp = AEROSOL_MICROPHYSICS[n]
-        print(f"{n}: r_eff {mp['rg'] * np.exp(2.5 * np.log(mp['sigma_g']) ** 2):.2f} um -- {mp['note']}")
+    print("\nAEROSOL_TYPES (O'Dell et al. 2018 Fig. 3, see module docstring for provenance/precision):")
+    for n, t in AEROSOL_TYPES.items():
+        print(f"  {n}:")
         for f, (ssa, g, q) in t.items():
-            print(f"   FPA{f} {BAND_CENTRES_UM[f]:.3f} um: ssa={ssa:.3f} g={g:.3f} qext/qext(FPA{REF_FPA})={q:.3f}")
-    if BAND_TABLES:
-        assert all(abs(a - b) < 2e-5 for n in fresh for f in fresh[n] for a, b in zip(fresh[n][f], BAND_TABLES[n][f])), "stored tables are stale"
-        print("stored BAND_TABLES match the recomputed values")
+            print(f"    FPA{f} {BAND_CENTRES_UM[f]:.3f} um: ssa={ssa:.3f} g={g:.3f} qext/qext(FPA{REF_FPA})={q:.3f}")

@@ -1412,7 +1412,7 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
 
     free = spec.free_params
     supported = (set(GAS_ROW_MOLECULE) | set(SURFACE_ROW_JACOBIAN)
-                | {"p_surface_hpa", "t_offset_k", "height_aerosol",
+                | {"p_surface_hpa", "t_offset_k", "height_aerosol", "height_offset_aerosol",
                    "amplitude_aerosol", "thickness_aerosol"})
     unsupported = [p.name for p in free if p.name not in supported]
     if unsupported:
@@ -1421,7 +1421,7 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
             f"{sorted(supported)}. dispersion (instrument target) is the "
             f"remaining step -- until then run that row with finite differences.")
     for p in free:
-        if p.kind not in ("scale", "absolute"):
+        if p.kind not in ("scale", "absolute", "log"):
             raise NotImplementedError(f"{p.name}: kind={p.kind!r} not yet wired here")
 
     atm_names = [p.name for p in spec.rows_for("atmosphere")]
@@ -1488,7 +1488,10 @@ def linearize(fpa, rows_win, scene_etas, spec: StateSpec, spectrum_jac,
             # -- ParamSpec.apply's own "xi if kind=='absolute'" branch,
             # mirrored here exactly so this module's d(value)/dx factor never
             # silently disagrees with what apply() actually computes).
-            dval_dx = p.prior[k] if p.kind == "scale" else 1.0
+            if p.kind == "log":            # value = prior * exp(xi): d value/d xi = value (2026-09-27)
+                dval_dx = p.prior[k] * float(np.exp(x[sl.start + k]))
+            else:
+                dval_dx = p.prior[k] if p.kind == "scale" else 1.0
             if use_sparse_store:
                 w_k = W[:, k] * dval_dx
                 nzi = np.flatnonzero(w_k != 0.0)

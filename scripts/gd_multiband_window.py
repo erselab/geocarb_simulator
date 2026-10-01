@@ -49,11 +49,68 @@ def load_inputs():
     return absco, solar, geo, als.atmosphere_at(0.0)
 
 
+def _wrap_relative_height(spectrum, spectrum_jac):
+    """Surface-relative aerosol layer height (2026-09-27): the state row `height_offset_aerosol` [Pa] = p_surface*100 - height.
+    The forward model still takes the absolute `height_aerosol`, rebuilt per anchor from the SAME anchor's p_surface, so the layer
+    follows the surface when the pressure state moves. Chain rule for the Jacobian: dh/d(offset) = -1, dh/d(p_surface [hPa]) = +100."""
+    def spectrum_(params, surface=None):
+        surface = dict(surface or {})
+        off = surface.pop("height_offset_aerosol", None)
+        if off is not None:
+            surface["height_aerosol"] = float(params["p_surface_hpa"]) * 100.0 - float(off)
+        return spectrum(params, surface)
+
+    def spectrum_jac_(params, rows, surface=None):
+        surface = dict(surface or {})
+        off = surface.pop("height_offset_aerosol", None)
+        if off is None:
+            return spectrum_jac(params, rows, surface)
+        surface["height_aerosol"] = float(params["p_surface_hpa"]) * 100.0 - float(off)
+        rows2 = [r for r in rows if r != "height_offset_aerosol"]
+        want = "height_offset_aerosol" in rows
+        if want and "height_aerosol" not in rows2:
+            rows2.append("height_aerosol")
+        S, d = spectrum_jac(params, rows2, surface)
+        if want:
+            dh = d["height_aerosol"]
+            d["height_offset_aerosol"] = -dh
+            if "p_surface_hpa" in d:
+                d["p_surface_hpa"] = d["p_surface_hpa"] + 100.0 * dh
+            if "height_aerosol" not in rows:
+                d.pop("height_aerosol")
+        return S, d
+    return spectrum_, spectrum_jac_
+
+
+def _perturb_aerosol_prior(spec, names, seed, floor_frac=0.05):
+    """Draw each named free aerosol row's PRIOR MEAN from its own prior distribution (2026-09-27): a sample from N(prior, Sa_row) in
+    the row's packed units (exponential correlation kernel, sigma in the row's units). The row's start point moves with its prior
+    (x0 = prior for 'absolute', 0 for 'log'), the covariance is unchanged. A well-determined retrieval should land on the same
+    posterior for every draw; the spread of the results measures how much the prior mean / starting point matters."""
+    rng = np.random.default_rng(int(seed))
+    info = {}
+    for nm in names:
+        p = spec[nm]
+        if not p.free:
+            continue
+        d = np.linalg.cholesky(p.Sa_block() + 1e-12 * np.eye(p.n) * p.sigma ** 2) @ rng.normal(size=p.n)
+        old = p.prior.copy()
+        if p.kind == "log":
+            p.prior = p.prior * np.exp(d)
+        elif p.kind == "scale":
+            p.prior = p.prior * (1.0 + d)
+        else:
+            p.prior = np.maximum(p.prior + d, floor_frac * old) if nm == "amplitude_aerosol" else p.prior + d
+        info[nm] = dict(old_prior=old, new_prior=p.prior.copy(), draw=d)
+    return info
+
+
 def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields="structural",
                            g_ratio=None, anchor_density=4, anchor_mode="cover", solver="xrtm",
                            state_interp=None, prior_form=None, gamma=None, anchor_workers=1,
                            psf_fwhm_px=1.5, verbose=True, hook=None, aerosol=False,
-                           bin_centers_override=None, noise_seed=None, truth_cloud=None, lm_fast=True, diagnostics=False):
+                           bin_centers_override=None, noise_seed=None, truth_cloud=None, lm_fast=True, diagnostics=False,
+                           height_param="absolute", amplitude_param="linear", perturb_aerosol_prior=None):
     """Joint hi-res solve of one window.
 
     rows_by_fpa : {fpa: (row_lo, row_hi)}; the FIRST entry is the reference band (sets G).
@@ -89,6 +146,11 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
                     spectrum_jac=jac.make_spectrum_jac(absco, wide_inst, geo, solar, albedo, solver=solver))
         B[f]["eta_all"] = np.stack([gjr._eta_of(f, np.arange(1024.0), np.full(1024, float(i)))
                                     for i in B[f]["rows"]])
+
+    if height_param == "surface_relative":
+        for f in fpas:
+            B[f]["spectrum_truth"] = B[f]["spectrum"]
+            B[f]["spectrum"], B[f]["spectrum_jac"] = _wrap_relative_height(B[f]["spectrum"], B[f]["spectrum_jac"])
 
     # ---- shared eta bins and anchors ------------------------------------------------
     width_ref = len(B[ref]["rows"])
@@ -129,7 +191,7 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
         truth_spec = state_spec_from_scene(anchor_etas, free=(), fields=als.STATE_FIELDS, band_label=b["label"],
                                            surface_fields=truth_surface, surface_positions=anchor_etas,
                                            kinds=gjr.ROW_KINDS, sigmas=gjr.ROW_SIGMAS)
-        truth_spectrum = b["spectrum"]
+        truth_spectrum = b.get("spectrum_truth", b["spectrum"])
         prev_type = os.environ.get("GEOCARB_AEROSOL_TYPE")
         if truth_cloud is not None:
             truth_spectrum = gjr._make_state_spectrum(absco, b["wide_inst"], geo, solar, b["albedo"], solver="xrtm")
@@ -162,17 +224,39 @@ def solve_window_multiband(rows_by_fpa: dict, free, *, inputs=None, prior_fields
     prior_fields_resolved = {n: (fn if n in free_set else als.STATE_FIELDS[n]) for n, fn in imperfect.items()}
     surface_resolved = {n: (fn if n in free_set else als.SURFACE_FIELDS[n]) for n, fn in imperfect_surface.items()
                         if n not in strip}
+    kinds_, sigmas_ = dict(gjr.ROW_KINDS), dict(gjr.ROW_SIGMAS)
+    if amplitude_param == "log":
+        kinds_["amplitude_aerosol"] = "log"
+        sigmas_["amplitude_aerosol"] = 0.7          # ln units: a factor of ~2 (the linear row's sigma equals its prior, ~100%)
+    free_eff = tuple(free)
+    if height_param == "surface_relative" and aerosol and "height_aerosol" in free_set:
+        h_prior = imperfect_surface["height_aerosol"]
+        p_prior = imperfect["p_surface_hpa"] if "p_surface_hpa" in free_set else als.STATE_FIELDS["p_surface_hpa"]
+        surface_resolved.pop("height_aerosol", None)
+        surface_resolved["height_offset_aerosol"] = lambda x, label=None, _h=h_prior, _p=p_prior: (
+            np.asarray(_p(x), dtype=float) * 100.0 - np.asarray(_h(x, label), dtype=float))
+        kinds_["height_offset_aerosol"] = "absolute"
+        sigmas_["height_offset_aerosol"] = gjr.ROW_SIGMAS["height_aerosol"]
+        free_set = (free_set - {"height_aerosol"}) | {"height_offset_aerosol"}
+        free_eff = tuple("height_offset_aerosol" if n == "height_aerosol" else n for n in free)
     row_positions = {n: anchor_etas for n in prior_fields_resolved if n not in free_set}
     if aerosol:     # aerosol is gas-like (broad scale): free aerosol rows ride the coarse eta bins, as in the single-band driver
-        for n in ("amplitude_aerosol", "height_aerosol"):
+        for n in ("amplitude_aerosol", "height_aerosol", "height_offset_aerosol"):
             if n in free_set:
                 row_positions[n] = bin_centers
     bands = [BandRef(f, B[f]["label"]) for f in fpas]
-    mb = joint_spec_from_scene(bin_centers, bands, free=free, corr_length=None, prior_form=prior_form,
+    mb = joint_spec_from_scene(bin_centers, bands, free=free_eff, corr_length=None, prior_form=prior_form,
                                uniform=False, fields=prior_fields_resolved, surface_fields=surface_resolved,
                                surface_positions=anchor_etas, row_positions=row_positions,
-                               prior_anchor_density=None, row_sub_bin_anomaly=None, kinds=gjr.ROW_KINDS,
-                               gamma=gamma, row_bounds=gjr.ROW_BOUNDS, sigmas=gjr.ROW_SIGMAS)
+                               prior_anchor_density=None, row_sub_bin_anomaly=None, kinds=kinds_,
+                               gamma=gamma, row_bounds=gjr.ROW_BOUNDS, sigmas=sigmas_)
+    perturb_info = None
+    if perturb_aerosol_prior is not None:
+        perturb_info = _perturb_aerosol_prior(mb.joint, [n for n in ("amplitude_aerosol", "height_aerosol", "height_offset_aerosol")
+                                                         if n in free_set], perturb_aerosol_prior)
+        for nm, inf in perturb_info.items():
+            print(f"perturbed prior of {nm} (seed {perturb_aerosol_prior}): |draw|/sigma rms "
+                  f"{np.sqrt(np.mean((inf['draw'] / mb.joint[nm].sigma) ** 2)):.2f}", flush=True)
 
     # ---- per-band forwards / Jacobians on the views -------------------------------------
     pools = []          # one mutable single-element holder per band (so a hung pool can be replaced)
@@ -261,10 +345,11 @@ def main():
                          "reanalysis-like T/p/h2o/aerosol, never exactly the truth (2026-09-21)")
     ap.add_argument("--overlap", type=int, default=2)
     ap.add_argument("--aerosol-type", default=None,
-                    help="aerosol type, realistic per-band optical properties (geocarb_gert/aerosol_mie.py: Mie at each FPA's centre; "
-                         "AOD defined at O2-A): smoke | dust | sulfate | sea_salt | cloud_water. Required with --aerosol (no default). Legacy two-slot registry "
-                         "smoke (FPA1-3 share values, AOD defined at 1.6 um), also reachable as registry_<type>, kept so earlier runs "
-                         "stay reproducible. Truth and retrieval use the same set. Sets GEOCARB_AEROSOL_TYPE so workers inherit it.")
+                    help="aerosol type, per-band optical properties sourced from O'Dell et al. (2018) ACOS Fig. 3 "
+                         "(geocarb_gert/aerosol_mie.py; AOD defined at O2-A): smoke | dust | sulfate | sea_salt | cloud_water. "
+                         "Required with --aerosol (no default, and no legacy fallback scheme any more -- 2026-09-28, the "
+                         "earlier two-slot registry_<type> scheme was removed entirely). Truth and retrieval use the same "
+                         "set. Sets GEOCARB_AEROSOL_TYPE so workers inherit it.")
     ap.add_argument("--cloud-tau", type=float, default=None,
                     help="put a liquid cloud in the TRUTH (retrieval unaware): plateau optical depth at O2-A; 0 = the clear-sky "
                          "control (same XRTM truth, no cloud). Needs --cloud-p-hpa. geocarb_gert/cloud_scene.py")
@@ -280,6 +365,12 @@ def main():
                          "Nielsen gain-ratio damping, reuse of each accepted trial's linearization, stop when the predicted gain is "
                          "below 1e-5 of J. DEFAULT ON since 2026-09-26 (the old damping left the aerosol solves unconverged); "
                          "--no-lm-fast restores the earlier scheme. Results carry the _lmfast filename tag when on.")
+    ap.add_argument("--amplitude-param", choices=("linear", "log"), default="linear",
+                    help="aerosol amplitude state parameterization: linear (value = prior scale) or log (ln-amplitude, sigma 0.7)")
+    ap.add_argument("--height-param", choices=("absolute", "surface_relative"), default="absolute",
+                    help="aerosol layer height state: absolute [Pa] or offset below the surface (p_surface*100 - height)")
+    ap.add_argument("--perturb-aerosol-prior", type=int, default=None, metavar="SEED",
+                    help="draw the free aerosol rows' prior means from N(prior, Sa) with this seed (start point moves too)")
     ap.add_argument("--check-aerosol", action="store_true",
                     help="print the per-band aerosol optical properties that this command line selects, then exit "
                          "(no inputs are loaded)")
@@ -350,16 +441,17 @@ def main():
     from geocarb_gert.aerosol_defaults import (band_props_for_wavelength, resolve_aerosol_type,
                                               validate_aerosol_type)
     if a.aerosol and not a.aerosol_type:
-        ap.error("--aerosol requires --aerosol-type (2026-09-25: no silent default). Choose smoke | dust | sulfate | "
-                 "sea_salt | cloud_water for realistic per-band properties, or registry_<type> (e.g. registry_smoke) to "
-                 "reproduce the earlier two-slot runs.")
+        ap.error("--aerosol requires --aerosol-type (2026-09-25: no silent default; 2026-09-28: the legacy "
+                 "registry_<type> two-slot scheme was removed entirely -- every type is now genuinely per-band, "
+                 "sourced from O'Dell et al. 2018's ACOS optics, see aerosol_mie.py). Choose smoke | dust | "
+                 "sulfate | sea_salt | cloud_water.")
     if a.aerosol_type:
         validate_aerosol_type(a.aerosol_type)
         if not a.aerosol:
             ap.error("--aerosol-type has no effect without --aerosol")
         os.environ["GEOCARB_AEROSOL_TYPE"] = a.aerosol_type
     if a.aerosol:
-        # what the forward model will actually use per band: (ssa, g, tau relative to the 1.6 um reference)
+        # what the forward model will actually use per band: (ssa, g, tau relative to the O2-A reference band)
         from geocarb_gert.aerosol_defaults import amplitude_reference_um
         print(f"aerosol type: {resolve_aerosol_type()} (amplitude_aerosol / scene AOD defined at {amplitude_reference_um():.3f} um)", flush=True)
         for f in fpas:
@@ -378,15 +470,18 @@ def main():
                       edge_km=a.cloud_edge_km)
     res = solve_window_multiband(rows, a.free.split(","), noise_seed=a.noise_seed, truth_cloud=cloud, lm_fast=a.lm_fast, diagnostics=a.diagnostics, g_ratio=a.g_ratio, anchor_density=a.anchor_density,
                                  anchor_mode=a.anchor_mode, solver=a.solver, anchor_workers=a.anchor_workers, prior_fields=a.prior_fields,
-                                 aerosol=a.aerosol, bin_centers_override=geom_bin_centers)
+                                 aerosol=a.aerosol, bin_centers_override=geom_bin_centers,
+                                 height_param=a.height_param, amplitude_param=a.amplitude_param,
+                                 perturb_aerosol_prior=a.perturb_aerosol_prior)
     name = f"mb_fpa{'-'.join(map(str, fpas))}_" + "_".join(f"r{f}-{rows[f][0]}-{rows[f][1]}" for f in fpas) \
         + f"_free-{'-'.join(t.split('_')[0] for t in a.free.split(','))}_{a.anchor_mode}_g{a.g_ratio if a.g_ratio is not None else 'cfg'}_etaslit" \
         + ("" if a.prior_fields == "structural" else f"_prior-{a.prior_fields}") + ("_aero" if a.aerosol else "") \
-        + ("_geomcfg" if a.geometry_config else "") + (f"_{a.aerosol_type}" if (a.aerosol and a.aerosol_type) else "") + (f"_noise{a.noise_seed}" if a.noise_seed is not None else "") + (f"_cloud-tau{a.cloud_tau:g}-p{a.cloud_p_hpa:g}" if a.cloud_tau is not None else "") + ("_lmfast" if a.lm_fast else "")
+        + ("_geomcfg" if a.geometry_config else "") + (f"_{a.aerosol_type}" if (a.aerosol and a.aerosol_type) else "") + (f"_noise{a.noise_seed}" if a.noise_seed is not None else "") + ("_hrel" if a.height_param != "absolute" else "") + ("_alog" if a.amplitude_param == "log" else "") + (f"_pert{a.perturb_aerosol_prior}" if a.perturb_aerosol_prior is not None else "") + (f"_cloud-tau{a.cloud_tau:g}-p{a.cloud_p_hpa:g}" if a.cloud_tau is not None else "") + ("_lmfast" if a.lm_fast else "")
     from geocarb_gert.aerosol_defaults import resolve_aerosol_type
     res["aerosol_type"] = resolve_aerosol_type() if a.aerosol else None
     res["truth_cloud"] = None if cloud is None else dict(vars(cloud))
     res["lm_fast"] = bool(a.lm_fast)
+    res["height_param"], res["amplitude_param"], res["perturb_aerosol_prior"] = a.height_param, a.amplitude_param, a.perturb_aerosol_prior
     out = Path(a.out) if a.out else REPO / "results/realistic_prior/multiband" / f"{name}.pkl"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "wb") as fh:

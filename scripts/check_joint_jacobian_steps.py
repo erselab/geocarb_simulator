@@ -1,4 +1,5 @@
-"""Joint-state Jacobian vs finite difference for the aerosol rows, with a finite-difference step sweep (2026-09-26).
+"""(--hrel/--alog variant of the check below: new rows height_offset_aerosol / log amplitude.)
+Joint-state Jacobian vs finite difference for the aerosol rows, with a finite-difference step sweep (2026-09-26).
 
 Per-anchor Jacobians (check_aerosol_jacobians.py) are exact, yet at the last iterate of the 4-band solve the JOINT height column was
 51% off. This builds the joint problem for ONE band (fast) and compares analytic columns with central FD at several step sizes, at
@@ -20,11 +21,16 @@ import gd_multiband_window as gmw  # noqa: E402
 ap = argparse.ArgumentParser()
 ap.add_argument("--fpa", type=int, default=0)
 ap.add_argument("--rows", default="378-400")
+ap.add_argument("--hrel", action="store_true")
+ap.add_argument("--alog", action="store_true")
 ap.add_argument("--anchor-workers", type=int, default=16)
 a = ap.parse_args()
 os.environ["GEOCARB_AEROSOL_TYPE"] = "smoke"
 lo, hi = [int(t) for t in a.rows.split("-")]
 FREE = "co2_ppm,p_surface_hpa,h2o_surface_vmr,t_offset_k,albedo,amplitude_aerosol,height_aerosol".split(",")
+
+
+HN = "height_offset_aerosol" if a.hrel else "height_aerosol"
 
 
 def hook(P):
@@ -38,13 +44,13 @@ def hook(P):
                      ("aerosol moved (height +3000 Pa, amp x1.5)", None)):
         x = x0.copy()
         if mod is None:
-            hs, as_ = sl["height_aerosol"], sl["amplitude_aerosol"]
-            x[hs] = x0[hs] + 3000.0
-            x[as_] = x0[as_] * 1.5
+            hs, as_ = sl[HN], sl["amplitude_aerosol"]
+            x[hs] = x0[hs] + (-3000.0 if a.hrel else 3000.0)
+            x[as_] = x0[as_] + 0.4 if a.alog else x0[as_] * 1.5
         t0 = time.time()
         y, K, _ = lin(x)
         print(f"\n== {tag}: linearization {time.time() - t0:.0f} s", flush=True)
-        for nm, off in (("height_aerosol", 11), ("amplitude_aerosol", 11), ("p_surface_hpa", 11), ("albedo", 70)):
+        for nm, off in ((HN, 11), ("amplitude_aerosol", 11), ("p_surface_hpa", 11), ("albedo", 70)):
             key = nm if nm != "albedo" else albn
             k = sl[key].start + min(off, sl[key].stop - sl[key].start - 1)
             an = K[:, k]
@@ -61,4 +67,4 @@ def hook(P):
 
 
 gmw.solve_window_multiband({a.fpa: (lo, hi)}, FREE, g_ratio=1.0, anchor_mode="cover", anchor_workers=a.anchor_workers, hook=hook,
-                           verbose=False, aerosol=True, prior_fields="realistic", solver="xrtm")
+                           verbose=False, aerosol=True, height_param="surface_relative" if a.hrel else "absolute", amplitude_param="log" if a.alog else "linear", prior_fields="realistic", solver="xrtm")

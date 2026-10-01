@@ -35,9 +35,7 @@ from gert.forward_model import ForwardModel
 from gert.rt_solver import SingleScatterSolver, XRTMSolver
 
 from . import along_slit_scene as als
-from .aerosol_defaults import (aerosol_scalars_for, aerosol_band_props,
-                               band_slot_for_wavelength_um, resolve_aerosol_type,
-                               band_props_for_wavelength)
+from .aerosol_defaults import band_props_for_wavelength
 
 #: 2026-09-15 (Phase 2 of the XRTM integration plan): the one place a
 #: `solver="single_scatter"|"xrtm"` string resolves to an actual gert
@@ -111,17 +109,15 @@ class SpectrumResult:
 
 
 def aerosol_band_for(wide_inst, aerosol_type: str) -> tuple[float, float, float]:
-    """`(ssa, g, tau_scale)` for the band of `wide_inst`'s first window
-    (2026-09-21: per-band GERT scalars; O2-A uses registry slot 0 with tau
-    scaled by qext_norm[0]/qext_norm[1], every longer-wavelength band slot 1
-    and scale 1 -- so FPA1-3 results are unchanged)."""
+    """`(ssa, g, tau_scale)` for the band of `wide_inst`'s first window -- genuinely distinct per FPA, from
+    `aerosol_mie.AEROSOL_TYPES` (literature-sourced; see that module's docstring). `aerosol_type` must resolve
+    to a name in `aerosol_defaults.REGISTRY_TYPES` -- `band_props_for_wavelength` raises otherwise."""
     wn = np.asarray(wide_inst.windows[0].wn_hires, dtype=float)
-    # 2026-09-25: 'smoke_mie' = per-FPA Mie properties (aerosol_mie.py), all four bands distinct
     return band_props_for_wavelength(aerosol_type, 1e4 / float(wn.mean()))
 
 
 def _build_aerosol_kwargs(surface: Optional[dict], n_wn: int, geo,
-                          aerosol_type: str, band_props=None) -> dict:
+                          band_props: tuple[float, float, float]) -> dict:
     """`{}` when neither `tau_aerosol` nor `height_aerosol` is present in
     `surface` -- matches every existing call site's `.get(...)` convention:
     `amplitude_aerosol=None` is treated the same as `gert.ForwardModel.run`'s
@@ -146,12 +142,8 @@ def _build_aerosol_kwargs(surface: Optional[dict], n_wn: int, geo,
     thickness_aer = (surface or {}).get("thickness_aerosol", als.AEROSOL_THICKNESS_PA)
     if amp_aer is None:
         return {}
-    if band_props is None:
-        ssa, g, qext_norm = aerosol_scalars_for(aerosol_type)
-        tau_scale = 1.0
-    else:
-        ssa, g, tau_scale = band_props
-        qext_norm = 1.0
+    ssa, g, tau_scale = band_props
+    qext_norm = 1.0
     tau_aer = float(amp_aer) * float(thickness_aer) * np.sqrt(2.0 * np.pi) * tau_scale
     p_aer_val = als.aerosol_phase_hg(g, np.cos(geo.scattering_angle))
     return dict(
@@ -197,8 +189,11 @@ def simulate_spectrum(atm_params: dict, surface: Optional[dict], absco, wide_ins
     alb = float(surface.get("albedo", 0.0))
     slope = float(surface.get("albedo_slope", 0.0))
     n_wn = len(wide_inst.windows[0].wn_hires)
-    aer_kwargs = _build_aerosol_kwargs(surface, n_wn, geo, aerosol_type,
-                                       band_props=aerosol_band_for(wide_inst, aerosol_type))
+    # `aerosol_band_for` now RAISES for aerosol_type=None (2026-09-28: no more silent default) -- only call it
+    # when aerosol is actually present in this surface, exactly matching _build_aerosol_kwargs's own early
+    # return, so a no-aerosol run never needs a valid aerosol_type at all.
+    aer_kwargs = (_build_aerosol_kwargs(surface, n_wn, geo, band_props=aerosol_band_for(wide_inst, aerosol_type))
+                 if surface.get("amplitude_aerosol") is not None else {})
 
     fm = ForwardModel(atm, absco, wide_inst, geo,
                       solver=_build_solver(solver, jacobians),
@@ -246,9 +241,13 @@ def spectrum_and_jacobian(atm_params: dict, rows, absco, wide_inst, geo, solar,
     # recomputed (not re-derived from `res`) since `p_surface_dI_dparam`'s
     # own RT-fallback FD path (jacobians.py) needs it as a plain kwarg to
     # rebuild a perturbed `ForwardModel.run()` call, same as before.
-    a_ssa, a_g, a_scale = aerosol_band_for(wide_inst, aerosol_type)
-    tau_aer = (float(amp_aer) * float(thickness_aer) * np.sqrt(2.0 * np.pi) * a_scale
-              if amp_aer is not None else None)
+    # `aerosol_band_for` now RAISES for aerosol_type=None (2026-09-28: no more silent default) -- only call it
+    # when aerosol is actually free/present, so a no-aerosol row Jacobian never needs a valid aerosol_type.
+    if amp_aer is not None:
+        a_ssa, a_g, a_scale = aerosol_band_for(wide_inst, aerosol_type)
+        tau_aer = float(amp_aer) * float(thickness_aer) * np.sqrt(2.0 * np.pi) * a_scale
+    else:
+        a_ssa = a_g = a_scale = tau_aer = None
 
     d = {}
     for row in rows:
