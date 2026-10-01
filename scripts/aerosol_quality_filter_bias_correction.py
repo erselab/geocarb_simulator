@@ -253,3 +253,29 @@ fig.tight_layout()
 out2 = REPO / "plots/aerosol_quality_filter_along_slit.png"
 fig.savefig(out2, dpi=140, bbox_inches="tight")
 print(f"saved {out2}")
+
+# ---- same along-slit view, but for the ERROR (retrieved - truth) rather than the raw value -- the zero
+# line replaces "truth", and the error magnitude/structure (rather than tracking a large dynamic-range
+# curve) is what's actually diagnostic of where/how much the filter and correction help.
+fig, axes = plt.subplots(len(TARGETS), 1, figsize=(13, 3.2 * len(TARGETS)), sharex=True)
+for ax, name in zip(axes, TARGETS):
+    r = results[name]
+    xs = x_test[order]
+    before_s = r["y_te"][order]            # pre-filter error
+    corrected_s = r["y_corr"][order]        # bias-corrected error (full set)
+    keep_s = r["keep_te"][order]
+
+    ax.axhline(0.0, color="k", lw=1.0, alpha=0.6, zorder=5)
+    ax.plot(xs, before_s, color="tab:red", lw=0.9, alpha=0.8, label="pre-filter error")
+    ax.scatter(xs[keep_s], before_s[keep_s], color="tab:green", s=5, alpha=0.9, zorder=4,
+              label="post-filter error (retained only)")
+    ax.plot(xs, corrected_s, color="tab:blue", lw=0.9, alpha=0.8, label="bias-corrected error")
+    ax.set_ylabel(f"{name} error")
+    ax.legend(fontsize=8, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.12 if ax is axes[-1] else 1.25))
+axes[-1].set_xlabel("along-slit position [km]")
+fig.suptitle("Quality filter + bias correction: ERROR along the slit -- sulfate, noiseless (held-out test), "
+            "correction trained on sulfate+noise1", y=1.01)
+fig.tight_layout()
+out3 = REPO / "plots/aerosol_quality_filter_along_slit_error.png"
+fig.savefig(out3, dpi=140, bbox_inches="tight")
+print(f"saved {out3}")
