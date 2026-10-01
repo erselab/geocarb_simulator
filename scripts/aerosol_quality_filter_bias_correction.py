@@ -152,74 +152,127 @@ def cv_r2(X1, y, k=5, seed=0):
     return 1.0 - sse / sst
 
 
-print(f"{'target':10s} {'train CV R2':>12s} {'apply?':>7s} {'rms before':>12s} {'rms bias-corr':>14s} {'%improved':>10s}  coefficients ({', '.join(COV_NAMES)}, intercept)")
-results = {}
-CV_R2_GATE = 0.05        # below this, the regression is not meaningfully predictive on TRAIN itself -- don't apply it
-for name in TARGETS:
-    y_tr, y_te = Y_train[name], Y_test[name]
-    r2 = cv_r2(X_train1, y_tr)
-    coef, *_ = np.linalg.lstsq(X_train1, y_tr, rcond=None)
-    apply_corr = r2 >= CV_R2_GATE
-    pred_te = X_test1 @ coef if apply_corr else np.zeros_like(y_te)
-    y_corr = y_te - pred_te
-    rms_before = float(np.sqrt(np.mean(y_te ** 2)))
-    rms_after = float(np.sqrt(np.mean(y_corr ** 2)))
-    pct = 100.0 * (1.0 - rms_after / rms_before)
-    results[name] = dict(y_te=y_te, y_corr=y_corr, coef=coef, rms_before=rms_before, rms_after=rms_after, cv_r2=r2, applied=apply_corr)
-    coef_s = ", ".join(f"{c:+.3g}" for c in coef)
-    print(f"{name:10s} {r2:12.3f} {'yes' if apply_corr else 'NO':>7s} {rms_before:12.4g} {rms_after:14.4g} {pct:9.1f}%  [{coef_s}]")
-
-# ---- quality filter: thresholds on |dp| and chi2_red fit on TRAIN (targeting a retained-fraction-vs-RMS
-# tradeoff), applied to TEST (the noiseless arm)
-print(f"\n{'target':10s} {'dp cut':>10s} {'retained':>10s} {'rms before':>12s} {'rms filtered':>13s} {'%improved':>10s}")
+# ---- quality filter FIRST: thresholds on |dp| and chi2_red fit on TRAIN. Computed before the regression
+# (reordered 2026-10-01, user: "did you train the bias correction only on the filtered data?" -- it hadn't
+# been; ACOS itself fits its own bias correction only on quality-filtered soundings, precisely so outlier/
+# bad-quality cases don't skew the least-squares fit via high leverage).
+#
+# **Filter design criterion (user, 2026-10-01): "the filtering should be done to restrict the relationships
+# between the error and covariates to a linear regime"** -- NOT simply whichever threshold minimizes train
+# RMS (the earlier version). A linear bias correction is only a valid model where the true error-vs-covariate
+# relationship actually IS close to linear; applying it outside that regime is model misspecification, not
+# just "a bit more uncertain" -- exactly what made the out-of-domain full-set correction above 17.2% WORSE
+# for CO2. So the threshold search below picks the MOST INCLUSIVE (dp_cut, chi2_cut) pair for which a linear
+# fit's own residuals show no remaining trend against dp or dp^2 within the retained range (|corr(resid, dp)|
+# and |corr(resid, dp^2)| both below `LIN_TOL`) -- a direct linearity diagnostic, not an RMS-outcome proxy for
+# one. Falls back to the narrowest (most conservative) grid point if no cut passes the diagnostic.
+LIN_TOL = 0.15             # |corr(residual, dp-or-dp^2)| must stay below this within the retained regime
+print(f"{'target':10s} {'dp cut':>10s} {'train retained':>14s} {'test retained':>14s}  (linear-regime filter)")
 dp_tr, chi2_tr = Xf_train["dp"], Xf_train["chi2_red"]
 dp_te, chi2_te = Xf_test["dp"], Xf_test["chi2_red"]
+filter_info = {}
 for name in TARGETS:
-    y_tr, y_te = Y_train[name], Y_test[name]
-    best = None
+    y_tr = Y_train[name]
+    best = None          # most inclusive (highest retained fraction) cut that still passes the linearity check
+    fallback = None       # narrowest cut tried, in case nothing passes
     for dp_q in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0):
         for c2_q in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0):
             dp_cut = np.quantile(np.abs(dp_tr), dp_q)
             c2_cut = np.quantile(chi2_tr, c2_q)
             keep_tr = (np.abs(dp_tr) <= dp_cut) & (chi2_tr <= c2_cut)
-            if keep_tr.mean() < 0.6:
+            if keep_tr.sum() < 10:
                 continue
-            rms = float(np.sqrt(np.mean(y_tr[keep_tr] ** 2)))
-            if best is None or rms < best[0]:
-                best = (rms, dp_cut, c2_cut)
-    _, dp_cut, c2_cut = best
+            dp_k, y_k = dp_tr[keep_tr], y_tr[keep_tr]
+            A = np.column_stack([dp_k, np.ones(dp_k.size)])
+            coef, *_ = np.linalg.lstsq(A, y_k, rcond=None)
+            resid = y_k - A @ coef
+            c1 = abs(np.corrcoef(resid, dp_k)[0, 1]) if np.std(dp_k) > 0 else 0.0
+            c2v = abs(np.corrcoef(resid, dp_k ** 2)[0, 1]) if np.std(dp_k) > 0 else 0.0
+            linear_ok = (c1 < LIN_TOL) and (c2v < LIN_TOL)
+            if fallback is None or keep_tr.mean() < fallback[0]:
+                fallback = (keep_tr.mean(), dp_cut, c2_cut)
+            if linear_ok and (best is None or keep_tr.mean() > best[0]):
+                best = (keep_tr.mean(), dp_cut, c2_cut)
+    _, dp_cut, c2_cut = best if best is not None else fallback
+    keep_tr = (np.abs(dp_tr) <= dp_cut) & (chi2_tr <= c2_cut)
     keep_te = (np.abs(dp_te) <= dp_cut) & (chi2_te <= c2_cut)
+    filter_info[name] = dict(dp_cut=dp_cut, c2_cut=c2_cut, keep_tr=keep_tr, keep_te=keep_te)
+    print(f"{name:10s} {dp_cut:10.3g} {keep_tr.mean()*100:13.1f}% {keep_te.mean()*100:13.1f}%"
+         f"  {'(linear OK)' if best is not None else '(fallback -- no cut passed)'}")
+
+# ---- bias correction: fit ONLY on the filtered (quality-passing) TRAIN bins. Real pipeline order (both
+# here and in ACOS itself): FILTER FIRST, then correct only the survivors -- the correction is fit on, and
+# therefore only valid within, the "good" (small-dp) covariate regime the filter defines. Applying it to a
+# bin the filter would have rejected is extrapolation outside where it was ever fit, and (checked directly,
+# 2026-10-01, user: "did you train the bias correction only on the filtered data?") makes CO2 actively WORSE
+# (-17.2% applied to the full unfiltered test set) even though the same regression, applied only to the
+# filtered test bins it's actually valid for, still helps.
+print(f"\n{'target':10s} {'train CV R2':>12s} {'apply?':>7s} coefficients ({', '.join(COV_NAMES)}, intercept)")
+results = {}
+CV_R2_GATE = 0.05        # below this, the regression is not meaningfully predictive on TRAIN itself -- don't apply it
+for name in TARGETS:
+    keep_tr = filter_info[name]["keep_tr"]
+    y_tr_all, y_te = Y_train[name], Y_test[name]
+    X_tr_f, y_tr_f = X_train1[keep_tr], y_tr_all[keep_tr]     # filtered training subset only
+    r2 = cv_r2(X_tr_f, y_tr_f)
+    coef, *_ = np.linalg.lstsq(X_tr_f, y_tr_f, rcond=None)
+    apply_corr = r2 >= CV_R2_GATE
+    results[name] = dict(y_te=y_te, coef=coef, cv_r2=r2, applied=apply_corr)
+    coef_s = ", ".join(f"{c:+.3g}" for c in coef)
+    print(f"{name:10s} {r2:12.3f} {'yes' if apply_corr else 'NO':>7s}  [{coef_s}]")
+
+print(f"\n{'target':10s} {'dp cut':>10s} {'retained':>10s} {'rms before':>12s} {'rms filtered':>13s} {'%improved':>10s}")
+for name in TARGETS:
+    y_te = Y_test[name]
+    keep_te = filter_info[name]["keep_te"]
     rms_before = float(np.sqrt(np.mean(y_te ** 2)))
     rms_after = float(np.sqrt(np.mean(y_te[keep_te] ** 2))) if keep_te.any() else float("nan")
     pct = 100.0 * (1.0 - rms_after / rms_before)
-    print(f"{name:10s} {dp_cut:10.3g} {keep_te.mean()*100:9.1f}% {rms_before:12.4g} {rms_after:13.4g} {pct:9.1f}%")
+    print(f"{name:10s} {filter_info[name]['dp_cut']:10.3g} {keep_te.mean()*100:9.1f}% {rms_before:12.4g} {rms_after:13.4g} {pct:9.1f}%")
     results[name]["keep_te"] = keep_te
+    results[name]["rms_before"] = rms_before
 
-print(f"\n{'target':10s} {'rms before':>12s} {'rms filt+corr':>14s} {'%improved':>10s} {'retained':>10s}")
+# ---- real combined pipeline: filter TEST, then correct ONLY the survivors. `y_corr` is a full-length array
+# with the correction applied where valid (retained bins) and left AS-IS (uncorrected) where not -- the
+# filter already drops those from any RMS/plot that only looks at retained bins; keeping them as raw rather
+# than (invalidly) corrected values if a caller ever looks at the unfiltered array by mistake.
+print(f"\n{'target':10s} {'rms before':>12s} {'rms filt+corr':>14s} {'%improved':>10s} {'retained':>10s}  (out-of-domain full-set correction, NOT the real pipeline, for comparison: %improved)")
 for name in TARGETS:
     r = results[name]
-    keep = r["keep_te"]
-    rms_after = float(np.sqrt(np.mean(r["y_corr"][keep] ** 2)))
+    y_te, keep = r["y_te"], r["keep_te"]
+    y_corr = y_te.copy()
+    if r["applied"]:
+        y_corr[keep] = y_te[keep] - X_test1[keep] @ r["coef"]
+    r["y_corr"] = y_corr
+    rms_after = float(np.sqrt(np.mean(y_corr[keep] ** 2))) if keep.any() else float("nan")
     pct = 100.0 * (1.0 - rms_after / r["rms_before"])
-    print(f"{name:10s} {r['rms_before']:12.4g} {rms_after:14.4g} {pct:9.1f}% {keep.mean()*100:9.1f}%")
+    # out-of-domain comparison number only (never applied/plotted): the full-set correction, for the record
+    pred_full = X_test1 @ r["coef"] if r["applied"] else np.zeros_like(y_te)
+    rms_full_corr = float(np.sqrt(np.mean((y_te - pred_full) ** 2)))
+    pct_full = 100.0 * (1.0 - rms_full_corr / r["rms_before"])
+    print(f"{name:10s} {r['rms_before']:12.4g} {rms_after:14.4g} {pct:9.1f}% {keep.mean()*100:9.1f}%  ({pct_full:+.1f}%)")
     r["rms_filt_corr"] = rms_after
 
 fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 for ax, name in zip(axes, TARGETS):
     r = results[name]
+    keep = r["keep_te"]
+    y_filt_only = r["y_te"][keep]                 # filtered, NOT corrected (the filter's own contribution alone)
+    y_filt_corr = r["y_corr"][keep]                # filtered AND corrected -- the real, valid combined pipeline
     lim = np.percentile(np.abs(r["y_te"]), 99) * 1.1
     lim = lim if lim > 0 else 1.0
     bins = np.linspace(-lim, lim, 41)
     ax.hist(r["y_te"], bins=bins, histtype="step", lw=1.6, density=True, color="tab:red",
            label=f"before: rms {r['rms_before']:.3g}")
-    ax.hist(r["y_corr"], bins=bins, histtype="step", lw=1.6, density=True, color="tab:blue",
-           label=f"bias-corrected: rms {r['rms_after']:.3g}")
-    ax.hist(r["y_corr"][r["keep_te"]], bins=bins, histtype="step", lw=1.6, density=True, color="tab:green",
+    ax.hist(y_filt_only, bins=bins, histtype="step", lw=1.6, density=True, color="tab:orange", ls="--",
+           label=f"filtered only: rms {np.sqrt(np.mean(y_filt_only**2)):.3g}")
+    ax.hist(y_filt_corr, bins=bins, histtype="step", lw=1.6, density=True, color="tab:green",
            label=f"filtered+corrected: rms {r['rms_filt_corr']:.3g}")
     ax.axvline(0.0, color="k", lw=0.8, alpha=0.5)
     ax.set_title(name)
     ax.legend(fontsize=8)
-fig.suptitle("ACOS-style quality filter + bias correction -- trained on sulfate+noise1, evaluated on noiseless sulfate")
+fig.suptitle("ACOS-style quality filter + bias correction -- trained on sulfate+noise1 (filter THEN correct, "
+            "both fit on filtered train only), evaluated on noiseless sulfate")
 fig.tight_layout()
 out = REPO / "plots/aerosol_quality_filter_bias_correction.png"
 fig.savefig(out, dpi=140, bbox_inches="tight")
@@ -234,16 +287,19 @@ for ax, name in zip(axes, TARGETS):
     xs = x_test[order]
     truth_s = T_test[name][order]
     before_s = V_test[name][order]                       # pre-filter: every retrieved value, uncorrected
-    corrected_s = (r["y_corr"] + T_test[name])[order]     # bias-corrected: full set, shifted by -predicted bias
+    corrected_s = (r["y_corr"] + T_test[name])[order]     # valid only at kept bins -- see keep_s below
     keep_s = r["keep_te"][order]
 
     ax.plot(xs, truth_s, color="k", lw=1.2, label="truth", zorder=5)
     ax.plot(xs, before_s, color="tab:red", lw=0.9, alpha=0.8, label="pre-filter (retrieved)")
-    # scatter, not a connected line: `keep_s` has real gaps (filtered-out bins), and a line would bridge
-    # straight across them -- a misleading artifact, not real data.
-    ax.scatter(xs[keep_s], before_s[keep_s], color="tab:green", s=5, alpha=0.9, zorder=4,
-              label="post-filter (retained only)")
-    ax.plot(xs, corrected_s, color="tab:blue", lw=0.9, alpha=0.8, label="bias-corrected")
+    # scatter, not a connected line, for BOTH filtered series: `keep_s` has real gaps (filtered-out bins),
+    # and a line would bridge straight across them -- a misleading artifact, not real data. The correction
+    # is only ever valid at kept bins (fit on, and only applied to, the filtered regime) -- plotting it
+    # elsewhere would be the same out-of-domain extrapolation error this whole restructuring fixed.
+    ax.scatter(xs[keep_s], before_s[keep_s], color="tab:orange", s=5, alpha=0.9, zorder=3,
+              label="post-filter (retained, uncorrected)")
+    ax.scatter(xs[keep_s], corrected_s[keep_s], color="tab:blue", s=5, alpha=0.9, zorder=4,
+              label="post-filter + bias-corrected")
     ax.set_ylabel(name)
     ax.legend(fontsize=8, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.12 if ax is axes[-1] else 1.25))
 axes[-1].set_xlabel("along-slit position [km]")
@@ -262,14 +318,15 @@ for ax, name in zip(axes, TARGETS):
     r = results[name]
     xs = x_test[order]
     before_s = r["y_te"][order]            # pre-filter error
-    corrected_s = r["y_corr"][order]        # bias-corrected error (full set)
+    corrected_s = r["y_corr"][order]        # valid only at kept bins -- see keep_s below
     keep_s = r["keep_te"][order]
 
     ax.axhline(0.0, color="k", lw=1.0, alpha=0.6, zorder=5)
     ax.plot(xs, before_s, color="tab:red", lw=0.9, alpha=0.8, label="pre-filter error")
-    ax.scatter(xs[keep_s], before_s[keep_s], color="tab:green", s=5, alpha=0.9, zorder=4,
-              label="post-filter error (retained only)")
-    ax.plot(xs, corrected_s, color="tab:blue", lw=0.9, alpha=0.8, label="bias-corrected error")
+    ax.scatter(xs[keep_s], before_s[keep_s], color="tab:orange", s=5, alpha=0.9, zorder=3,
+              label="post-filter error (retained, uncorrected)")
+    ax.scatter(xs[keep_s], corrected_s[keep_s], color="tab:blue", s=5, alpha=0.9, zorder=4,
+              label="post-filter + bias-corrected error")
     ax.set_ylabel(f"{name} error")
     ax.legend(fontsize=8, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.12 if ax is axes[-1] else 1.25))
 axes[-1].set_xlabel("along-slit position [km]")
